@@ -112,6 +112,50 @@ class TestWebSocketHandshakeOnRealServer:
                 assert client.recv(timeout=5) == "hello"
 
 
+class TestUnexpectedExceptionOnRealServer:
+    """本物の uvicorn の上での、想定外の例外の扱い。"""
+
+    def test_should_not_let_uvicorn_record_the_exception_message(self, settings: Settings, capsys):
+        """
+        【テスト対象】想定外の例外の変換(本物の uvicorn)
+        【テスト内容】会議の内容を含む文面の例外を起こす経路を、本物の uvicorn の上で呼ぶ。
+                      ログの設定は、起動のときと同じにする
+        【期待結果】500 で共通の形(SYSTEM_UNEXPECTED_ERROR)が返り、出力のどこにも例外の文面が
+                    現れないこと。uvicorn の「Exception in ASGI application」の記録も出ない。
+                    例外が外へ伝わると、uvicorn が文面つきのスタックトレースを記録するため、
+                    変換する場所で止めていることの確認
+        """
+        import json
+        import urllib.request
+
+        from conftest import add_probe_route
+        from meeting_interpreter.logs import configure_logging
+
+        secret = "The summary says we will fire Tanaka-san on Friday."
+        configure_logging("info")
+        app = create_app(settings)
+
+        async def endpoint() -> None:
+            raise ValueError(secret)
+
+        add_probe_route(app, "/api/probe", endpoint)
+
+        opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+        with _running_server(app) as port:
+            try:
+                opener.open(f"http://{LOOPBACK}:{port}/api/probe", timeout=5)
+            except urllib.error.HTTPError as error:
+                status = error.code
+                body = json.loads(error.read())
+
+        captured = capsys.readouterr()
+        assert status == 500
+        assert body["code"] == "SYSTEM_UNEXPECTED_ERROR"
+        assert secret not in captured.out + captured.err
+        assert "Exception in ASGI application" not in captured.out
+        assert captured.err == ""
+
+
 def test_should_serve_websocket_with_the_implementation_named_in_the_entrypoint(
     settings: Settings,
 ):

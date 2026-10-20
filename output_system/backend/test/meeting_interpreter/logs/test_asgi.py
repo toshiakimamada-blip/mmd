@@ -4,9 +4,9 @@ import json
 import re
 
 from fastapi import FastAPI, WebSocket
-from fastapi.routing import APIRoute
 from fastapi.testclient import TestClient
 
+from conftest import add_probe_route
 from meeting_interpreter.app import create_app
 from meeting_interpreter.logs import current_trace_id, log_processing
 from meeting_interpreter.logs.asgi import TraceIdMiddleware
@@ -86,8 +86,7 @@ def test_should_be_registered_in_the_real_app(settings: Settings, capsys):
         log_processing("probe_handled")
         return {"status": "ok"}
 
-    # 「存在しない経路」の受け皿より先に当たるよう、先頭へ足す。
-    app.router.routes.insert(0, APIRoute("/api/probe", handler, methods=["GET"]))
+    add_probe_route(app, "/api/probe", handler)
 
     with TestClient(app) as client:
         client.get("/api/probe")

@@ -7,6 +7,8 @@ from dataclasses import dataclass
 from pathlib import Path
 
 import pytest
+from fastapi import FastAPI
+from fastapi.routing import APIRoute, APIWebSocketRoute
 from fastapi.testclient import TestClient
 
 from meeting_interpreter.app import create_app
@@ -100,6 +102,26 @@ def client(settings: Settings) -> Iterator[TestClient]:
     """アプリ全体を組み立てて、HTTP と WebSocket で呼べるクライアントを返す。"""
     with TestClient(create_app(settings)) as test_client:
         yield test_client
+
+
+def add_probe_route(app: FastAPI, path: str, endpoint, methods: list[str] | None = None) -> None:
+    """テスト用の経路を、アプリの先頭へ足す。
+
+    実際のアプリは、末尾に「存在しない経路」の受け皿と配信部を持つ。テスト用の経路は、
+    それらより先に当たるよう、先頭へ差し込む。実際のアプリの組み立て(ミドルウェアと例外の処理)を
+    通したまま、経路の中で起こしたい出来事(例外など)を起こすために使う。
+
+    Args:
+        app: create_app が返したアプリ。
+        path: 足す経路。
+        endpoint: 経路の処理。
+        methods: HTTP のメソッド。省略すると GET。
+            WebSocket の経路は、methods に ["WEBSOCKET"] を渡す。
+    """
+    if methods == ["WEBSOCKET"]:
+        app.router.routes.insert(0, APIWebSocketRoute(path, endpoint))
+    else:
+        app.router.routes.insert(0, APIRoute(path, endpoint, methods=methods or ["GET"]))
 
 
 @dataclass(frozen=True)
