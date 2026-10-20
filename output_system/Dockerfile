@@ -62,6 +62,8 @@ RUN set -eu; \
 FROM base AS frontend-build
 
 # Node.js 24 系（LTS）。npm 11.10 以上が同梱されている版を選ぶ（frontend/.npmrc の min-release-age に必要）。
+# tools/with-pinned-node.sh も、下の 3 つの ARG（NODE_VERSION・NODE_SHA256_X64・NODE_SHA256_ARM64）を
+# 読む。開発用コンテナでも同じ版の Node.js で依存を足すため。ARG の名前を変えるときは、スクリプトも直す。
 ARG NODE_VERSION=24.21.0
 # 配布元の SHASUMS256.txt に載っている、アーカイブの SHA-256。版を上げるときは、一緒に更新する。
 ARG NODE_SHA256_X64=fd8e59d5a511510f6a298afb548f18c7d2b1be404d8b4a27d94fbe49f56cb2d6
