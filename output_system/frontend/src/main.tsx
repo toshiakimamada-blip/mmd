@@ -1,7 +1,9 @@
 import { StrictMode } from 'react';
 import { createRoot } from 'react-dom/client';
+import { RouterProvider } from 'react-router/dom';
 
-import { APP_NAME } from './appInfo';
+import { createAppRouter } from './router';
+import './styles/frame.css';
 
 const root = document.getElementById('root');
 if (root === null) {
@@ -9,9 +11,8 @@ if (root === null) {
   throw new Error('#root が見つかりません');
 }
 
-// 画面の骨組みは、続く Task で作る。ここでは、ビルドと配信が通ることの確認用に名前だけを出す。
 createRoot(root).render(
   <StrictMode>
-    <h1>{APP_NAME}</h1>
+    <RouterProvider router={createAppRouter()} />
   </StrictMode>,
 );

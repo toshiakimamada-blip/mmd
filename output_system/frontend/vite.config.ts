@@ -28,6 +28,8 @@ export default defineConfig({
     coverage: {
       provider: 'v8',
       include: ['src/**/*.{ts,tsx}'],
+      // main.tsx は、画面を DOM へつなぐ起動の組み立てだけを持つ。画面を通したテストで確かめる。
+      exclude: ['src/main.tsx'],
       reporter: ['text', 'text-summary'],
     },
   },

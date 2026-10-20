@@ -1,0 +1,113 @@
+/*
+ * 共通の枠（ヘッダ・お知らせ帯の領域・画面ごとの領域）の見た目。
+ *
+ * 見た目の方針
+ * - 会議中に字幕を読み続けるアプリなので、読みやすさを最優先にする。装飾は 1 か所に絞る。
+ * - 1 つだけ印を持たせる。画面の名前の左に置く黄色の棒は、放送の字幕（下三分の一の帯）の
+ *   見た目を借りたもので、「いま見ている画面」を示す。ほかは落ち着いた色にそろえる。
+ * - 書体は、OS に入っている日本語の書体だけを使う。外部の CDN やフォントは読み込まない。
+ *   先頭の BIZ UDP ゴシックは、読み間違いを減らすために作られた書体（Windows 10 以降に標準で入っている）。
+ * - 文字の大きさと余白は rem で決める。ブラウザーの拡大や文字サイズの変更に追従させるため。
+ * - アニメーションは使わない。
+ */
+
+:root {
+  /* 色。文字と背景の明るさの差は、JIS X 8341-3 の AA（通常の文字で 4.5 対 1 以上）を満たす。 */
+  --color-ink: #1a2630; /* 本文の文字（紙の色に対して 14 対 1 以上） */
+  --color-ink-muted: #4b5b69; /* 補足の文字（紙の色に対して 6 対 1 以上） */
+  --color-paper: #f4f6f8; /* ページの背景 */
+  --color-band: #17324d; /* ヘッダの帯の背景 */
+  --color-band-ink: #f4f6f8; /* ヘッダの帯の上の文字（帯に対して 11 対 1 以上） */
+  --color-band-ink-muted: #c9d6e2; /* ヘッダの帯の上の補足の文字（帯に対して 8 対 1 以上） */
+  --color-caption: #f5b700; /* 字幕の印の黄色（帯に対して 7 対 1 以上） */
+  --color-focus: #17324d; /* 紙の上のフォーカスの枠 */
+
+  /* 書体 */
+  --font-ui:
+    'BIZ UDPGothic', 'BIZ UDGothic', 'Yu Gothic UI', 'Meiryo UI', 'Hiragino Sans',
+    'Noto Sans CJK JP', sans-serif;
+
+  /* 画面の左右の余白と、内容の最大の幅 */
+  --frame-width: 80rem;
+  --frame-gutter: clamp(1rem, 4vw, 2rem);
+  /* 画面が広いときは、ヘッダ・お知らせ帯・画面の領域の左端をそろえて、中央に寄せる */
+  --frame-inline: max(var(--frame-gutter), calc((100% - var(--frame-width)) / 2));
+}
+
+*,
+*::before,
+*::after {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  background: var(--color-paper);
+  color: var(--color-ink);
+  font-family: var(--font-ui);
+  font-size: 1rem;
+  /* 日本語の文章は、行の間をやや広く取ると読みやすい */
+  line-height: 1.75;
+}
+
+/* キーボードで操作しているときのフォーカスの枠。マウスで押したときは出ない。 */
+:focus-visible {
+  outline: 3px solid var(--color-focus);
+  outline-offset: 2px;
+}
+
+.frame {
+  display: flex;
+  flex-direction: column;
+  min-height: 100vh;
+}
+
+/* ヘッダ: アプリの名前と、表示している画面の名前 */
+.frame__header {
+  padding: 0.75rem var(--frame-inline) 0.875rem;
+  background: var(--color-band);
+  color: var(--color-band-ink);
+}
+
+.frame__header :focus-visible {
+  outline-color: var(--color-caption);
+}
+
+.frame__app-name {
+  margin: 0;
+  color: var(--color-band-ink-muted);
+  font-size: 0.875rem;
+  font-weight: 700;
+  letter-spacing: 0.06em;
+}
+
+.frame__screen-name {
+  margin: 0.125rem 0 0;
+  /* 字幕の印: 画面の名前の左に置く黄色の棒 */
+  padding-left: 0.75rem;
+  border-left: 0.3rem solid var(--color-caption);
+  font-size: 1.5rem;
+  font-weight: 700;
+  line-height: 1.4;
+}
+
+/*
+ * お知らせ帯の領域: ヘッダのすぐ下。警告とエラーを表示する。
+ * 表示する内容が無いときは、高さも余白も持たない（領域は文書の中に残す）。
+ */
+.notice-area {
+  padding-inline: var(--frame-inline);
+}
+
+/* 画面ごとの領域 */
+.frame__main {
+  flex: 1;
+  padding: 1.5rem var(--frame-inline) 2.5rem;
+}
+
+.screen__name {
+  margin: 0;
+  font-size: 1.25rem;
+  font-weight: 700;
+  line-height: 1.5;
+}
