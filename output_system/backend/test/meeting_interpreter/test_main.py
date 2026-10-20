@@ -43,3 +43,24 @@ def test_should_listen_on_3001_by_default(monkeypatch: pytest.MonkeyPatch):
 
     assert run.call_args.kwargs["host"] == "0.0.0.0"
     assert run.call_args.kwargs["port"] == 3001
+
+
+def test_should_name_the_websocket_implementation_explicitly(
+    monkeypatch: pytest.MonkeyPatch, tmp_path
+):
+    """
+    【テスト対象】main
+    【テスト内容】起動する（サーバーの起動は差し替える）
+    【期待結果】WebSocket の実装の名前を指定して起動すること。
+                既定の "auto" は、部品が無いと黙って WebSocket を使わずに起動し、
+                /ws がふつうの HTTP として扱われてしまう。名前を指定すると、
+                部品が無いときは起動の時点で失敗する
+    """
+    run = MagicMock()
+    monkeypatch.setattr(entrypoint.uvicorn, "run", run)
+    monkeypatch.setenv("MMD_STATIC_DIR", str(tmp_path))
+
+    entrypoint.main()
+
+    assert run.call_args.kwargs["ws"] == entrypoint.WEBSOCKET_IMPLEMENTATION
+    assert entrypoint.WEBSOCKET_IMPLEMENTATION not in ("auto", "none")
