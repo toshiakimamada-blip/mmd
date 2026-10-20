@@ -1,0 +1,46 @@
+# アプリサーバー（FastAPI）のプロジェクト定義。
+# 依存の版は uv.lock で固定する。依存を足したら `uv lock` で更新し、uv.lock も一緒にコミットする。
+[project]
+name = "meeting-interpreter-server"
+version = "0.1.0"
+description = "会議通訳アプリのアプリサーバー（画面の配信・HTTP・WebSocket）"
+# Ubuntu 24.04 の標準の Python（3.12 系）に合わせる。
+requires-python = ">=3.12,<3.13"
+dependencies = [
+    "fastapi",
+    "uvicorn",
+]
+
+[dependency-groups]
+# 実行イメージには入れない開発用の依存（`uv sync --no-dev` で除外される）。
+dev = [
+    "httpx",       # FastAPI の TestClient が使う
+    "pytest",
+    "pytest-cov",
+    "ruff",
+]
+
+[tool.uv]
+# アプリとして動かすだけで、ライブラリとしては配布しない。
+# コードは PYTHONPATH（pytest では pythonpath 設定）で src/ を指して読み込む。
+package = false
+# サプライチェーン攻撃への対策。公開から 7 日未満の版は、版の解決の対象にしない。
+# 既にロックファイルへ記録した版には影響しない。
+exclude-newer = "7 days"
+
+[tool.pytest.ini_options]
+# テストは src/ と同じ階層の test/ に置き、src/ と同じ構造にする。
+testpaths = ["test"]
+pythonpath = ["src"]
+addopts = "--cov=meeting_interpreter --cov-report=term-missing"
+
+[tool.coverage.run]
+branch = true
+
+[tool.ruff]
+line-length = 100
+src = ["src", "test"]
+
+[tool.ruff.lint]
+# E/F: pycodestyle と pyflakes。I: import の並び順。B: バグの出やすい書き方。
+select = ["E", "F", "I", "B", "UP"]
