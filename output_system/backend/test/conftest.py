@@ -1,5 +1,6 @@
 """テスト全体で使う部品。"""
 
+import logging
 import socket
 from collections.abc import Iterator
 from dataclasses import dataclass
@@ -15,6 +16,22 @@ from meeting_interpreter.tuning import TUNING_FILE_NAME, load_tuning
 # アプリに同梱する設定ファイルの置き場（output_system/config）。
 # このファイルは backend/test/ にあるため、2 つ上が output_system/。
 REPO_CONFIG_DIR = Path(__file__).resolve().parents[2] / "config"
+
+
+@pytest.fixture(autouse=True)
+def restore_logging() -> Iterator[None]:
+    """テストが変えたログの設定（レベルと出力先）を、テストの終わりに元へ戻す。
+
+    ログの設定はプロセス全体で共有される。戻さないと、あるテストの設定が次のテストの出力を変える。
+    """
+    root = logging.getLogger()
+    app_logger = logging.getLogger("meeting_interpreter.applog")
+    saved_handlers = list(root.handlers)
+    saved_levels = (root.level, app_logger.level)
+    yield
+    root.handlers[:] = saved_handlers
+    root.setLevel(saved_levels[0])
+    app_logger.setLevel(saved_levels[1])
 
 
 @dataclass(frozen=True)

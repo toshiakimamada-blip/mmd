@@ -1,5 +1,7 @@
 """起動（python -m meeting_interpreter）のテスト。"""
 
+import json
+import logging
 from unittest.mock import MagicMock
 
 import pytest
@@ -87,8 +89,9 @@ def test_should_stop_with_a_clear_message_when_a_required_variable_is_missing(
     【テスト対象】main（必須の環境変数が無いとき）
     【テスト内容】必須の環境変数（記録の置き場）を外して起動する（サーバーの起動は差し替える）
     【期待結果】サーバーを起動せず、終了コード 2 で止まること。
-                足りない環境変数の名前が、標準出力に出ること
-                （コンテナのログで、起動できない理由が分かるようにするため）
+                エラーログ(SYSTEM_CONFIG_INVALID)と、足りない環境変数の名前が、
+                標準出力に JSON 1 行ずつ出ること。標準エラー出力には何も出ない
+                (コンテナのログで、起動できない理由が分かるようにするため)
     """
     run = MagicMock()
     monkeypatch.setattr(entrypoint.uvicorn, "run", run)
@@ -100,5 +103,34 @@ def test_should_stop_with_a_clear_message_when_a_required_variable_is_missing(
     assert stopped.value.code == 2
     run.assert_not_called()
     captured = capsys.readouterr()
-    assert "MMD_RECORDS_DIR" in captured.out
     assert captured.err == ""
+    entries = [json.loads(line) for line in captured.out.splitlines()]
+    assert [e["error_code"] for e in entries if e["log_type"] == "error"] == [
+        "SYSTEM_CONFIG_INVALID"
+    ]
+    assert any("MMD_RECORDS_DIR" in e.get("message", "") for e in entries)
+
+
+def test_should_send_logs_to_stdout_at_the_configured_level(
+    monkeypatch: pytest.MonkeyPatch, capsys, tmp_path
+):
+    """
+    【テスト対象】main（ログの設定）
+    【テスト内容】ログのレベルを warning にして起動する（サーバーの起動は差し替える）。
+                  起動のあとに、標準のロガーで情報と警告を出す
+    【期待結果】警告だけが標準出力に出て、標準エラー出力には何も出ないこと。
+                ログの出力先が、標準エラー出力ではなく標準出力であることを確かめる
+    """
+    monkeypatch.setattr(entrypoint.uvicorn, "run", MagicMock())
+    monkeypatch.setenv("MMD_LOG_LEVEL", "warning")
+    # 画面のファイルが無いという警告が混ざらないよう、トップのファイルを置いた置き場を渡す。
+    (tmp_path / "index.html").write_text("<!doctype html>", encoding="utf-8")
+    monkeypatch.setenv("MMD_STATIC_DIR", str(tmp_path))
+
+    entrypoint.main()
+    logging.getLogger("probe").info("hidden")
+    logging.getLogger("probe").warning("shown")
+
+    captured = capsys.readouterr()
+    assert captured.err == ""
+    assert [json.loads(line)["message"] for line in captured.out.splitlines()] == ["shown"]

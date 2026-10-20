@@ -19,6 +19,7 @@ from . import APP_NAME
 from .api import health
 from .errors import ROUTE_NOT_FOUND, error_response
 from .frontend import INDEX_FILE, FrontendFiles
+from .logs.asgi import TraceIdMiddleware
 from .settings import Settings
 
 logger = logging.getLogger(__name__)
@@ -99,6 +100,10 @@ def create_app(settings: Settings) -> FastAPI:
         openapi_url="/api/openapi.json",
     )
     app.state.settings = settings
+
+    # すべての要求に処理の識別子を振る。add_middleware は、あとから足したものほど外側になる。
+    # 接続制限(外側)とエラーの変換(内側)を足すときも、識別子の範囲の内側に入れる。
+    app.add_middleware(TraceIdMiddleware)
 
     _register_api_routes(app)
     _register_websocket_routes(app)

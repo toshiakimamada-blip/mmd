@@ -12,7 +12,8 @@ import uvicorn
 
 from .app import create_app
 from .config_error import ConfigError
-from .settings import load_settings
+from .logs import configure_logging, log_error
+from .settings import DEFAULT_LOG_LEVEL, load_settings
 
 # 設定の誤りで起動できないときの終了コード（Unix の慣習で、コマンドの使い方の誤りに使う 2）。
 EXIT_CONFIG_ERROR: Final = 2
@@ -26,19 +27,33 @@ EXIT_CONFIG_ERROR: Final = 2
 WEBSOCKET_IMPLEMENTATION: Final = "websockets-sansio"
 
 
+def _report_config_error(error: ConfigError) -> None:
+    """設定の誤りで起動できないことを、ログに出す。
+
+    エラーログに、起動できないことを 1 件出す。誤りの内容(どの環境変数か、どう直すか)は、
+    許可リストに載せられる形ではないため、標準のロガーで 1 件ずつ出す。
+    設定の誤りの文面には、環境変数の名前とその値が入る。会議の内容は入らない。
+    """
+    log_error("SYSTEM_CONFIG_INVALID", "startup")
+    startup_logger = logging.getLogger("meeting_interpreter.startup")
+    for problem in error.problems:
+        startup_logger.error(problem)
+
+
 def main() -> None:
     """設定を読み込み、アプリサーバーを起動する。
 
+    ログの出力先は標準出力。設定を読む前に、既定のレベルで設定しておく(読めなかったときも出すため)。
     設定に誤りがあるときは、起動せずに終了コード 2 で止まる。
-    誤りの内容は標準出力に出す。コンテナのログ（標準出力）で、起動できない理由が分かる。
+    誤りの内容は標準出力に出る。コンテナのログで、起動できない理由が分かる。
     """
-    logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s %(message)s")
+    configure_logging(DEFAULT_LOG_LEVEL)
     try:
         settings = load_settings()
     except ConfigError as error:
-        print(error, flush=True)
-        # 例外の連鎖を出さない。設定の誤りの文面だけで足りる。
+        _report_config_error(error)
         raise SystemExit(EXIT_CONFIG_ERROR) from None
+    configure_logging(settings.log_level)
     uvicorn.run(
         create_app(settings),
         host="0.0.0.0",

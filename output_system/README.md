@@ -69,6 +69,25 @@ Starlette の `TestClient` は uvicorn を通らないため、部品が無く�
 
 発話の区切りの長さの上限、警告を出すしきい値、文章生成モデルへ一度に渡す量、CPU の割り当てなどは、アプリに同梱するファイル `config/tuning.toml` で持ちます。値はすべて仮置きで、利用者の PC で測った結果をもとに見直します。環境変数でも上書きできます。名前は、項目名を大文字にして `MMD_TUNING_` を付けます（例: `utterance_max_seconds` は `MMD_TUNING_UTTERANCE_MAX_SECONDS`）。項目の一覧と意味は `config/tuning.toml` のコメントにあります。
 
+## ログ
+
+ログは、コンテナの標準出力へ 1 行 1 件の JSON で出します（標準エラー出力には出しません）。コンテナのログは `docker compose logs` で読めます。種別と項目は、基本設計書の横断設計規約「ログの種別と項目」に従います。
+
+| 種別 | `log_type` | レベル | 項目 |
+|---|---|---|---|
+| 処理ログ | `processing` | 情報(`info`) | `process_type`（処理の種類）、`meeting_id`（会議番号）、`trace_id`（処理の識別子）、`duration_ms`（かかった時間）、`item_count`（件数）、`char_count`（文字数） |
+| エラーログ | `error` | 業務エラーは警告(`warning`)、システムエラーは異常(`error`) | `error_code`、`component`（発生したコンポーネント）、`meeting_id`、`trace_id`。想定外の例外は、`exception_type`（種類）と `location`（発生場所）も出す |
+| 接続ログ | `connection` | 警告(`warning`) | `reject_reason`（断った理由の種類）、`destination_name`（宛先の名前）、`source_name`（送り元の名前） |
+
+- どの行にも、`timestamp`（UTC・ミリ秒）、`log_type`、`level` が付きます。
+- 「必ず含める項目」は、値が無いときも `null` で出します。
+- 利用者の項目は持ちません。ログインが無いためです。
+- 会議の内容は、ログに書けません。字幕・要約・質問の本文、会議のタイトル、文章生成モデルへ渡す指示と受け取った出力、音声は、渡しても出力されません。書ける項目は、`backend/src/meeting_interpreter/logs/fields.py` の許可リストで決めています。許可リストに無い項目と、決めた形に当てはまらない値は捨てます。捨てた数は `dropped_field_count` に出します。名前も値も出しません。
+- 項目を足すときは、許可リストに `FieldSpec` を 1 つ足します（性能の測定の値を足す作業で使います）。値の形は、会議の内容が入り込めない狭い形にします。
+- 処理の識別子は、1 回の要求に 1 つ振ります（ミドルウェアが振ります）。ワーカーへ渡すメッセージには、`attach_trace_id` で付けます。受け取った側は、`trace_scope_from_message` で同じ識別子の範囲に入ります。
+- 標準のロガー（`logging`）を使う部品（uvicorn など）のログも、標準出力へ出します。`log_type` は `runtime` で、項目は `logger` と `message` です。例外は種類（`exception_type`）だけを出し、文面とスタックトレースは出しません。会議に関わる記録には、標準のロガーを使わず、`log_processing`・`log_error`・`log_connection` を使います。標準のロガーは許可リストを通らないためです。
+- ログのレベルの下限は、環境変数 `MMD_LOG_LEVEL` で決めます。性能の測定は情報のレベルの処理ログを使うため、既定は `info` です。
+
 ### コンテナを使わずにアプリサーバーを動かす（開発用）
 
 先に `frontend/` で `npm run build` を実行してから、`backend/` で次を実行します。
