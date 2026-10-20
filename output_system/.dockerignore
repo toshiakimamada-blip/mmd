@@ -1,0 +1,16 @@
+# イメージのビルドの文脈に含めないもの。
+# 依存・ビルドの成果物・テストの出力は、イメージの中で作り直す。
+**/node_modules
+**/.venv
+**/dist
+**/__pycache__
+**/*.pyc
+**/.pytest_cache
+**/.ruff_cache
+**/.coverage
+**/coverage
+**/*.tsbuildinfo
+# 記録データベースと環境変数のファイルを、イメージへ入れない。
+**/*.db
+**/.env
+**/.env.*

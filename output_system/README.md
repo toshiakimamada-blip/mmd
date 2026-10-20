@@ -115,4 +115,42 @@ npm run build             # 本番用のビルド（dist/ に出る）
 
 ## コンテナの起動
 
-準備中です。`Dockerfile` と `docker-compose.yml` は、続く Task で追加します。
+コンテナは 1 つです。イメージの土台は `ubuntu:24.04` で、`Dockerfile` が、画面のビルド・サーバーの依存の導入・実行の 3 つの段に分けて作ります。最終のイメージには、Node.js・uv・pip を残しません。
+
+`output_system/` で実行します。
+
+```bash
+docker compose build      # イメージを作る
+docker compose up -d      # コンテナを起動する
+docker compose ps         # 状態を見る。STATUS が healthy なら、動作の確認（GET /api/health）に成功している
+docker compose down       # コンテナを止めて消す（名前付きボリュームは残る）
+```
+
+| 項目 | 値 |
+|---|---|
+| コンテナ名 | `toshiakimamada-blip-mmd-output-system` |
+| ネットワーク | `toshiakimamada-blip-mmd-network`（既存のネットワークに参加する。`external: true`） |
+| 利用者が開く URL | `http://localhost:3001` |
+| 開発用のコンテナから開く URL | `http://toshiakimamada-blip-mmd-output-system:3001` |
+| ポートの公開 | `127.0.0.1:3001` だけ。ほかの PC からは届かない |
+| 再起動 | `restart: unless-stopped`。異常終了したときと、Docker の再起動のあとに、立ち上げ直す |
+| 名前付きボリューム | 記録データベース用 `toshiakimamada-blip-mmd-records`（コンテナの中は `/var/lib/mmd/records`）、モデル置き場用 `toshiakimamada-blip-mmd-models`（同 `/var/lib/mmd/models`） |
+
+- ポート 3002 と、開発環境が割り当てるもう 1 つのコンテナ名は使いません。
+- PC やほかのコンテナのフォルダーをコンテナへつなぎません（バインドマウントを使いません）。
+- `docker compose down -v` は、名前付きボリュームも消します。記録と AI モデルが消えるため、使いません。
+- イメージを作り直してコンテナを入れ替えるときも、ボリュームは残ります。
+
+### 社内の証明書
+
+社内のネットワークが通信を検査する場合は、証明書をイメージのビルドで登録します。証明書がある環境と無い環境で、同じ手順でビルドできます。
+
+- 既定では、リポジトリ直下の `ssl-certificates/` の `.cer`・`.crt`・`.pem` を登録します。PEM 形式と DER 形式の両方に対応します。フォルダーが空なら、何も登録しません。
+- このフォルダーが存在しない環境では、空のフォルダーを作り、`SSL_CERTS_DIR=<空のフォルダー> docker compose build` でビルドします。
+- `docker compose` を使わずにビルドする場合は、証明書がある環境で `--build-context certs=<証明書のフォルダー>` を付けます。
+
+### イメージの版の固定
+
+- Node.js は、`Dockerfile` の `NODE_VERSION` と、アーカイブの SHA-256（`NODE_SHA256_X64` と `NODE_SHA256_ARM64`）で固定します。版を上げるときは、公開から 7 日以上たった版を選び、配布元の `SHASUMS256.txt` の値へ更新します。
+- uv は、`Dockerfile` の `UV_VERSION` で固定します。
+- 画面の依存は `npm ci`、サーバーの依存は `uv sync --locked` で、ロックファイルの版だけを入れます。

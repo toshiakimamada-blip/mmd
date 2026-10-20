@@ -1,0 +1,57 @@
+# 会議通訳アプリのコンテナの定義。
+#
+# 起動: docker compose up -d       （この output_system/ で実行する）
+# 停止: docker compose down        （名前付きボリュームは残る。-v を付けると記録とモデルが消える）
+#
+# コンテナ名・ネットワーク名・ポートは、開発環境が割り当てた値（.claude/rules/instance-config.md）。
+# コンテナは 1 つ。ポート 3002 と、もう 1 つのコンテナ名は使わない。
+services:
+  app:
+    container_name: toshiakimamada-blip-mmd-output-system
+    image: toshiakimamada-blip-mmd-output-system
+    build:
+      context: .
+      dockerfile: Dockerfile
+      # 社内の証明書のフォルダー。証明書が無い環境では、空のフォルダーを指す。
+      # 既定は、リポジトリ直下の ssl-certificates/（開発環境が証明書を置く場所）。
+      # このフォルダーが存在しない環境では、SSL_CERTS_DIR に空のフォルダーを指定してビルドする。
+      additional_contexts:
+        certs: ${SSL_CERTS_DIR:-../ssl-certificates}
+    # PID 1 に init を置く。終了したプロセスの後始末と、停止の合図の伝達を任せる。
+    # 通訳ワーカーなどの子のプロセスを、後続の作業で起動するときに要る。
+    init: true
+    # 異常終了したときと、Docker の再起動のあとに、自動で立ち上げ直す。
+    # docker compose stop や docker compose down で止めたときは、立ち上げ直さない。
+    restart: unless-stopped
+    ports:
+      # PC のループバックにだけ公開する。ほかの PC からは届かない。
+      # 左の 127.0.0.1 を省くと、すべてのアドレスへ公開されてしまう。
+      - "127.0.0.1:3001:3001"
+    # 動かす場所で変わる値。コードの中へは書かない。
+    environment:
+      # 待ち受けるポート。ports の右の値と同じにする。
+      MMD_PORT: "3001"
+      # 要求の宛先として常に通す、アプリのコンテナ名（container_name と同じ）。
+      MMD_APP_HOSTNAME: toshiakimamada-blip-mmd-output-system
+      # 記録データベースとモデル置き場の場所。下の名前付きボリュームの置き場所と同じにする。
+      MMD_RECORDS_DIR: /var/lib/mmd/records
+      MMD_MODELS_DIR: /var/lib/mmd/models
+    # 名前付きボリュームだけを使う。PC やほかのコンテナのフォルダーはつながない
+    # （つなぐ先が、開発用のコンテナの場所に依存してしまうため）。
+    volumes:
+      - mmd-records:/var/lib/mmd/records
+      - mmd-models:/var/lib/mmd/models
+
+volumes:
+  # 記録データベース用。コンテナを作り直しても、中身は残る。
+  mmd-records:
+    name: toshiakimamada-blip-mmd-records
+  # モデル置き場用。記録と分けて、AI モデルを入手し直すときに記録へ触れずに済むようにする。
+  mmd-models:
+    name: toshiakimamada-blip-mmd-models
+
+networks:
+  # 開発用のコンテナと同じネットワークに参加させて、コンテナ名で届くようにする。
+  default:
+    name: toshiakimamada-blip-mmd-network
+    external: true

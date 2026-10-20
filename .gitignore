@@ -54,3 +54,6 @@ playwright/.cache/
 *.log
 *.tmp
 *.temp
+
+# playwright-cli の出力（スナップショットとコンソールの記録）
+.playwright-cli/
