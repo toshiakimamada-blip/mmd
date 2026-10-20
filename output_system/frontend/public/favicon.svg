@@ -1,0 +1,5 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32">
+  <!-- 画面の見た目に合わせた印。濃い青の地に、字幕の帯を表す黄色の棒を置く。 -->
+  <rect width="32" height="32" rx="6" fill="#17324d" />
+  <rect x="7" y="21" width="18" height="4" rx="1" fill="#f5b700" />
+</svg>

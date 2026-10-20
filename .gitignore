@@ -18,3 +18,42 @@ gaido_features.json
 /gaido_usage.json
 /gaido_agent_activity.jsonl
 /gaido_agents/
+
+# --- 実装コード（output_system）---
+# 上にある gaido 管理の `tools/` が output_system/tools/ にも当たるため、除外を打ち消す。
+!/output_system/tools/
+# 依存パッケージと仮想環境
+node_modules/
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+# ビルド成果物
+dist/
+build/
+*.tsbuildinfo
+# 記録データベース（実行時に作られる SQLite のファイル）
+*.db
+*.db-journal
+*.db-wal
+*.db-shm
+# テストとカバレッジの出力
+coverage/
+.coverage
+.coverage.*
+htmlcov/
+.pytest_cache/
+.ruff_cache/
+test-results/
+playwright-report/
+playwright/.cache/
+# 環境変数と一時ファイル
+.env
+.env.*
+*.local
+*.log
+*.tmp
+*.temp
+
+# playwright-cli の出力（スナップショットとコンソールの記録）
+.playwright-cli/
