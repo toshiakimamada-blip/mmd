@@ -49,7 +49,7 @@ output_system/
 - 環境変数 `COMPOSE_PROJECT_NAME` が設定済みのため、compose の `name:` は効かない。ボリュームは `name:` で固定名にしている
 - `pkill -f` は、コマンドの文字列が一致して自分のシェルを落とすことがある。PID を指定する
 - playwright-cli は root だと Chromium が起動しない。`--config` で `chromiumSandbox: false` と `--no-sandbox` を渡す（設定ファイルはリポジトリの外に置く）
-- ビルド済みの npm 10 系（開発用コンテナの Node 22）は `min-release-age` を無視する。版を決め直すときは Node 24 系の npm を使う
+- 開発用コンテナの Node 22 系に同梱の npm 10 系は、`min-release-age` を無視する。版を決め直すときは Node 24 系の npm を使う
 - starlette の TestClient は httpx2 を使う（httpx は非推奨の警告が出る）
 - Docker に buildx が無く、`docker build` は旧ビルダーになる。追加の文脈（`certs`）は `docker compose build` で渡す
 
