@@ -36,6 +36,8 @@ services:
       # 記録データベースとモデル置き場の場所。下の名前付きボリュームの置き場所と同じにする。
       MMD_RECORDS_DIR: /var/lib/mmd/records
       MMD_MODELS_DIR: /var/lib/mmd/models
+      # ログのレベルの下限（info・warning・error）。性能の測定は info の処理ログを使うため、既定は info。
+      MMD_LOG_LEVEL: info
     # 名前付きボリュームだけを使う。PC やほかのコンテナのフォルダーはつながない
     # （つなぐ先が、開発用のコンテナの場所に依存してしまうため）。
     volumes:

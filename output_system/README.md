@@ -48,24 +48,35 @@ uvicorn は、WebSocket の部品（`websockets`）が無いと、WebSocket の�
 
 Starlette の `TestClient` は uvicorn を通らないため、部品が無くても WebSocket のテストは通ります。本物の uvicorn で確かめるテストは `backend/test/meeting_interpreter/test_websocket_server.py` にあります。出荷するイメージで確かめる手順は、[出荷するコンテナの WebSocket の確認](#出荷するコンテナの-websocket-の確認)にあります。
 
-動かす場所で変わる値は、環境変数で渡します。コンテナでは `docker-compose.yml` で指定します。
+動かす場所で変わる値は、環境変数で渡します。コンテナでは `docker-compose.yml` で指定します。名前は、アプリの共通の接頭辞 `MMD_` を付けた大文字です。
 
-| 環境変数 | 意味 | 既定値 |
-|---|---|---|
-| `MMD_PORT` | 待ち受けるポート | `3001` |
-| `MMD_APP_HOSTNAME` | 要求の宛先として常に通す、アプリのコンテナ名 | 未設定 |
-| `MMD_RECORDS_DIR` | 記録データベースを置く場所 | `/var/lib/mmd/records` |
-| `MMD_MODELS_DIR` | AI モデルを置く場所 | `/var/lib/mmd/models` |
-| `MMD_STATIC_DIR` | ビルドした画面のファイルの場所 | `/app/static` |
+| 環境変数 | 意味 | 必須 | 既定値 |
+|---|---|---|---|
+| `MMD_PORT` | 待ち受けるポート | いいえ | `3001` |
+| `MMD_APP_HOSTNAME` | 要求の宛先として常に通す、アプリのコンテナ名 | いいえ | 未設定 |
+| `MMD_RECORDS_DIR` | 記録データベースを置く場所 | はい | なし（コンテナのイメージは `/var/lib/mmd/records` を渡します） |
+| `MMD_MODELS_DIR` | AI モデルを置く場所 | はい | なし（コンテナのイメージは `/var/lib/mmd/models` を渡します） |
+| `MMD_STATIC_DIR` | ビルドした画面のファイルの場所 | いいえ | `/app/static` |
+| `MMD_CONFIG_DIR` | アプリに同梱する設定ファイル（`tuning.toml`、`models.toml`）の場所 | いいえ | `/app/config` |
+| `MMD_LOG_LEVEL` | ログのレベルの下限。`info`・`warning`・`error` のいずれか（大文字小文字は問いません） | いいえ | `info` |
 
-空の環境変数は、未設定として扱います。
+- 空（または空白だけ）の環境変数は、未設定として扱います。
+- 記録とモデルの置き場は、既定値を持たせません。名前付きボリュームの置き場と食い違ったまま、別の場所へ黙って書き込む事故を防ぐためです。
+- 誤りは起動の時点で見つけます。必須の環境変数が無いとき、値が誤っているとき、調整値のファイルが読めないときは、サーバーを起動せず、終了コード 2 で止まります。誤りは見つけたものをすべて、標準出力に 1 行 1 件で出します。
+- 秘密の情報（パスワード・鍵）は持ちません。設定を画面から変える機能もありません。
+
+### 調整値
+
+発話の区切りの長さの上限、警告を出すしきい値、文章生成モデルへ一度に渡す量、CPU の割り当てなどは、アプリに同梱するファイル `config/tuning.toml` で持ちます。値はすべて仮置きで、利用者の PC で測った結果をもとに見直します。環境変数でも上書きできます。名前は、項目名を大文字にして `MMD_TUNING_` を付けます（例: `utterance_max_seconds` は `MMD_TUNING_UTTERANCE_MAX_SECONDS`）。項目の一覧と意味は `config/tuning.toml` のコメントにあります。
 
 ### コンテナを使わずにアプリサーバーを動かす（開発用）
 
 先に `frontend/` で `npm run build` を実行してから、`backend/` で次を実行します。
 
 ```bash
-MMD_STATIC_DIR=../frontend/dist PYTHONPATH=src uv run --no-dev python -m meeting_interpreter
+MMD_STATIC_DIR=../frontend/dist MMD_CONFIG_DIR=../config \
+MMD_RECORDS_DIR=/tmp/mmd/records MMD_MODELS_DIR=/tmp/mmd/models \
+PYTHONPATH=src uv run --no-dev python -m meeting_interpreter
 ```
 
 ## 必要な道具

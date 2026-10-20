@@ -11,7 +11,11 @@ from typing import Final
 import uvicorn
 
 from .app import create_app
+from .config_error import ConfigError
 from .settings import load_settings
+
+# 設定の誤りで起動できないときの終了コード（Unix の慣習で、コマンドの使い方の誤りに使う 2）。
+EXIT_CONFIG_ERROR: Final = 2
 
 # uvicorn に使わせる WebSocket の実装。
 # 既定の "auto" は、部品（websockets と wsproto）が 1 つも無いと、
@@ -23,9 +27,18 @@ WEBSOCKET_IMPLEMENTATION: Final = "websockets-sansio"
 
 
 def main() -> None:
-    """設定を読み込み、アプリサーバーを起動する。"""
+    """設定を読み込み、アプリサーバーを起動する。
+
+    設定に誤りがあるときは、起動せずに終了コード 2 で止まる。
+    誤りの内容は標準出力に出す。コンテナのログ（標準出力）で、起動できない理由が分かる。
+    """
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s %(message)s")
-    settings = load_settings()
+    try:
+        settings = load_settings()
+    except ConfigError as error:
+        print(error, flush=True)
+        # 例外の連鎖を出さない。設定の誤りの文面だけで足りる。
+        raise SystemExit(EXIT_CONFIG_ERROR) from None
     uvicorn.run(
         create_app(settings),
         host="0.0.0.0",

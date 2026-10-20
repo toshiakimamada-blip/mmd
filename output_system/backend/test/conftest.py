@@ -10,6 +10,11 @@ from fastapi.testclient import TestClient
 
 from meeting_interpreter.app import create_app
 from meeting_interpreter.settings import Settings
+from meeting_interpreter.tuning import TUNING_FILE_NAME, load_tuning
+
+# アプリに同梱する設定ファイルの置き場（output_system/config）。
+# このファイルは backend/test/ にあるため、2 つ上が output_system/。
+REPO_CONFIG_DIR = Path(__file__).resolve().parents[2] / "config"
 
 
 @dataclass(frozen=True)
@@ -54,13 +59,22 @@ def site(tmp_path: Path) -> FrontendSite:
 
 @pytest.fixture
 def settings(site: FrontendSite, tmp_path: Path) -> Settings:
-    """テスト用の設定。置き場はすべて一時のフォルダーに向ける。"""
+    """テスト用の設定。置き場はすべて一時のフォルダーに向ける。
+
+    調整値は、アプリに同梱するファイルをそのまま読む。同梱のファイルの検証も兼ねる。
+    """
+    problems: list[str] = []
+    tuning = load_tuning(REPO_CONFIG_DIR / TUNING_FILE_NAME, {}, problems)
+    assert tuning is not None, problems
     return Settings(
         port=3001,
         app_hostname="test-container",
         records_dir=tmp_path / "records",
         models_dir=tmp_path / "models",
         static_dir=site.root,
+        log_level="info",
+        config_dir=REPO_CONFIG_DIR,
+        tuning=tuning,
     )
 
 
