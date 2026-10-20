@@ -27,6 +27,38 @@
 
 どの画面にも当たらない URL は、会議の一覧へ移ります。
 
+## アプリサーバーの経路と設定
+
+アプリサーバーは、1 つのポート（既定は 3001）で、画面のファイル・HTTP・WebSocket を受けます。経路は次の 3 つに分けます。
+
+| 経路 | 役割 |
+|---|---|
+| `/api` 以下 | HTTP（JSON）。動作の確認は `GET /api/health` です。存在しない経路は、画面のファイルではなく、404 の JSON のエラーを返します |
+| `/ws` 以下 | WebSocket。存在しない経路は、HTTP には 404 の JSON を返し、WebSocket の接続は閉じます |
+| それ以外 | 画面のファイル。画面の URL にはトップのファイル（`index.html`）を返します。拡張子を持つ名前（`/assets/app.js` など）が存在しなければ 404 です。そのため、会議番号に「.」を使いません |
+
+ミドルウェアと経路の登録は、`backend/src/meeting_interpreter/app.py` の `create_app` にまとめます。
+
+動かす場所で変わる値は、環境変数で渡します。コンテナでは `docker-compose.yml` で指定します。
+
+| 環境変数 | 意味 | 既定値 |
+|---|---|---|
+| `MMD_PORT` | 待ち受けるポート | `3001` |
+| `MMD_APP_HOSTNAME` | 要求の宛先として常に通す、アプリのコンテナ名 | 未設定 |
+| `MMD_RECORDS_DIR` | 記録データベースを置く場所 | `/var/lib/mmd/records` |
+| `MMD_MODELS_DIR` | AI モデルを置く場所 | `/var/lib/mmd/models` |
+| `MMD_STATIC_DIR` | ビルドした画面のファイルの場所 | `/app/static` |
+
+空の環境変数は、未設定として扱います。
+
+### コンテナを使わずにアプリサーバーを動かす（開発用）
+
+先に `frontend/` で `npm run build` を実行してから、`backend/` で次を実行します。
+
+```bash
+MMD_STATIC_DIR=../frontend/dist PYTHONPATH=src uv run --no-dev python -m meeting_interpreter
+```
+
 ## 必要な道具
 
 | 道具 | 版 | 用途 |

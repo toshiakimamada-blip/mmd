@@ -14,7 +14,7 @@ dependencies = [
 [dependency-groups]
 # 実行イメージには入れない開発用の依存（`uv sync --no-dev` で除外される）。
 dev = [
-    "httpx",       # FastAPI の TestClient が使う
+    "httpx2",      # FastAPI の TestClient が使う
     "pytest",
     "pytest-cov",
     "ruff",
