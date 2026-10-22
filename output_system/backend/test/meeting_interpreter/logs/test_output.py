@@ -101,6 +101,66 @@ class TestRuntimeLogsGoToStdout:
         assert len(root.handlers) == before + 1
 
 
+class TestRuntimeLogsAreReadable:
+    """起動を止める理由などの日本語の文を、docker logs で読める形で出す。"""
+
+    def test_should_write_japanese_as_is_not_as_unicode_escapes(self, capsys):
+        """
+        【テスト対象】標準のロガーのログ（日本語の文）
+        【テスト内容】起動の知らせ用のロガーで、日本語の文を出す
+        【期待結果】日本語がそのまま出て、\\uXXXX の形に変わらないこと。
+                    起動できない理由を、docker logs で読めるようにするため。
+                    JSON として読み戻すと、元の文になる
+        入力例: MMD_PORT は 1 から 65535 の整数で指定してください: 'abc'
+        """
+        configure_logging("info")
+        sentence = "MMD_PORT は 1 から 65535 の整数で指定してください: 'abc'"
+
+        logging.getLogger("meeting_interpreter.startup").error(sentence)
+
+        out = capsys.readouterr().out
+        assert sentence in out
+        assert "\\u" not in out
+        assert json.loads(out)["message"] == sentence
+
+    @pytest.mark.parametrize("separator", ["\u0085", "\u2028", "\u2029"])
+    def test_should_keep_one_line_when_the_text_has_unicode_line_separators(
+        self, capsys, separator: str
+    ):
+        """
+        【テスト対象】標準のロガーのログ（行の区切りとして扱われる文字）
+        【テスト内容】文の途中に、次の行（NEL）・行の区切り（LS）・段落の区切り（PS）を入れて出す
+        【期待結果】出力は 1 行のままで（splitlines でも 1 件）、読み戻すと元の文になること。
+                    日本語をそのまま出す設定にすると、これらの文字は JSON では符号化されず、
+                    ログを行で読む道具が 2 件に分けてしまうため、符号化して出す
+        入力例: NEL（U+0085）、LS（U+2028）、PS（U+2029）
+        """
+        configure_logging("info")
+
+        logging.getLogger("meeting_interpreter.startup").error(f"first{separator}second")
+
+        out = capsys.readouterr().out
+        assert len(out.splitlines()) == 1
+        assert json.loads(out)["message"] == f"first{separator}second"
+
+    def test_should_not_fail_on_text_that_utf8_cannot_encode(self, capsys):
+        """
+        【テスト対象】標準のロガーのログ（UTF-8 に直せない文字）
+        【テスト内容】環境変数の不正なバイト列が変わった形（単独のサロゲート U+DCFF）を含む文を出す
+        【期待結果】書き込みに失敗せず、1 行が出て、その文字は \\udcff の形で出ること。
+                    日本語をそのまま出す設定にすると、この文字は書き込み時にエラーになり、
+                    起動できない理由が出なくなるため
+        入力例: MMD_PORT=\\udcff（UTF-8 として正しくない値）
+        """
+        configure_logging("info")
+
+        logging.getLogger("meeting_interpreter.startup").error("MMD_PORT は不正です: '\udcff'")
+
+        out = capsys.readouterr().out
+        assert "\\udcff" in out
+        assert len(out.splitlines()) == 1
+
+
 class TestLevelThreshold:
     """ログのレベルの下限。"""
 

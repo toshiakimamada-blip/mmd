@@ -111,6 +111,28 @@ def test_should_stop_with_a_clear_message_when_a_required_variable_is_missing(
     assert any("MMD_RECORDS_DIR" in e.get("message", "") for e in entries)
 
 
+def test_should_print_the_config_problem_in_readable_japanese(
+    monkeypatch: pytest.MonkeyPatch, capsys
+):
+    """
+    【テスト対象】main（設定の誤りで止まるとき）
+    【テスト内容】ポートに数でない値を入れて起動する（サーバーの起動は差し替える）
+    【期待結果】どの環境変数がどう誤りかを書いた日本語の文が、\\uXXXX に変わらず、そのまま
+                標準出力に出ること。Task「分かりやすいエラーで起動を止める」の完了条件で、
+                コンテナのログ（docker logs）を読む人が、直し方まで分かるようにするため
+    入力例: MMD_PORT=abc
+    """
+    monkeypatch.setattr(entrypoint.uvicorn, "run", MagicMock())
+    monkeypatch.setenv("MMD_PORT", "abc")
+
+    with pytest.raises(SystemExit):
+        entrypoint.main()
+
+    out = capsys.readouterr().out
+    assert "MMD_PORT は 1 から 65535 の整数で指定してください: 'abc'" in out
+    assert "\\u" not in out
+
+
 def test_should_send_logs_to_stdout_at_the_configured_level(
     monkeypatch: pytest.MonkeyPatch, capsys, tmp_path
 ):

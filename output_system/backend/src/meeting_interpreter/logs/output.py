@@ -22,6 +22,12 @@ from typing import Final, Literal
 # 標準出力へ出す JSON 1 行の最大の文字数(runtime の文面)。極端に長い文面でログが膨らむのを防ぐ。
 _MAX_RUNTIME_MESSAGE_CHARS: Final = 2000
 
+# 行の区切りとして扱われる文字のうち、JSON では符号化されないもの。
+# 日本語をそのまま出すと、これらが文の中にあるとき、ログを行で読む道具(Python の splitlines など)が
+# 1 件を 2 件に分けてしまう。JSON の符号化(\uXXXX)に直して出す。
+# 改行・垂直タブ・改ページ・U+001C から U+001E は、JSON が符号化する。
+_LINE_SEPARATORS: Final = {0x85: "\\u0085", 0x2028: "\\u2028", 0x2029: "\\u2029"}
+
 LogLevelName = Literal["info", "warning", "error"]
 _NUMERIC_LEVELS: Final[dict[str, int]] = {
     "info": logging.INFO,
@@ -68,7 +74,20 @@ class RuntimeJsonFormatter(logging.Formatter):
         if record.exc_info and record.exc_info[0] is not None:
             # 例外の文面とスタックトレースは出さない。
             entry["exception_type"] = record.exc_info[0].__name__
-        return json.dumps(entry, ensure_ascii=True, separators=(",", ":"))
+        return _dump_line(entry)
+
+
+def _dump_line(entry: dict[str, object]) -> str:
+    """ログ 1 件を、JSON 1 行の文字列にする。
+
+    日本語はそのまま出す。起動できない理由を、docker logs で読めるようにするため。
+    - 行の区切りとして扱われる文字(U+0085・U+2028・U+2029)は、符号化して 1 行 1 件を守る。
+    - UTF-8 に直せない文字(環境変数の不正なバイト列が変わった、単独のサロゲート)は、
+      \\uXXXX の形に直す。そのまま書くと、書き込みの時点で失敗して、ログが出なくなる。
+    """
+    text = json.dumps(entry, ensure_ascii=False, separators=(",", ":"))
+    text = text.translate(_LINE_SEPARATORS)
+    return text.encode("utf-8", "backslashreplace").decode("utf-8")
 
 
 def _level_name(levelno: int) -> str:
