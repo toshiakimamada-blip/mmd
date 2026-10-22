@@ -3,6 +3,7 @@ import { Outlet, useMatches } from 'react-router';
 
 import { APP_NAME } from '../appInfo';
 import { type ScreenDefinition } from '../routes';
+import { BrowserSupportNotice, NoticeBand, NoticeProvider } from './notices';
 
 /** 経路の handle に画面の定義を持たせるときの形。 */
 export interface ScreenHandle {
@@ -34,11 +35,25 @@ function useCurrentScreen(): ScreenDefinition {
 /**
  * すべての画面に共通の枠。
  *
- * 上から順に、ヘッダ・お知らせ帯の領域・画面ごとの領域を置く。
+ * お知らせの置き場（NoticeProvider）を 1 つだけ持つ。画面を切り替えても、この枠は作り直されないため、
+ * 出ているお知らせは、画面を移っても残る。画面の部品は useNoticeActions で、お知らせを出す・消す。
+ */
+export function AppFrame() {
+  return (
+    <NoticeProvider>
+      <AppFrameLayout />
+    </NoticeProvider>
+  );
+}
+
+/**
+ * 共通の枠の中身。
+ *
+ * 上から順に、ヘッダ・お知らせ帯・画面ごとの領域を置く。
  * ナビゲーション・パンくず・フッタは置かない（画面の間の移動は、各画面のボタンで行う）。
  * ヘッダには操作のボタンもリンクも置かない。「会議中」から離れると会議が中断になるため。
  */
-export function AppFrame() {
+function AppFrameLayout() {
   const screen = useCurrentScreen();
   const headingRef = useRef<HTMLHeadingElement>(null);
   const shownScreenId = useRef(screen.id);
@@ -69,10 +84,13 @@ export function AppFrame() {
         </h1>
       </header>
       {/*
-        お知らせ帯の領域。警告とエラーを表示する場所で、表示する内容が無いときは何も出さない。
-        内容が入ったときに読み上げソフトへ伝わるよう、空のままでも文書の中に残す。
+        お知らせ帯。警告とエラーを表示する場所で、ヘッダのすぐ下に置く。
+        表示する内容が無いときは何も出さないが、内容が入ったときに読み上げソフトへ伝わるよう、
+        領域は文書の中に残す。
       */}
-      <div className="notice-area" aria-live="polite" data-notice-area />
+      <NoticeBand />
+      {/* 対応していないブラウザーで開いているときに、すべての画面で警告を出す（何も描画しない） */}
+      <BrowserSupportNotice />
       <main className="frame__main">
         <Outlet />
       </main>

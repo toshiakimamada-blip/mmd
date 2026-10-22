@@ -4,6 +4,7 @@ import { RouterProvider } from 'react-router/dom';
 
 import { createAppRouter } from './router';
 import './styles/frame.css';
+import './styles/notices.css';
 
 const root = document.getElementById('root');
 if (root === null) {
