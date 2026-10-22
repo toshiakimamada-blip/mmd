@@ -27,6 +27,7 @@ from .errors import (
 from .frontend import INDEX_FILE, FrontendFiles
 from .logs import STARTUP_LOGGER
 from .logs.asgi import TraceIdMiddleware
+from .security_headers import SecurityHeadersMiddleware
 from .settings import Settings
 
 # 存在しない経路で、エラーを返す対象にする HTTP のメソッド。
@@ -114,9 +115,12 @@ def create_app(settings: Settings) -> FastAPI:
     #    想定外の例外の変換より外側に置く。内側に置くと、どの例外も必ず通る接続制限の中が、
     #    エラーログの発生場所に選ばれてしまうため。
     #    切り替える設定は持たない。コンテナ名だけを渡す。
-    # 3. 処理の識別子(最も外側): 接続ログとエラーログに、同じ識別子が入る。
+    # 3. 応答ヘッダー: 読み込み先と通信先をアプリ自身に限る指示などを、HTTP の応答のすべてに付ける。
+    #    接続制限が断った応答と、想定外の例外の応答にも付くよう、その外側に置く。
+    # 4. 処理の識別子(最も外側): 接続ログとエラーログに、同じ識別子が入る。
     app.add_middleware(UnhandledErrorMiddleware)
     app.add_middleware(AccessControlMiddleware, app_hostname=settings.app_hostname)
+    app.add_middleware(SecurityHeadersMiddleware)
     app.add_middleware(TraceIdMiddleware)
 
     _register_api_routes(app)

@@ -13,6 +13,10 @@ export default defineConfig({
   build: {
     outDir: 'dist',
     sourcemap: false,
+    // 小さな画像やフォントを、data: の URL として CSS やスクリプトへ埋め込まない（既定は 4 KB 未満を埋め込む）。
+    // アプリサーバーが付ける応答ヘッダー（CSP）は、画像とフォントをアプリ自身のファイルに限り、
+    // data: を止める。埋め込むと、その画像やフォントが表示されなくなる。
+    assetsInlineLimit: 0,
   },
   server: {
     // 開発サーバーを使うときの接続先。アプリサーバー（3001）へ /api と /ws を中継する。

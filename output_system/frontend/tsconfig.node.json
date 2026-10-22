@@ -17,5 +17,6 @@
     "erasableSyntaxOnly": true,
     "noFallthroughCasesInSwitch": true
   },
-  "include": ["vite.config.ts"]
+  // scripts/: ビルドの検査(Node.js で実行する)。test/scripts/checkNoExternalUrls.test.ts: その入口を試すテスト。
+  "include": ["vite.config.ts", "scripts", "test/scripts/checkNoExternalUrls.test.ts"]
 }

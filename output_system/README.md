@@ -27,6 +27,17 @@
 
 どの画面にも当たらない URL は、会議の一覧へ移ります。
 
+## 画面の実装の規約
+
+画面は、会議の内容（字幕・要約・質問・タイトル）を、次のように扱います。基本設計書の非機能要件設計書「セキュリティ」の「画面に残す情報」「画面からの送信の防止」に従います。
+
+- **会議の内容を、ブラウザーの保存領域へ書きません。** 保存領域は、`localStorage`・`sessionStorage`・`IndexedDB`・Cache API・Cookie・`window.name` です。画面を開くたびに、アプリサーバーから読み直します。保存領域の中身は、ブラウザーを閉じたあとも、利用者のほかの操作から見える場所に残るためです。
+- **外部の資源を読み込みません。** 外部の CDN・Web フォント・解析サービスを使いません。必要なフォントや画像は、`frontend/` の中に置き、アプリに同梱します。ビルドの最後に、`scripts/check-no-external-urls.ts` が、ビルドした画面のファイルに外部の URL への参照が無いことを確かめます。参照があると、`npm run build` が失敗します。
+- **小さな画像やフォントを、`data:` の URL として埋め込みません。** 応答ヘッダー（CSP）が `data:` を止めるためです。ビルドの設定（`vite.config.ts` の `assetsInlineLimit: 0`）で埋め込みを止めています。
+- **スクリプトとスタイルを、HTML の中に直接書きません（インラインにしません）。** 同じ理由で、ブラウザーが実行を止めます。Worker とワークレットは、`blob:` の URL ではなく、アプリが配信するファイルから読み込みます。
+- 会議の内容を、URL（経路と問い合わせの文字列）に載せません。URL はログと履歴に残るためです。
+- 会議の内容は、常に文字として表示します（`dangerouslySetInnerHTML` と `innerHTML` への代入は、ESLint が禁止しています）。
+
 ## アプリサーバーの経路と設定
 
 アプリサーバーは、1 つのポート（既定は 3001）で、画面のファイル・HTTP・WebSocket を受けます。経路は次の 3 つに分けます。
@@ -85,6 +96,21 @@ Starlette の `TestClient` は uvicorn を通らないため、部品が無く�
 - 出荷するコンテナで確かめるテストは、`backend/test/container/` にあります（[出荷するコンテナの WebSocket の確認](#出荷するコンテナの-websocket-の確認)と同じ手順で動きます）。
 - 通す条件は、利用時も自動テスト時も同じです。テストのために切り替える設定はありません。自動テストのブラウザーは、コンテナ名（`http://toshiakimamada-blip-mmd-output-system:3001`）でアプリへ接続し、宛先と送り元の両方がコンテナ名になるため、そのまま通ります。
 - サーバーのテストは、`backend/test/conftest.py` の `local_client` で作るクライアントを使います。利用者が `http://localhost:3001` を開いたときと同じ宛先と送り元を付けます。別の宛先や送り元を試すときは、要求ごとに `headers` を渡します。
+
+### 応答ヘッダー（画面の読み込み先と通信先の制限）
+
+アプリサーバーは、HTTP の応答のすべてに、次のヘッダーを付けます（`backend/src/meeting_interpreter/security_headers.py`）。画面のファイル、API、エラー、接続制限が断った応答にも付きます。経路が同じ名前のヘッダーを付けても、決めた値に置き換えます。
+
+| ヘッダー | 値 | 目的 |
+|---|---|---|
+| `Content-Security-Policy` | 既定は `default-src 'none'`。スクリプト・スタイル・画像・フォント・通信先は `'self'`（アプリ自身）だけ。`base-uri`・`form-action`・`object-src`・`frame-ancestors` は `'none'` | 外部の資源の読み込みと、外への送信を、ブラウザーに止めさせる |
+| `X-Content-Type-Options` | `nosniff` | 宣言した種類と違う種類として、中身を解釈させない |
+| `Referrer-Policy` | `no-referrer` | 外へ出る要求に、アプリの URL（会議番号を含む）を送らない |
+| `X-Frame-Options` | `DENY` | ほかのサイトが、画面をフレームに埋め込めない。`frame-ancestors 'none'` の重ね書き |
+
+- 通信先の `'self'` は、同じホストとポートの WebSocket（`ws:`）を含みます。Chrome（156）で、`localhost`・`127.0.0.1`・ホスト名の 3 通りの宛先から WebSocket が接続できることを確かめました。`'self'` が WebSocket を含まないブラウザーが出たら、`CONTENT_SECURITY_POLICY` の `connect-src` に `ws://localhost:3001` などの接続先を明示します。
+- `upgrade-insecure-requests` は付けません。アプリは `http://localhost` で開くためです。
+- WebSocket の接続には、ヘッダーを足しません。ヘッダーを付けるのは、HTTP の応答だけです。
 
 ### 調整値
 
@@ -156,7 +182,8 @@ npm test                  # テスト（Vitest）
 npm run test:coverage     # カバレッジ付きのテスト
 npm run lint              # lint（ESLint）
 npm run typecheck         # 型チェック
-npm run build             # 本番用のビルド（dist/ に出る）
+npm run build             # 本番用のビルド（dist/ に出る）。最後に、外部の URL への参照が無いことも確かめる
+npm run check:dist        # ビルドした dist/ だけを、外部の URL への参照が無いか確かめる
 ```
 
 ## 依存の追加と更新
