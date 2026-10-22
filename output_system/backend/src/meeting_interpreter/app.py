@@ -9,7 +9,6 @@
 - それ以外: 画面のファイル（配信部）
 """
 
-import logging
 from typing import Final
 
 from fastapi import FastAPI, Request, WebSocket
@@ -17,11 +16,16 @@ from fastapi.responses import JSONResponse
 
 from . import APP_NAME
 from .api import health
-from .errors import ROUTE_NOT_FOUND, error_response
+from .errors import (
+    ROUTE_NOT_FOUND,
+    UnhandledErrorMiddleware,
+    error_response,
+    register_exception_handlers,
+)
 from .frontend import INDEX_FILE, FrontendFiles
+from .logs import STARTUP_LOGGER
+from .logs.asgi import TraceIdMiddleware
 from .settings import Settings
-
-logger = logging.getLogger(__name__)
 
 # 存在しない経路で、エラーを返す対象にする HTTP のメソッド。
 _ALL_METHODS: Final = ["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS", "HEAD"]
@@ -74,7 +78,8 @@ def _mount_frontend(app: FastAPI, settings: Settings) -> None:
     """
     if not (settings.static_dir / INDEX_FILE).is_file():
         # 画面のファイルが無くても、API は動かす。気づけるよう警告を出す。
-        logger.warning(
+        # 起動の時点の知らせなので、起動の知らせ用のロガーで出す(文面は設定の値だけ)。
+        STARTUP_LOGGER.warning(
             "画面のファイルが見つかりません: %s（%s が無い）", settings.static_dir, INDEX_FILE
         )
     # check_dir=False: 置き場が無くても、アプリサーバーの起動は止めない。
@@ -99,6 +104,13 @@ def create_app(settings: Settings) -> FastAPI:
         openapi_url="/api/openapi.json",
     )
     app.state.settings = settings
+
+    register_exception_handlers(app)
+    # add_middleware は、あとから足したものほど外側になる。
+    # 想定外の例外の変換(内側)を先に、処理の識別子(外側)をあとに足す。
+    # こうすると、エラーログにも処理の識別子が入る。接続制限は、識別子の内側に足す。
+    app.add_middleware(UnhandledErrorMiddleware)
+    app.add_middleware(TraceIdMiddleware)
 
     _register_api_routes(app)
     _register_websocket_routes(app)

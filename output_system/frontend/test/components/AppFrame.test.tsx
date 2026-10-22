@@ -86,17 +86,19 @@ describe('AppFrame', () => {
    * 【テスト内容】表示する内容が無い状態で、お知らせ帯の領域を調べる
    * 【期待結果】
    * - 領域は文書の中に残る（あとから内容が入ったとき、読み上げソフトに伝わるようにするため）
-   * - 領域は空で、読み上げソフトへ「丁寧に伝える」属性（aria-live=polite）を持つ
+   * - お知らせの項目は 1 つも無い（表示する内容が無いときは何も出さない）
+   * - 警告を丁寧に伝える領域（aria-live=polite）を、先に持っている
    */
-  it('should keep an empty notice area that announces content politely', () => {
+  it('should keep an empty notice area that announces warnings politely', () => {
     const { container } = render(
       <RouterProvider router={createMemoryRouter(routes, { initialEntries: ['/'] })} />,
     );
 
     const noticeArea = container.querySelector('[data-notice-area]');
     expect(noticeArea).not.toBeNull();
-    expect(noticeArea).toBeEmptyDOMElement();
-    expect(noticeArea).toHaveAttribute('aria-live', 'polite');
+    expect(noticeArea?.querySelectorAll('[data-notice-kind]')).toHaveLength(0);
+    expect(noticeArea?.textContent).toBe('');
+    expect(noticeArea?.querySelector('[aria-live="polite"]')).not.toBeNull();
   });
 
   /**
@@ -139,5 +141,92 @@ describe('AppFrame', () => {
     expect(screen.getAllByText(/画面の定義を持たない経路です/).length).toBeGreaterThan(0);
     expect(screen.queryByRole('banner')).not.toBeInTheDocument();
     consoleError.mockRestore();
+  });
+
+  /**
+   * 【テスト対象】AppFrame の対応していないブラウザーの案内
+   * 【テスト内容】Edge、Chrome（既定）、ヘッドレスの Chromium のユーザーエージェントで、画面を開く
+   * 【期待結果】案内が出ないこと
+   */
+  it.each([
+    [
+      'Edge',
+      'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36 Edg/126.0.2592.87',
+    ],
+    [
+      'Chrome',
+      'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36',
+    ],
+    [
+      'headless Chromium',
+      'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) HeadlessChrome/126.0.0.0 Safari/537.36',
+    ],
+  ])('should not show the browser guidance in %s', (_name, userAgent) => {
+    vi.spyOn(window.navigator, 'userAgent', 'get').mockReturnValue(userAgent);
+
+    openUrl('/');
+
+    expect(screen.queryByText(/Edge または Chrome で開いてください/)).not.toBeInTheDocument();
+  });
+
+  /**
+   * 【テスト対象】AppFrame の対応していないブラウザーの案内
+   * 【テスト内容】Firefox・Safari・Opera・旧 Edge のユーザーエージェントに切り替えて、
+   *               4 つの画面のそれぞれを開く
+   * 【期待結果】どの画面でも、お知らせ帯に「警告」の文字と
+   *            「Edge または Chrome で開いてください」の案内が出ること。
+   *            案内は aria-live=polite で伝わり、閉じるボタンは無い（状況は解消しないため）
+   */
+  it.each([
+    ['Firefox', 'Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:128.0) Gecko/20100101 Firefox/128.0'],
+    [
+      'Safari',
+      'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.5 Safari/605.1.15',
+    ],
+    [
+      'Opera',
+      'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36 OPR/111.0.0.0',
+    ],
+    [
+      'legacy Edge',
+      'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/70.0.3538.102 Safari/537.36 Edge/18.19582',
+    ],
+  ])('should guide users of %s on every screen', (_name, userAgent) => {
+    vi.spyOn(window.navigator, 'userAgent', 'get').mockReturnValue(userAgent);
+
+    for (const url of ['/', '/meetings/new', '/meetings/abc123/live', '/meetings/abc123']) {
+      const { container, unmount } = render(
+        <RouterProvider router={createMemoryRouter(routes, { initialEntries: [url] })} />,
+      );
+
+      const guidance = screen.getByText(/Edge または Chrome で開いてください/);
+      const notice = guidance.closest('[data-notice-kind]');
+      expect(notice, url).toHaveAttribute('data-notice-kind', 'warning');
+      expect(notice, url).toHaveAttribute('aria-live', 'polite');
+      expect(within(notice as HTMLElement).getByText('警告'), url).toBeInTheDocument();
+      expect(within(notice as HTMLElement).queryByRole('button'), url).not.toBeInTheDocument();
+      // ヘッダのすぐ下（お知らせ帯の中）に出る
+      expect(container.querySelector('[data-notice-area]')).toContainElement(guidance);
+      unmount();
+    }
+  });
+
+  /**
+   * 【テスト対象】AppFrame の対応していないブラウザーの案内（画面を移った後）
+   * 【テスト内容】対応していないブラウザーで「会議の一覧」を開き、「会議の準備」へ画面を切り替える
+   * 【期待結果】案内が出たままで、1 つだけであること（画面ごとに重ねて出さない）
+   */
+  it('should keep exactly one guidance across screen changes', async () => {
+    vi.spyOn(window.navigator, 'userAgent', 'get').mockReturnValue(
+      'Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:128.0) Gecko/20100101 Firefox/128.0',
+    );
+    const router = openUrl('/');
+    expect(screen.getAllByText(/Edge または Chrome で開いてください/)).toHaveLength(1);
+
+    await act(async () => {
+      await router.navigate('/meetings/new');
+    });
+
+    expect(screen.getAllByText(/Edge または Chrome で開いてください/)).toHaveLength(1);
   });
 });

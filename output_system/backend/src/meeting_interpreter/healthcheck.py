@@ -9,7 +9,7 @@ import sys
 import urllib.error
 import urllib.request
 
-from .settings import load_settings
+from .settings import load_port
 
 # 動作の確認の経路。
 HEALTH_PATH = "/api/health"
@@ -36,8 +36,11 @@ def is_healthy(port: int, timeout: float = 3.0) -> bool:
 
 
 def main() -> int:
-    """設定のポートで死活を確認し、終了コードを返す。"""
-    return 0 if is_healthy(load_settings().port) else 1
+    """設定のポートで死活を確認し、終了コードを返す。
+
+    ポートの環境変数が誤っているときは、例外のまま終わる（終了コードは 1 で、正常ではない扱い）。
+    """
+    return 0 if is_healthy(load_port()) else 1
 
 
 if __name__ == "__main__":  # pragma: no cover

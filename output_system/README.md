@@ -10,7 +10,7 @@
 | `frontend/` | 画面。TypeScript と React を Vite でビルドします。ロックファイルは `package-lock.json` です |
 | `config/` | アプリに同梱する設定ファイル |
 | `tools/` | 補助の道具。画面の依存を足すときに、固定した Node.js で実行する `with-pinned-node.sh` など |
-| `docs/` | 実装に付ける文書 |
+| `docs/` | 実装に付ける文書。エラーの扱いと、エラーコードの一覧は `docs/errors.md`。お知らせ帯とエラー表示の部品の使い方は `docs/notices.md` |
 
 テストは、各フォルダの `src/` と同じ階層の `test/` に置き、`src/` と同じ構造にします。起動したコンテナを相手にするテストだけは、`backend/test/container/` に置きます。
 
@@ -48,24 +48,60 @@ uvicorn は、WebSocket の部品（`websockets`）が無いと、WebSocket の�
 
 Starlette の `TestClient` は uvicorn を通らないため、部品が無くても WebSocket のテストは通ります。本物の uvicorn で確かめるテストは `backend/test/meeting_interpreter/test_websocket_server.py` にあります。出荷するイメージで確かめる手順は、[出荷するコンテナの WebSocket の確認](#出荷するコンテナの-websocket-の確認)にあります。
 
-動かす場所で変わる値は、環境変数で渡します。コンテナでは `docker-compose.yml` で指定します。
+動かす場所で変わる値は、環境変数で渡します。コンテナでは `docker-compose.yml` で指定します。名前は、アプリの共通の接頭辞 `MMD_` を付けた大文字です。
 
-| 環境変数 | 意味 | 既定値 |
-|---|---|---|
-| `MMD_PORT` | 待ち受けるポート | `3001` |
-| `MMD_APP_HOSTNAME` | 要求の宛先として常に通す、アプリのコンテナ名 | 未設定 |
-| `MMD_RECORDS_DIR` | 記録データベースを置く場所 | `/var/lib/mmd/records` |
-| `MMD_MODELS_DIR` | AI モデルを置く場所 | `/var/lib/mmd/models` |
-| `MMD_STATIC_DIR` | ビルドした画面のファイルの場所 | `/app/static` |
+| 環境変数 | 意味 | 必須 | 既定値 |
+|---|---|---|---|
+| `MMD_PORT` | 待ち受けるポート | いいえ | `3001` |
+| `MMD_APP_HOSTNAME` | 要求の宛先として常に通す、アプリのコンテナ名 | いいえ | 未設定 |
+| `MMD_RECORDS_DIR` | 記録データベースを置く場所 | はい | なし（コンテナのイメージは `/var/lib/mmd/records` を渡します） |
+| `MMD_MODELS_DIR` | AI モデルを置く場所 | はい | なし（コンテナのイメージは `/var/lib/mmd/models` を渡します） |
+| `MMD_STATIC_DIR` | ビルドした画面のファイルの場所 | いいえ | `/app/static` |
+| `MMD_CONFIG_DIR` | アプリに同梱する設定ファイル（`tuning.toml`、`models.toml`）の場所 | いいえ | `/app/config` |
+| `MMD_LOG_LEVEL` | ログのレベルの下限。`info`・`warning`・`error` のいずれか（大文字小文字は問いません） | いいえ | `info` |
 
-空の環境変数は、未設定として扱います。
+- 空（または空白だけ）の環境変数は、未設定として扱います。
+- 記録とモデルの置き場は、既定値を持たせません。名前付きボリュームの置き場と食い違ったまま、別の場所へ黙って書き込む事故を防ぐためです。
+- 誤りは起動の時点で見つけます。必須の環境変数が無いとき、値が誤っているとき、調整値のファイルが読めないときは、サーバーを起動せず、終了コード 2 で止まります。誤りは見つけたものをすべて、標準出力に 1 行 1 件で出します。
+- 秘密の情報（パスワード・鍵）は持ちません。設定を画面から変える機能もありません。
+
+### 調整値
+
+発話の区切りの長さの上限、警告を出すしきい値、文章生成モデルへ一度に渡す量、CPU の割り当てなどは、アプリに同梱するファイル `config/tuning.toml` で持ちます。値はすべて仮置きで、利用者の PC で測った結果をもとに見直します。環境変数でも上書きできます。名前は、項目名を大文字にして `MMD_TUNING_` を付けます（例: `utterance_max_seconds` は `MMD_TUNING_UTTERANCE_MAX_SECONDS`）。項目の一覧と意味は `config/tuning.toml` のコメントにあります。
+
+## ログ
+
+ログは、コンテナの標準出力へ 1 行 1 件の JSON で出します（標準エラー出力には出しません）。コンテナのログは `docker compose logs` で読めます。種別と項目は、基本設計書の横断設計規約「ログの種別と項目」に従います。
+
+| 種別 | `log_type` | レベル | 項目 |
+|---|---|---|---|
+| 処理ログ | `processing` | 情報(`info`) | `process_type`（処理の種類）、`meeting_id`（会議番号）、`trace_id`（処理の識別子）、`duration_ms`（かかった時間）、`item_count`（件数）、`char_count`（文字数） |
+| エラーログ | `error` | 業務エラーは警告(`warning`)、システムエラーは異常(`error`) | `error_code`、`component`（発生したコンポーネント）、`meeting_id`、`trace_id`。想定外の例外は、`exception_type`（種類）と `location`（発生場所）も出す |
+| 接続ログ | `connection` | 警告(`warning`) | `reject_reason`（断った理由の種類）、`destination_name`（宛先の名前）、`source_name`（送り元の名前） |
+
+- どの行にも、`timestamp`（UTC・ミリ秒）、`log_type`、`level` が付きます。
+- 「必ず含める項目」は、値が無いときも `null` で出します。
+- 利用者の項目は持ちません。ログインが無いためです。
+- 会議の内容は、ログに書けません。字幕・要約・質問の本文、会議のタイトル、文章生成モデルへ渡す指示と受け取った出力、音声は、渡しても出力されません。書ける項目は、`backend/src/meeting_interpreter/logs/fields.py` の許可リストで決めています。許可リストに無い項目と、決めた形に当てはまらない値は捨てます。捨てた数は `dropped_field_count` に出します。名前も値も出しません。
+- 項目を足すときは、許可リストに `FieldSpec` を 1 つ足します（性能の測定の値を足す作業で使います）。値の形は、会議の内容が入り込めない狭い形にします。
+- 処理の識別子は、1 回の要求に 1 つ振ります（ミドルウェアが振ります）。ワーカーへ渡すメッセージには、`attach_trace_id` で付けます。受け取った側は、`trace_scope_from_message` で同じ識別子の範囲に入ります。
+- 標準のロガー（`logging`）を使う部品（uvicorn など）のログも、標準出力へ出します。`log_type` は `runtime` で、項目は `logger`（ロガーの名前）と `message`（文面）です。文面は、出してよいと決めた記録だけに付けます。それ以外は、`logger`・`level`・`exception_type`（例外の種類）だけを出し、文面と引数は出しません（出さなかった数は `dropped_field_count` に出します）。例外の文面とスタックトレースも出しません。
+  - 文面を出す記録は、2 つだけです。起動の知らせ用のロガー `STARTUP_LOGGER`（`meeting_interpreter.startup`）の記録と、uvicorn の起動・終了・接続の開始と終了の知らせです。後者は、文の形が `logs/output.py` の `_UVICORN_FIXED_MESSAGES` にあるものに限ります。
+  - 要求の経路と問い合わせの文字列を含む uvicorn の記録（アクセスの記録、接続の受け付けと拒否）は、文面を出しません。アクセスの記録は、起動の引数（`access_log=False`）でも止めています。
+  - `STARTUP_LOGGER` には、環境変数の名前・設定の値・ファイルの置き場などの、設定に関わる固定の文だけを渡します。会議の最中の記録には使いません。
+  - 会議に関わる記録には、標準のロガーを使わず、`log_processing`・`log_error`・`log_connection` を使います。標準のロガーに会議の内容を渡しても、文面は出ませんが、調べる手がかり（項目）も残らないためです。
+  - 標準のロガーを通らない出力（`print`、`sys.stdout` への直接の書き込み、`warnings`、スレッドの中の未処理の例外の表示）は、この仕組みの外です。`print` は ruff で禁止しています。ワーカーなど別のプロセスを足すときは、そのプロセスの最初で `configure_logging` を呼びます。
+- `runtime` は、基本設計書の「ログの種別と項目」にある 3 種別（処理ログ・エラーログ・接続ログ）の外です。設定の誤りで起動できない理由を、環境変数の名前つきの日本語の文で出す必要があり、3 種別の項目には文を載せる欄が無いために設けています。
+- ログのレベルの下限は、環境変数 `MMD_LOG_LEVEL` で決めます。性能の測定は情報のレベルの処理ログを使うため、既定は `info` です。
 
 ### コンテナを使わずにアプリサーバーを動かす（開発用）
 
 先に `frontend/` で `npm run build` を実行してから、`backend/` で次を実行します。
 
 ```bash
-MMD_STATIC_DIR=../frontend/dist PYTHONPATH=src uv run --no-dev python -m meeting_interpreter
+MMD_STATIC_DIR=../frontend/dist MMD_CONFIG_DIR=../config \
+MMD_RECORDS_DIR=/tmp/mmd/records MMD_MODELS_DIR=/tmp/mmd/models \
+PYTHONPATH=src uv run --no-dev python -m meeting_interpreter
 ```
 
 ## 必要な道具

@@ -6,18 +6,23 @@ WebSocket の部品（websockets など）が入っていなくても、WebSocke
 WebSocket として動かない。ここでは本物のサーバーを起動し、ネットワークの上で確かめる。
 """
 
+import json
 import socket
 import threading
-from collections.abc import Iterator
+from collections.abc import Awaitable, Callable, Iterator
 from contextlib import contextmanager
 
 import pytest
 import uvicorn
 from fastapi import FastAPI, WebSocket
+from websockets.exceptions import ConnectionClosed, InvalidStatus
+from websockets.sync.client import connect
 
-from conftest import request_websocket_handshake
+from conftest import add_probe_route, request_websocket_handshake
 from meeting_interpreter.__main__ import WEBSOCKET_IMPLEMENTATION
 from meeting_interpreter.app import create_app
+from meeting_interpreter.errors import BusinessAppError, InputAppError, SystemAppError
+from meeting_interpreter.logs import configure_logging
 from meeting_interpreter.settings import Settings
 
 LOOPBACK = "127.0.0.1"
@@ -112,6 +117,179 @@ class TestWebSocketHandshakeOnRealServer:
                 assert client.recv(timeout=5) == "hello"
 
 
+def _app_with_websocket_probe(
+    settings: Settings, endpoint: Callable[[WebSocket], Awaitable[None]]
+) -> FastAPI:
+    """アプリ全体に、テスト用の WebSocket の経路(/ws/probe)を足したものを返す。"""
+    app = create_app(settings)
+    add_probe_route(app, "/ws/probe", endpoint, methods=["WEBSOCKET"])
+    return app
+
+
+def _log_entries(capsys: pytest.CaptureFixture[str]) -> list[dict]:
+    """標準出力のログを JSON として読む。標準エラー出力が空であることも確かめる。"""
+    captured = capsys.readouterr()
+    assert captured.err == ""
+    return [json.loads(line) for line in captured.out.splitlines()]
+
+
+def _error_logs(entries: list[dict]) -> list[tuple[str, str]]:
+    """エラーログの (エラーコード, レベル) を、出た順に返す。"""
+    return [(e["error_code"], e["level"]) for e in entries if e["log_type"] == "error"]
+
+
+def _runtime_problems(entries: list[dict]) -> list[dict]:
+    """runtime のログのうち、警告と異常のもの(uvicorn が異常を知らせた記録)を返す。"""
+    return [e for e in entries if e["log_type"] == "runtime" and e["level"] != "info"]
+
+
+class TestAppErrorInWebSocketOnRealServer:
+    """本物の uvicorn の上で、WebSocket の処理がエラー(AppError)を起こしたときの扱い。
+
+    Starlette の TestClient は、受け付け済みの接続へ HTTP の応答を返しても失敗しない。
+    本物の uvicorn では失敗するため、ここで確かめる。
+    """
+
+    @pytest.mark.parametrize(
+        ("error_class", "code", "close_code", "log_level"),
+        [
+            (BusinessAppError, "MEETING_ALREADY_RUNNING", 1008, "warning"),
+            (InputAppError, "SYSTEM_INVALID_REQUEST", 1008, None),
+            (SystemAppError, "RECORD_WRITE_FAILED", 1011, "error"),
+        ],
+        ids=["business_error", "input_error", "system_error"],
+    )
+    def test_should_close_an_accepted_websocket_with_the_error_code(
+        self, settings: Settings, capsys, error_class, code: str, close_code: int, log_level
+    ):
+        """
+        【テスト対象】接続を受け付けたあとの WebSocket の処理が起こすエラー(AppError)
+        【テスト内容】接続を受け付けてから、業務エラー・入力エラー・システムエラーを起こす経路へ、
+                      WebSocket のクライアントで接続して、受信を待つ
+        【期待結果】接続が、分類に応じた符号(入力エラーと業務エラーは 1008、システムエラーは 1011)で
+                    閉じられ、閉じる理由がエラーコードになること。
+                    エラーログは、分類に応じたレベル(業務エラーは警告、システムエラーは異常、
+                    入力エラーは出さない)で 1 件だけ出る。想定外のエラー
+                    (SYSTEM_UNEXPECTED_ERROR)や、uvicorn の異常の記録は出ない
+        """
+        configure_logging("info")
+
+        async def endpoint(websocket: WebSocket) -> None:
+            await websocket.accept()
+            raise error_class(code, "固定の文です。", "もう一度操作してください。")
+
+        with _running_server(_app_with_websocket_probe(settings, endpoint)) as port:
+            with connect(f"ws://{LOOPBACK}:{port}/ws/probe", open_timeout=5) as client:
+                with pytest.raises(ConnectionClosed) as closed:
+                    client.recv(timeout=5)
+
+        assert closed.value.rcvd is not None
+        assert closed.value.rcvd.code == close_code
+        assert closed.value.rcvd.reason == code
+        entries = _log_entries(capsys)
+        assert _error_logs(entries) == ([(code, log_level)] if log_level else [])
+        assert _runtime_problems(entries) == []
+
+    def test_should_reject_a_websocket_that_raises_before_accepting(
+        self, settings: Settings, capsys
+    ):
+        """
+        【テスト対象】接続を受け付ける前の WebSocket の処理が起こす業務エラー
+        【テスト内容】接続を受け付ける前に業務エラーを起こす経路へ、クライアントで接続する
+        【期待結果】接続の確立が 403 で断られること(WebSocket の接続を断る標準の形)。
+                    エラーログは警告で 1 件だけ出て、uvicorn の異常の記録
+                    (ハンドシェイクが終わっていない、など)は出ない
+        """
+        configure_logging("info")
+
+        async def endpoint(websocket: WebSocket) -> None:
+            raise BusinessAppError(
+                "MEETING_ALREADY_RUNNING", "固定の文です。", "操作してください。"
+            )
+
+        with _running_server(_app_with_websocket_probe(settings, endpoint)) as port:
+            with pytest.raises(InvalidStatus) as refused:
+                connect(f"ws://{LOOPBACK}:{port}/ws/probe", open_timeout=5)
+
+        assert refused.value.response.status_code == 403
+        entries = _log_entries(capsys)
+        assert _error_logs(entries) == [("MEETING_ALREADY_RUNNING", "warning")]
+        assert _runtime_problems(entries) == []
+
+    def test_should_not_close_again_when_the_endpoint_already_closed(
+        self, settings: Settings, capsys
+    ):
+        """
+        【テスト対象】処理が接続を閉じたあとに起こすエラー
+        【テスト内容】接続を受け付け、正常に閉じてから、業務エラーを起こす経路へ接続する
+        【期待結果】クライアントには、処理が閉じた符号(1000)が届き、サーバーは重ねて閉じようとしないこと。
+                    エラーログは警告で 1 件だけ出て、想定外のエラーは出ない
+        """
+        configure_logging("info")
+
+        async def endpoint(websocket: WebSocket) -> None:
+            await websocket.accept()
+            await websocket.close(code=1000)
+            raise BusinessAppError(
+                "MEETING_ALREADY_RUNNING", "固定の文です。", "操作してください。"
+            )
+
+        with _running_server(_app_with_websocket_probe(settings, endpoint)) as port:
+            with connect(f"ws://{LOOPBACK}:{port}/ws/probe", open_timeout=5) as client:
+                with pytest.raises(ConnectionClosed) as closed:
+                    client.recv(timeout=5)
+
+        assert closed.value.rcvd is not None
+        assert closed.value.rcvd.code == 1000
+        entries = _log_entries(capsys)
+        assert _error_logs(entries) == [("MEETING_ALREADY_RUNNING", "warning")]
+        assert _runtime_problems(entries) == []
+
+
+class TestUnexpectedExceptionOnRealServer:
+    """本物の uvicorn の上での、想定外の例外の扱い。"""
+
+    def test_should_not_let_uvicorn_record_the_exception_message(self, settings: Settings, capsys):
+        """
+        【テスト対象】想定外の例外の変換(本物の uvicorn)
+        【テスト内容】会議の内容を含む文面の例外を起こす経路を、本物の uvicorn の上で呼ぶ。
+                      ログの設定は、起動のときと同じにする
+        【期待結果】500 で共通の形(SYSTEM_UNEXPECTED_ERROR)が返り、出力のどこにも例外の文面が
+                    現れないこと。uvicorn の「Exception in ASGI application」の記録も出ない。
+                    例外が外へ伝わると、uvicorn が文面つきのスタックトレースを記録するため、
+                    変換する場所で止めていることの確認
+        """
+        import json
+        import urllib.request
+
+        from conftest import add_probe_route
+        from meeting_interpreter.logs import configure_logging
+
+        secret = "The summary says we will fire Tanaka-san on Friday."
+        configure_logging("info")
+        app = create_app(settings)
+
+        async def endpoint() -> None:
+            raise ValueError(secret)
+
+        add_probe_route(app, "/api/probe", endpoint)
+
+        opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+        with _running_server(app) as port:
+            try:
+                opener.open(f"http://{LOOPBACK}:{port}/api/probe", timeout=5)
+            except urllib.error.HTTPError as error:
+                status = error.code
+                body = json.loads(error.read())
+
+        captured = capsys.readouterr()
+        assert status == 500
+        assert body["code"] == "SYSTEM_UNEXPECTED_ERROR"
+        assert secret not in captured.out + captured.err
+        assert "Exception in ASGI application" not in captured.out
+        assert captured.err == ""
+
+
 def test_should_serve_websocket_with_the_implementation_named_in_the_entrypoint(
     settings: Settings,
 ):
@@ -121,7 +299,9 @@ def test_should_serve_websocket_with_the_implementation_named_in_the_entrypoint(
     【期待結果】WebSocket の実装が見つかること（見つからなければ読み込みで失敗する）。
                 部品が無いまま黙って起動し、/ws が動かない状態を作らないため
     """
-    config = uvicorn.Config(create_app(settings), ws=WEBSOCKET_IMPLEMENTATION)
+    # log_config=None: uvicorn の既定のログの設定を、プロセス全体へ書き込ませない。
+    # 書き込むと、ほかのテストの出力が変わる。
+    config = uvicorn.Config(create_app(settings), ws=WEBSOCKET_IMPLEMENTATION, log_config=None)
 
     config.load()
 

@@ -1,15 +1,39 @@
 """テスト全体で使う部品。"""
 
+import logging
 import socket
 from collections.abc import Iterator
 from dataclasses import dataclass
 from pathlib import Path
 
 import pytest
+from fastapi import FastAPI
+from fastapi.routing import APIRoute, APIWebSocketRoute
 from fastapi.testclient import TestClient
 
 from meeting_interpreter.app import create_app
 from meeting_interpreter.settings import Settings
+from meeting_interpreter.tuning import TUNING_FILE_NAME, load_tuning
+
+# アプリに同梱する設定ファイルの置き場（output_system/config）。
+# このファイルは backend/test/ にあるため、2 つ上が output_system/。
+REPO_CONFIG_DIR = Path(__file__).resolve().parents[2] / "config"
+
+
+@pytest.fixture(autouse=True)
+def restore_logging() -> Iterator[None]:
+    """テストが変えたログの設定（レベルと出力先）を、テストの終わりに元へ戻す。
+
+    ログの設定はプロセス全体で共有される。戻さないと、あるテストの設定が次のテストの出力を変える。
+    """
+    root = logging.getLogger()
+    app_logger = logging.getLogger("meeting_interpreter.applog")
+    saved_handlers = list(root.handlers)
+    saved_levels = (root.level, app_logger.level)
+    yield
+    root.handlers[:] = saved_handlers
+    root.setLevel(saved_levels[0])
+    app_logger.setLevel(saved_levels[1])
 
 
 @dataclass(frozen=True)
@@ -54,13 +78,22 @@ def site(tmp_path: Path) -> FrontendSite:
 
 @pytest.fixture
 def settings(site: FrontendSite, tmp_path: Path) -> Settings:
-    """テスト用の設定。置き場はすべて一時のフォルダーに向ける。"""
+    """テスト用の設定。置き場はすべて一時のフォルダーに向ける。
+
+    調整値は、アプリに同梱するファイルをそのまま読む。同梱のファイルの検証も兼ねる。
+    """
+    problems: list[str] = []
+    tuning = load_tuning(REPO_CONFIG_DIR / TUNING_FILE_NAME, {}, problems)
+    assert tuning is not None, problems
     return Settings(
         port=3001,
         app_hostname="test-container",
         records_dir=tmp_path / "records",
         models_dir=tmp_path / "models",
         static_dir=site.root,
+        log_level="info",
+        config_dir=REPO_CONFIG_DIR,
+        tuning=tuning,
     )
 
 
@@ -69,6 +102,26 @@ def client(settings: Settings) -> Iterator[TestClient]:
     """アプリ全体を組み立てて、HTTP と WebSocket で呼べるクライアントを返す。"""
     with TestClient(create_app(settings)) as test_client:
         yield test_client
+
+
+def add_probe_route(app: FastAPI, path: str, endpoint, methods: list[str] | None = None) -> None:
+    """テスト用の経路を、アプリの先頭へ足す。
+
+    実際のアプリは、末尾に「存在しない経路」の受け皿と配信部を持つ。テスト用の経路は、
+    それらより先に当たるよう、先頭へ差し込む。実際のアプリの組み立て(ミドルウェアと例外の処理)を
+    通したまま、経路の中で起こしたい出来事(例外など)を起こすために使う。
+
+    Args:
+        app: create_app が返したアプリ。
+        path: 足す経路。
+        endpoint: 経路の処理。
+        methods: HTTP のメソッド。省略すると GET。
+            WebSocket の経路は、methods に ["WEBSOCKET"] を渡す。
+    """
+    if methods == ["WEBSOCKET"]:
+        app.router.routes.insert(0, APIWebSocketRoute(path, endpoint))
+    else:
+        app.router.routes.insert(0, APIRoute(path, endpoint, methods=methods or ["GET"]))
 
 
 @dataclass(frozen=True)

@@ -228,3 +228,27 @@ class TestRoutePrefixes:
             response = client.get(url)
             assert "cdn.jsdelivr.net" not in response.text
             assert "swagger" not in response.text.lower()
+
+
+class TestNoSettingsEditingRoute:
+    """設定を画面から変える機能を作らない。"""
+
+    def test_should_not_expose_any_route_that_changes_settings(self, settings: Settings):
+        """
+        【テスト対象】create_app が登録する API の経路（OpenAPI の定義）
+        【テスト内容】設定・調整値に関わる名前の経路が、状態を変えるメソッド
+                      （POST・PUT・PATCH・DELETE）を受けるかを確かめる
+        【期待結果】そのような経路が 1 つも無いこと
+                    （設定は環境変数と同梱のファイルで持ち、画面から変える機能を設けない）
+        """
+        paths = create_app(settings).openapi()["paths"]
+        writable = {"post", "put", "patch", "delete"}
+        words = ("setting", "config", "tuning")
+
+        offending = [
+            (path, sorted(writable & set(methods)))
+            for path, methods in paths.items()
+            if any(word in path.lower() for word in words) and writable & set(methods)
+        ]
+
+        assert offending == []

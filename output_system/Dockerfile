@@ -158,6 +158,8 @@ RUN groupadd --system --gid 10001 app \
 
 COPY --from=backend-build /opt/venv /opt/venv
 COPY backend/src /app/src
+# アプリに同梱する設定ファイル（調整値と AI モデルの定義）。置き場は MMD_CONFIG_DIR。
+COPY config /app/config
 COPY --from=frontend-build /build/dist /app/static
 
 # PYTHONPATH: アプリのコードの場所（アプリは、パッケージとしては入れない）。
@@ -170,6 +172,7 @@ ENV PATH=/opt/venv/bin:${PATH} \
     PYTHONUNBUFFERED=1 \
     MMD_PORT=3001 \
     MMD_STATIC_DIR=/app/static \
+    MMD_CONFIG_DIR=/app/config \
     MMD_RECORDS_DIR=/var/lib/mmd/records \
     MMD_MODELS_DIR=/var/lib/mmd/models
 
