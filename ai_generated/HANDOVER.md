@@ -17,16 +17,22 @@ output_system/
 │   ├── src/meeting_interpreter/
 │   │   ├── app.py            # create_app: ミドルウェアと経路の登録を 1 か所にまとめる
 │   │   ├── frontend.py       # 配信部（SPA の配信）
-│   │   ├── settings.py       # 環境変数 MMD_* の読み込み
-│   │   ├── errors.py         # 画面へ返すエラーの共通の形
+│   │   ├── settings.py       # 環境変数 MMD_* の読み込み（起動時に検証）
+│   │   ├── tuning.py         # config/tuning.toml の調整値（MMD_TUNING_* で上書き）
+│   │   ├── config_error.py   # 設定の誤りで起動を止める例外
+│   │   ├── logs/             # 3 種類のログ（標準出力・JSON 1 行）。許可リストは fields.py
+│   │   ├── errors.py         # 画面へ返すエラーの共通の形（3 分類・9 領域・例外ハンドラー）
 │   │   ├── healthcheck.py    # HEALTHCHECK 用
 │   │   └── api/health.py     # GET /api/health
 │   └── test/                 # src と同じ構造。test/container/ は起動したコンテナを相手にする（MMD_CONTAINER_URL のときだけ動く）
 ├── frontend/
-│   ├── src/{routes.ts,router.tsx,components/AppFrame.tsx,screens/*,styles/frame.css}
+│   ├── src/{routes.ts,router.tsx,components/AppFrame.tsx,screens/*,styles/{frame,notices}.css}
+│   ├── src/errors/           # エラーの型と、エラーコードごとの文言の一覧（errorMessages.ts）
+│   ├── src/components/notices/ # お知らせ帯・7 つのエラー表示パターン・確認の表示（使い方は docs/notices.md）
 │   └── test/                 # src と同じ構造
 ├── tools/with-pinned-node.sh # Dockerfile と同じ版の Node.js で、渡されたコマンド（npm install など）を実行する
-├── config/ docs/             # 後続の作業で中身を足す（README のみ）
+├── config/                   # tuning.toml（調整値の仮置き）、models.toml（置き場のみ。中身は Task 2.1.1）
+├── docs/                     # errors.md（エラーの扱い・コード一覧）、notices.md（画面の部品の使い方）
 ```
 
 ## ビルド・起動方法
@@ -42,7 +48,13 @@ output_system/
 - uvicorn には WebSocket の実装を名前で指定する（`__main__.py` の `WEBSOCKET_IMPLEMENTATION` = `websockets-sansio`）。既定の `auto` は、部品が無いと黙って WebSocket 無しで起動し、`/ws` がふつうの HTTP になる。名前で指定すると、部品が無いイメージは起動で失敗する
 - 接続制限（Task 1.3.1）は、`create_app` にミドルウェアとして足す。配信部（最後の mount）にも効く
 - 画面の読み込み先と通信先を限る応答ヘッダー（Task 1.3.3）は、まだ入れていない
-- 設定は `Settings`（`MMD_PORT`、`MMD_APP_HOSTNAME`、`MMD_RECORDS_DIR`、`MMD_MODELS_DIR`、`MMD_STATIC_DIR`）。使うのは今は port と static_dir だけ。残りは後続の作業が使う
+- 設定は `Settings`（`MMD_PORT`、`MMD_APP_HOSTNAME`、`MMD_RECORDS_DIR`、`MMD_MODELS_DIR`、`MMD_STATIC_DIR`、`MMD_CONFIG_DIR`、`MMD_LOG_LEVEL`）。記録とモデルの置き場は既定値を持たせない（ボリュームと食い違ったまま別の場所へ黙って書く事故を防ぐ）。誤りは起動時にすべて出し、終了コード 2 で止める
+- ログは標準出力（標準エラーではない）。許可リスト（`logs/fields.py`）に無い項目と、決めた形に合わない値は捨てる。会議の内容を書く経路を作らないため、標準のロガーは会議に関わる記録に使わない。項目を足すときは `FieldSpec` を足す
+- 画面へ返すエラーは 4 項目（分類・コード・何が起きたか・次に行う操作）。画面はサーバーが返した文面を表示せず、エラーコードごとの文言の一覧（`errorMessages.ts`）から引く。未登録のコードは分類ごとの汎用の文言。機能を足すときは、コードと文言の両方を足す（`docs/errors.md`）
+- お知らせ帯は `AppFrame` が `NoticeProvider` と `NoticeBand` を持つ。画面の部品は `useNoticeActions`（出す・消す）と `useWarning`（条件が成り立つ間だけ出す）を使う。エラーは `role="alert"`、警告は `aria-live="polite"`。警告を入れる領域は、空のときも文書に残す（あとから入った警告を読み上げソフトへ伝えるため）
+- エラーと警告は、文字の札（エラーは塗り・警告は枠）・アイコンの形（丸・三角）・色の 3 つで区別する。つながらないことの表示（`kind: 'offline'`）はエラーコードを付けない（サーバーが返せない状況のため）。検出と再接続は Task 3.4.1
+- 確認の表示（`ConfirmDialog`）は body 直下へ portal で出し、背景の要素に `inert` を付ける。既定のフォーカスは「取りやめる」。暗い背景を押しても閉じない。削除の確認（Task 6.2.3）と終了の確認（Task 3.4.2）で使い回す
+- 対応するブラウザーはユーザーエージェントで判定する（`isSupportedBrowser`）。Chrome の名前を含む別のブラウザー（Opera・Samsung Internet・旧 Edge など）と、iOS 版の Chrome・Edge は非対応として扱う。ヘッドレスの Chromium は Chrome として扱う（画面を通した自動テストに案内が出ないように）
 - ESLint は 10 系。eslint-plugin-react と jsx-a11y は ESLint 10 に未対応のため入れていない。dangerouslySetInnerHTML と innerHTML は `no-restricted-syntax` で禁止（`frontend/eslint.config.js`）
 - Node.js は 24.21.0 に固定（24.22.0 は公開から 7 日未満のため見送り）。SHA-256 も Dockerfile で固定
 - コンテナは非 root（uid 10001 の app）。2 つのボリュームの置き場は、イメージの中で app が持ち主になる
@@ -53,9 +65,13 @@ output_system/
 - `pkill -f` は、コマンドの文字列が一致して自分のシェルを落とすことがある。PID を指定する
 - playwright-cli は root だと Chromium が起動しない。`--config` で `chromiumSandbox: false` と `--no-sandbox` を渡す（設定ファイルはリポジトリの外に置く）
 - 開発用コンテナの Node 22 系に同梱の npm 10 系は、`min-release-age` を黙って無視する。`frontend/.npmrc` の `engine-strict=true` で、古い npm の `npm install`・`ci`・`update` は失敗する。依存を足すときは `frontend/` で `../tools/with-pinned-node.sh npm install <パッケージ>` を使う（Dockerfile と同じ Node 24.21.0 を SHA-256 の確認つきで `~/.cache/mmd-node` に入れる）。足したあとは公開日が 7 日以上前かを確かめる
+- jsdom の既定のユーザーエージェントは Chrome でも Edge でもなく、そのままだと全画面に「Edge または Chrome で開いてください」の警告が出る。`frontend/test/setup.ts` が、各テストの前に Chrome のものへ差し替える。ブラウザーを切り替えるテストは `vi.spyOn(window.navigator, 'userAgent', 'get')` で上書きする
+- `ConfirmDialog` のフォーカスの閉じ込めは、`inert` に加えて、document の keydown（Tab・Shift+Tab・Esc）でも行う。`inert` だけだと、端のボタンから先へ進んだ Tab が、ブラウザーのアドレス欄などへ出るため
+- `frontend/test/lint/noDangerousHtml.test.ts` は ESLint を起動するため、機械が忙しいと既定の 5 秒の制限に届かないことが 1 度あった（再実行で通る）
 - Starlette の TestClient は uvicorn を通らない。WebSocket の部品が無くても、WebSocket のテストは通る。出荷するイメージの確認は `backend/test/container/` で行う
 - starlette の TestClient は httpx2 を使う（httpx は非推奨の警告が出る）
 - Docker に buildx が無く、`docker build` は旧ビルダーになる。追加の文脈（`certs`）は `docker compose build` で渡す
 
 ## 実装済み機能
 - PBI #2: コンテナの起動、共通の枠と 4 画面の骨組み、`GET /api/health`、配信部、名前付きボリューム 2 つ、自動再起動
+- PBI #7: 設定の読み込み（環境変数と調整値）、3 種類のログ（標準出力・許可リスト）、共通のエラーの形（サーバーと画面）、お知らせ帯・7 つのエラー表示パターン・確認の表示の部品、対応していないブラウザーの案内
