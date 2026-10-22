@@ -9,7 +9,7 @@ from fastapi.testclient import TestClient
 from pydantic import BaseModel, ValidationError
 from starlette.websockets import WebSocket, WebSocketDisconnect
 
-from conftest import add_probe_route
+from conftest import add_probe_route, local_client
 from meeting_interpreter.app import create_app
 from meeting_interpreter.errors import (
     ERROR_DOMAINS,
@@ -216,7 +216,7 @@ class TestHandlers:
 
         add_probe_route(app, "/api/probe", endpoint)
 
-        with TestClient(app) as client:
+        with local_client(app) as client:
             response = client.get("/api/probe")
 
         assert response.status_code == 409
@@ -249,7 +249,7 @@ class TestHandlers:
 
         add_probe_route(app, "/api/probe", endpoint)
 
-        with TestClient(app) as client:
+        with local_client(app) as client:
             response = client.get("/api/probe")
 
         assert response.status_code == 500
@@ -279,7 +279,7 @@ class TestHandlers:
 
         add_probe_route(app, "/api/probe", endpoint)
 
-        with TestClient(app) as client:
+        with local_client(app) as client:
             client.get("/api/probe")
 
         (entry,) = error_logs(log_lines(capsys))
@@ -301,7 +301,7 @@ class TestHandlers:
 
         add_probe_route(app, "/api/probe", endpoint)
 
-        with TestClient(app) as client:
+        with local_client(app) as client:
             response = client.get("/api/probe")
 
         assert response.status_code == 422
@@ -324,7 +324,7 @@ class TestHandlers:
 
         add_probe_route(app, "/api/probe", endpoint)
 
-        with TestClient(app) as client:
+        with local_client(app) as client:
             response = client.get("/api/probe")
 
         assert response.status_code == 500
@@ -355,7 +355,7 @@ class TestHandlers:
 
         add_probe_route(app, "/api/probe", endpoint)
 
-        with TestClient(app) as client:
+        with local_client(app) as client:
             client.get("/api/probe")
 
         captured = capsys.readouterr()
@@ -382,7 +382,7 @@ class TestHandlers:
 
         add_probe_route(app, "/api/probe", endpoint)
 
-        with TestClient(app) as client:
+        with local_client(app) as client:
             first = client.get("/api/probe")
             second = client.get("/api/probe")
 
@@ -407,12 +407,8 @@ class TestHandlers:
 
         add_probe_route(app, "/api/probe", endpoint, methods=["POST"])
 
-        with TestClient(app) as client:
-            response = client.post(
-                "/api/probe",
-                json={"count": SECRET_TEXT},
-                headers={"Origin": "http://testserver"},
-            )
+        with local_client(app) as client:
+            response = client.post("/api/probe", json={"count": SECRET_TEXT})
 
         assert response.status_code == 422
         assert set(response.json()) == FOUR_ITEMS
@@ -463,7 +459,7 @@ class TestHandlers:
 
         add_probe_route(app, "/api/probe", endpoint)
 
-        with TestClient(app) as client:
+        with local_client(app) as client:
             response = client.get("/api/probe")
 
         assert response.status_code == 400
@@ -487,7 +483,7 @@ class TestHandlers:
 
         add_probe_route(app, "/api/probe", endpoint)
 
-        with TestClient(app) as client:
+        with local_client(app) as client:
             client.get("/api/probe")
 
         captured = capsys.readouterr()
@@ -509,7 +505,7 @@ class TestHandlers:
 
         add_probe_route(app, "/ws/probe", endpoint, methods=["WEBSOCKET"])
 
-        with TestClient(app) as client:
+        with local_client(app) as client:
             with client.websocket_connect("/ws/probe") as websocket:
                 with pytest.raises(WebSocketDisconnect) as closed:
                     websocket.receive_text()
@@ -532,7 +528,7 @@ class TestHandlers:
 
         add_probe_route(app, "/ws/probe", endpoint, methods=["WEBSOCKET"])
 
-        with TestClient(app) as client:
+        with local_client(app) as client:
             with pytest.raises(WebSocketDisconnect):
                 with client.websocket_connect("/ws/probe"):
                     pass
