@@ -70,6 +70,36 @@ class TestShippedContainerWebSocket:
         host, port = _host_and_port()
 
         with pytest.raises(InvalidStatus) as excinfo:
-            connect(f"ws://{host}:{port}/ws/unknown", open_timeout=5)
+            # 接続制限は WebSocket の接続に送り元を必須とする。宛先と同じ接続先の送り元を付ける。
+            connect(
+                f"ws://{host}:{port}/ws/unknown", origin=f"http://{host}:{port}", open_timeout=5
+            )
 
         assert excinfo.value.response.status_code == 403
+
+    @pytest.mark.parametrize(
+        ("origin", "host_header"),
+        [
+            (None, None),
+            ("http://evil.example", None),
+            ("null", None),
+            ("http://evil.example", "evil.example"),
+        ],
+        ids=["no_origin", "other_site", "null_origin", "other_destination"],
+    )
+    def test_should_refuse_a_connection_that_breaks_the_access_restriction(
+        self, origin: str | None, host_header: str | None
+    ):
+        """
+        【テスト対象】出荷するコンテナの接続制限(WebSocket)
+        【テスト内容】送り元が無い・ほかのサイトの送り元・null の送り元・別の宛先の接続要求を送る
+        【期待結果】どれも 403 で断られ、本文に会議の内容や内部の構成を示す値が入らないこと
+        """
+        host, port = _host_and_port()
+
+        response = request_websocket_handshake(
+            host, port, "/ws/unknown", origin=origin, host_header=host_header
+        )
+
+        assert response.status == 403
+        assert b"SYSTEM_ROUTE_NOT_FOUND" not in response.body

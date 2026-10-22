@@ -15,6 +15,8 @@
 そもそも出さない。出さなければ、ほかのサイトは応答を読めない。
 
 判定は judge_access に 1 つだけ置く。HTTP の要求も WebSocket の接続も、同じ関数で判定する。
+WebSocket の接続は、送り元を常に必須とする。ブラウザーは、ほかのサイトからの WebSocket の接続を
+止めない(同一オリジンの制限が効かない)ため、アプリが確かめる送り元が唯一の守りになる。
 
 通す条件は、利用時も自動テスト時も同じ。テストのために切り替える設定は持たない。
 自動テストのブラウザーはコンテナ名でアプリへ接続するため、コンテナ名を常に通す（ADR-13）。
@@ -56,6 +58,10 @@ _ORIGIN_OPTIONAL_METHODS: Final = frozenset({"GET", "HEAD", "OPTIONS"})
 
 # 断ったときの HTTP の状態。
 _FORBIDDEN: Final = 403
+
+# WebSocket の接続を断るときに閉じる符号(1008: 方針に反する要求)。
+# 接続を受け付ける前に閉じると、サーバーは接続要求(HTTP)に 403 を返して断る。
+_WS_POLICY_VIOLATION: Final = 1008
 
 
 class RejectReason(StrEnum):
@@ -197,15 +203,21 @@ def _header_values(scope: Scope, name: bytes) -> list[str]:
 
 
 def check_scope(scope: Scope, allowed_hosts: frozenset[str]) -> AccessRejection | None:
-    """HTTP の要求の ASGI の scope を判定する。断るなら、その内容を返す。通すなら None。"""
+    """HTTP の要求と WebSocket の接続の ASGI の scope を判定する。
+
+    断るなら、その内容を返す。通すなら None。
+    - HTTP: 読み取りだけのメソッド(GET・HEAD・OPTIONS)以外で、送り元を必須にする。
+    - WebSocket: 送り元を常に必須にする。ws は http、wss は https として読む。
+    """
+    is_websocket = scope["type"] == "websocket"
     hosts = _header_values(scope, b"host")
     origins = _header_values(scope, b"origin")
     reason = judge_access(
         allowed_hosts=allowed_hosts,
-        scheme="https" if scope.get("scheme") == "https" else "http",
+        scheme="https" if scope.get("scheme") in ("https", "wss") else "http",
         hosts=hosts,
         origins=origins,
-        origin_required=scope["method"] not in _ORIGIN_OPTIONAL_METHODS,
+        origin_required=is_websocket or scope["method"] not in _ORIGIN_OPTIONAL_METHODS,
     )
     if reason is None:
         return None
@@ -229,7 +241,7 @@ def _log_rejection(rejection: AccessRejection) -> None:
 
 
 class AccessControlMiddleware:
-    """すべての要求を、処理の前に確かめるミドルウェア。
+    """すべての HTTP の要求と WebSocket の接続を、処理の前に確かめるミドルウェア。
 
     create_app が、配信部を含むすべての経路を包むように取り付ける。
     経路をあとから足しても、この確認を通らない経路は作れない。
@@ -247,7 +259,7 @@ class AccessControlMiddleware:
 
     async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
         """要求を確かめ、通すなら内側へ渡す。断るなら、内容を処理せずに断る。"""
-        if scope["type"] != "http":
+        if scope["type"] not in ("http", "websocket"):
             # 起動と終了の通知(lifespan)は、要求ではない。そのまま渡す。
             await self.app(scope, receive, send)
             return
@@ -258,6 +270,13 @@ class AccessControlMiddleware:
             return
 
         _log_rejection(rejection)
+        error = ACCESS_ERRORS[rejection.reason]
+        if scope["type"] == "websocket":
+            # 接続を受け付けずに閉じる。サーバーは、接続要求に 403 を返す。
+            # 閉じる理由は、エラーコードだけ(宛先と送り元の値、文言は入れない)。
+            await send(
+                {"type": "websocket.close", "code": _WS_POLICY_VIOLATION, "reason": error.code}
+            )
+            return
         # 要求の本文は読まない。固定の文のエラーを返すだけ。
-        response = error_response(_FORBIDDEN, ACCESS_ERRORS[rejection.reason])
-        await response(scope, receive, send)
+        await error_response(_FORBIDDEN, error)(scope, receive, send)

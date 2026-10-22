@@ -28,6 +28,11 @@ from meeting_interpreter.settings import Settings
 LOOPBACK = "127.0.0.1"
 
 
+def _origin(port: int) -> str:
+    """画面を 127.0.0.1 で開いたときの送り元。接続制限は、WebSocket の接続に送り元を必須とする。"""
+    return f"http://{LOOPBACK}:{port}"
+
+
 @contextmanager
 def _running_server(app: FastAPI) -> Iterator[int]:
     """アプリを本物の uvicorn で起動し、待ち受けのポートを返す。
@@ -179,7 +184,9 @@ class TestAppErrorInWebSocketOnRealServer:
             raise error_class(code, "固定の文です。", "もう一度操作してください。")
 
         with _running_server(_app_with_websocket_probe(settings, endpoint)) as port:
-            with connect(f"ws://{LOOPBACK}:{port}/ws/probe", open_timeout=5) as client:
+            with connect(
+                f"ws://{LOOPBACK}:{port}/ws/probe", origin=_origin(port), open_timeout=5
+            ) as client:
                 with pytest.raises(ConnectionClosed) as closed:
                     client.recv(timeout=5)
 
@@ -209,7 +216,7 @@ class TestAppErrorInWebSocketOnRealServer:
 
         with _running_server(_app_with_websocket_probe(settings, endpoint)) as port:
             with pytest.raises(InvalidStatus) as refused:
-                connect(f"ws://{LOOPBACK}:{port}/ws/probe", open_timeout=5)
+                connect(f"ws://{LOOPBACK}:{port}/ws/probe", origin=_origin(port), open_timeout=5)
 
         assert refused.value.response.status_code == 403
         entries = _log_entries(capsys)
@@ -235,7 +242,9 @@ class TestAppErrorInWebSocketOnRealServer:
             )
 
         with _running_server(_app_with_websocket_probe(settings, endpoint)) as port:
-            with connect(f"ws://{LOOPBACK}:{port}/ws/probe", open_timeout=5) as client:
+            with connect(
+                f"ws://{LOOPBACK}:{port}/ws/probe", origin=_origin(port), open_timeout=5
+            ) as client:
                 with pytest.raises(ConnectionClosed) as closed:
                     client.recv(timeout=5)
 
@@ -244,6 +253,98 @@ class TestAppErrorInWebSocketOnRealServer:
         entries = _log_entries(capsys)
         assert _error_logs(entries) == [("MEETING_ALREADY_RUNNING", "warning")]
         assert _runtime_problems(entries) == []
+
+
+class TestAccessControlOnRealServer:
+    """本物の uvicorn の上での、WebSocket の接続制限。
+
+    ブラウザーは、ほかのサイトからの WebSocket の接続を止めない。アプリが送り元を確かめることが
+    唯一の守りのため、接続要求(HTTP の Upgrade)の段階で断られることを、本物のサーバーで確かめる。
+    """
+
+    @staticmethod
+    def _app_with_greeting(settings: Settings, accepted: list[int]) -> FastAPI:
+        """接続を受け付けると、受け付けた回数を控えて、文字列を 1 つ返す経路を足したアプリ。"""
+
+        async def endpoint(websocket: WebSocket) -> None:
+            await websocket.accept()
+            accepted.append(1)
+            await websocket.send_text("connected")
+            await websocket.close()
+
+        return _app_with_websocket_probe(settings, endpoint)
+
+    @pytest.mark.parametrize("host", [LOOPBACK, "localhost"])
+    def test_should_accept_a_connection_with_the_same_origin(self, settings: Settings, host: str):
+        """
+        【テスト対象】WebSocket の接続制限(正しい宛先と送り元、本物の uvicorn)
+        【テスト内容】127.0.0.1 または localhost を宛先にし、宛先と同じ接続先の Origin を付けて、
+                      受け付ける経路へ接続する
+        【期待結果】接続が成立し(101)、経路が返した文字列を受け取れること
+        """
+        accepted: list[int] = []
+
+        with _running_server(self._app_with_greeting(settings, accepted)) as port:
+            with connect(
+                f"ws://{host}:{port}/ws/probe", origin=f"http://{host}:{port}", open_timeout=5
+            ) as client:
+                assert client.recv(timeout=5) == "connected"
+
+        assert accepted == [1]
+
+    @pytest.mark.parametrize(
+        "origin",
+        [None, "http://evil.example", "http://evil.example:3001", "null"],
+        ids=["no_origin", "other_site", "other_site_with_port", "null_origin"],
+    )
+    def test_should_refuse_the_handshake_with_403_without_running_the_endpoint(
+        self, settings: Settings, capsys, origin: str | None
+    ):
+        """
+        【テスト対象】WebSocket の接続制限(送り元が無い・違う、本物の uvicorn)
+        【テスト内容】Origin を付けない接続と、ほかのサイトの Origin を付けた接続を、
+                      受け付ける経路へ試みる
+        【期待結果】接続要求の段階で 403 で断られ、経路の処理が呼ばれないこと。
+                    接続ログ(警告)が 1 件出て、uvicorn の異常の記録は出ない
+        """
+        configure_logging("info")
+        accepted: list[int] = []
+
+        with _running_server(self._app_with_greeting(settings, accepted)) as port:
+            with pytest.raises(InvalidStatus) as refused:
+                connect(f"ws://{LOOPBACK}:{port}/ws/probe", origin=origin, open_timeout=5)
+
+        assert refused.value.response.status_code == 403
+        assert accepted == []
+        entries = _log_entries(capsys)
+        connection_logs = [e for e in entries if e["log_type"] == "connection"]
+        assert [(e["level"], e["source_name"]) for e in connection_logs] == [("warning", origin)]
+        assert _runtime_problems(entries) == []
+
+    def test_should_refuse_the_handshake_to_another_destination(self, settings: Settings, capsys):
+        """
+        【テスト対象】WebSocket の接続制限(宛先が違う、本物の uvicorn)
+        【テスト内容】Host を別の名前にして、宛先と同じ接続先の Origin を付けた接続要求を送る
+                      (別の名前を、アプリのアドレスへ向けて届かせる手口に当たる)
+        【期待結果】403 で断られ、経路の処理が呼ばれないこと。接続ログに host_not_allowed が出る
+        """
+        configure_logging("info")
+        accepted: list[int] = []
+
+        with _running_server(self._app_with_greeting(settings, accepted)) as port:
+            response = request_websocket_handshake(
+                LOOPBACK,
+                port,
+                "/ws/probe",
+                origin="http://evil.example",
+                host_header="evil.example",
+            )
+
+        assert response.status == 403
+        assert accepted == []
+        connection_logs = [e for e in _log_entries(capsys) if e["log_type"] == "connection"]
+        assert [e["reject_reason"] for e in connection_logs] == ["host_not_allowed"]
+        assert connection_logs[0]["destination_name"] == "evil.example"
 
 
 class TestUnexpectedExceptionOnRealServer:

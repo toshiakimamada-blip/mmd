@@ -67,20 +67,22 @@ Starlette の `TestClient` は uvicorn を通らないため、部品が無く�
 
 ### 接続制限
 
-アプリはログインを求めません。代わりに、接続元を「動かしている PC の中」に限ります。判定は `backend/src/meeting_interpreter/access.py` にあり、HTTP の要求も、のちの WebSocket の接続も、同じ関数（`judge_access`）を使います。
+アプリはログインを求めません。代わりに、接続元を「動かしている PC の中」に限ります。判定は `backend/src/meeting_interpreter/access.py` にあり、HTTP の要求も WebSocket の接続も、同じ関数（`judge_access`）を使います。
 
 | 確かめる対象 | 通す条件 | 守っている場所 |
 |---|---|---|
 | 公開するポート | PC のループバック（`127.0.0.1`）にだけ公開します | `docker-compose.yml` の `ports` |
 | 要求の宛先（Host ヘッダー） | `localhost`・`127.0.0.1`・アプリのコンテナ名（`MMD_APP_HOSTNAME`）のどれかです。ポートは確かめません | `access.py` |
-| 要求の送り元（Origin ヘッダー） | 付いていれば、宛先と同じ接続先（スキーム・ホスト・ポート）です。読み取りだけのメソッド（`GET`・`HEAD`・`OPTIONS`）以外では、必ず付いている必要があります | `access.py` |
+| 要求の送り元（Origin ヘッダー） | 付いていれば、宛先と同じ接続先（スキーム・ホスト・ポート）です。読み取りだけのメソッド（`GET`・`HEAD`・`OPTIONS`）以外では、必ず付いている必要があります。WebSocket の接続では、常に必須です | `access.py` |
 | ほかのサイトへの読み取りの許可 | 出しません（`Access-Control-*` のヘッダーを付けません） | ― |
 
 - ミドルウェア（`AccessControlMiddleware`）が、`create_app` で配信部を含むすべての経路を包みます。経路をあとから足しても、この確認を通らない経路は作れません。
-- 断った要求は、本文を読まずに、`403` と `ACCESS_HOST_NOT_ALLOWED`・`ACCESS_ORIGIN_MISSING`・`ACCESS_ORIGIN_MISMATCH` のどれかの共通の形で返します。受け取った宛先と送り元の値は、応答に含めません。
+- 断った HTTP の要求は、本文を読まずに、`403` と `ACCESS_HOST_NOT_ALLOWED`・`ACCESS_ORIGIN_MISSING`・`ACCESS_ORIGIN_MISMATCH` のどれかの共通の形で返します。受け取った宛先と送り元の値は、応答に含めません。
+- 断った WebSocket の接続は、受け付けずに閉じます（符号 1008）。サーバー（uvicorn）は、接続要求に `403` を返します。ブラウザーは、ほかのサイトからの WebSocket の接続を止めません。そのため、アプリが確かめる送り元が唯一の守りです。
 - 断った記録は、接続ログ（警告）に出ます。項目は、断った理由の種類（`host_not_allowed`・`origin_missing`・`origin_mismatch`）と、宛先・送り元の名前だけです。経路・問い合わせ・本文は出しません。
 - Host と Origin は、1 件ずつだけ読みます。同じヘッダーが複数あるときは断ります。
 - コンテナの死活の確認（`HEALTHCHECK`）は `127.0.0.1` 宛てに送るため、そのまま通ります。
+- 出荷するコンテナで確かめるテストは、`backend/test/container/` にあります（[出荷するコンテナの WebSocket の確認](#出荷するコンテナの-websocket-の確認)と同じ手順で動きます）。
 - 通す条件は、利用時も自動テスト時も同じです。テストのために切り替える設定はありません。自動テストのブラウザーは、コンテナ名（`http://toshiakimamada-blip-mmd-output-system:3001`）でアプリへ接続し、宛先と送り元の両方がコンテナ名になるため、そのまま通ります。
 - サーバーのテストは、`backend/test/conftest.py` の `local_client` で作るクライアントを使います。利用者が `http://localhost:3001` を開いたときと同じ宛先と送り元を付けます。別の宛先や送り元を試すときは、要求ごとに `headers` を渡します。
 
@@ -222,6 +224,7 @@ MMD_CONTAINER_URL=http://toshiakimamada-blip-mmd-output-system:3001 uv run pytes
 ```
 
 - 存在しない `/ws` への WebSocket の接続要求を、コンテナが 403 で断れば合格です。WebSocket の部品が無いイメージでは、404 の JSON が返り、失敗します。
+- 接続制限も同じ手順で確かめます。宛先を変えた HTTP の要求（`test_container_access.py`）と、送り元が無い・違う WebSocket の接続要求（`test_container_websocket.py`）が、コンテナの設定（`MMD_APP_HOSTNAME` とコンテナ名の対応）まで含めて通ることを見ます。
 - `MMD_CONTAINER_URL` が未設定のときは、この確認を飛ばします（`uv run pytest` の通常の実行では skipped になります）。
 - 受け付ける経路ができたあとは、その経路の接続と往復を、このフォルダーのテストに足します。
 

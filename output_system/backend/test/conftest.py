@@ -162,8 +162,18 @@ class HandshakeResponse:
     body: bytes
 
 
+# request_websocket_handshake の origin に渡す印。宛先と同じ接続先の Origin を付ける。
+SAME_ORIGIN = "same-origin"
+
+
 def request_websocket_handshake(
-    host: str, port: int, path: str, timeout: float = 5.0
+    host: str,
+    port: int,
+    path: str,
+    timeout: float = 5.0,
+    *,
+    origin: str | None = SAME_ORIGIN,
+    host_header: str | None = None,
 ) -> HandshakeResponse:
     """WebSocket の接続要求を生のソケットで送り、応答のステータスとヘッダーを読む。
 
@@ -176,13 +186,22 @@ def request_websocket_handshake(
         port: 接続先のポート。
         path: 要求の経路（例: /ws/unknown）。
         timeout: 接続と読み取りを待つ秒数。
+        origin: Origin ヘッダーの値。SAME_ORIGIN（既定）なら、宛先と同じ接続先
+            （http://ホスト:ポート）を付ける。None なら Origin ヘッダーを付けない。
+            接続制限は WebSocket の接続に Origin を必須とするため、既定で付ける。
+        host_header: Host ヘッダーの値。省略すると「ホスト:ポート」。
 
     Returns:
         サーバーの応答。
     """
+    origin_line = ""
+    if origin is not None:
+        origin_value = f"http://{host}:{port}" if origin == SAME_ORIGIN else origin
+        origin_line = f"Origin: {origin_value}\r\n"
     request = (
         f"GET {path} HTTP/1.1\r\n"
-        f"Host: {host}:{port}\r\n"
+        f"Host: {host_header if host_header is not None else f'{host}:{port}'}\r\n"
+        f"{origin_line}"
         "Upgrade: websocket\r\n"
         "Connection: Upgrade\r\n"
         # RFC 6455 の例に載っている鍵。接続の相手を確かめるための値で、秘密ではない。

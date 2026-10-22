@@ -181,8 +181,14 @@ class TestRunningServerOutput:
                 f"{base}/api/health", "POST", SECRET_SENTENCE.encode(), {"Origin": base}
             )
             assert posted in (404, 405)
-            with pytest.raises(InvalidStatus):
-                connect(f"ws://{LOOPBACK}:{port}/ws/{SECRET_ROOM}?subtitle={encoded}")
+            # 同じ接続先の送り元を付けた接続は、存在しない経路のため、アプリが断る。
+            # 送り元が無い接続は、経路の判定より前に、接続制限が断る。
+            for origin in (base, None):
+                with pytest.raises(InvalidStatus):
+                    connect(
+                        f"ws://{LOOPBACK}:{port}/ws/{SECRET_ROOM}?subtitle={encoded}",
+                        origin=origin,
+                    )
             # 壊れた HTTP の要求。見出しの行に、会議の内容を入れる。
             with socket.create_connection((LOOPBACK, port), timeout=5) as raw:
                 raw.sendall(
@@ -203,8 +209,16 @@ class TestRunningServerOutput:
         assert "connection rejected (403 Forbidden)" in messages
         assert "Shutting down" in messages
         assert any(message.startswith("Finished server process [") for message in messages)
-        # 文面を出さなかった記録は、そのことが行で分かる。
-        assert all(entry["dropped_field_count"] == 1 for entry in entries if "message" not in entry)
+        # 文面を出さなかった記録(runtime)は、そのことが行で分かる。
+        assert all(
+            entry["dropped_field_count"] == 1
+            for entry in entries
+            if entry["log_type"] == "runtime" and "message" not in entry
+        )
+        # 送り元が無い WebSocket の接続は、接続ログに出る。経路の文字列は入らない(上で確認済み)。
+        assert [e["reject_reason"] for e in entries if e["log_type"] == "connection"] == [
+            "origin_missing"
+        ]
 
     def test_should_show_the_missing_frontend_warning_in_readable_japanese(self, tmp_path):
         """
