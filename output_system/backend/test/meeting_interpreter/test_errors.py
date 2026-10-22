@@ -672,3 +672,77 @@ class TestUnhandledErrorMiddlewareDirect:
 
         with pytest.raises(asyncio.CancelledError):
             asyncio.run(middleware({"type": "http"}, receive, send))
+
+
+class TestAppErrorInWebSocketDirect:
+    """WebSocket の処理が起こしたエラー(AppError)の変換を直接呼ぶ、境界のテスト。
+
+    接続の正常な流れは、本物の uvicorn を使う test_websocket_server.py で確かめる。
+    ここでは、本物のサーバーでは作りにくい、相手がすでに切れている状況などを確かめる。
+    """
+
+    @staticmethod
+    def _accepted_websocket(sent: list[dict], close_failure: Exception | None = None) -> WebSocket:
+        """接続を受け付け済みの WebSocket を作る。close_failure を渡すと、閉じる操作が失敗する。"""
+        import asyncio
+
+        async def receive() -> dict:
+            return {"type": "websocket.connect"}
+
+        async def send(message: dict) -> None:
+            if message["type"] == "websocket.close" and close_failure is not None:
+                raise close_failure
+            sent.append(message)
+
+        websocket = WebSocket(
+            {"type": "websocket", "path": "/ws/probe", "headers": []}, receive, send
+        )
+        asyncio.run(websocket.accept())
+        return websocket
+
+    def test_should_not_raise_when_the_peer_is_already_gone(self, capsys):
+        """
+        【テスト対象】WebSocket での業務エラーの変換(相手がすでに切れているとき)
+        【テスト内容】接続を受け付け済みで、閉じる操作が失敗する(送信先が切れている)状況で、
+                      業務エラーを変換する
+        【期待結果】例外が外へ伝わらず、何も返さないこと。エラーログは警告で 1 件だけ出て、
+                    想定外のエラーを重ねて記録しないこと
+        """
+        import asyncio
+
+        from meeting_interpreter.errors import _handle_app_error
+
+        sent: list[dict] = []
+        websocket = self._accepted_websocket(sent, close_failure=OSError("peer is gone"))
+        error = BusinessAppError("MEETING_ALREADY_RUNNING", "固定の文です。", "操作してください。")
+
+        result = asyncio.run(_handle_app_error(websocket, error))
+
+        assert result is None
+        assert [m["type"] for m in sent] == ["websocket.accept"]
+        assert [(e["error_code"], e["level"]) for e in error_logs(log_lines(capsys))] == [
+            ("MEETING_ALREADY_RUNNING", "warning")
+        ]
+
+    def test_should_leave_the_close_reason_empty_when_the_code_is_too_long(self, capsys):
+        """
+        【テスト対象】WebSocket の閉じる理由に入れるエラーコード
+        【テスト内容】閉じる理由の上限(123 バイト)を超える長さのコードで、エラーを変換する
+        【期待結果】閉じる理由は空になること(途中で切ると、別のコードに見えるため)。
+                    閉じる符号は分類のもの(業務エラーは 1008)
+        """
+        import asyncio
+
+        from meeting_interpreter.errors import _handle_app_error
+
+        sent: list[dict] = []
+        websocket = self._accepted_websocket(sent)
+        long_code = "MEETING_" + "A" * 123
+        error = BusinessAppError(long_code, "固定の文です。", "操作してください。")
+
+        asyncio.run(_handle_app_error(websocket, error))
+
+        (closing,) = [m for m in sent if m["type"] == "websocket.close"]
+        assert closing["code"] == 1008
+        assert closing["reason"] == ""
+        log_lines(capsys)

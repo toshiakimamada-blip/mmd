@@ -52,6 +52,7 @@ output_system/
 - ログは標準出力（標準エラーではない）。許可リスト（`logs/fields.py`）に無い項目と、決めた形に合わない値は捨てる。項目を足すときは `FieldSpec` を足す
 - 標準のロガー（`logging`）の記録は `log_type: runtime` で出し、文面を出さない（ロガーの名前・レベル・例外の種類だけ。出さなかった数は `dropped_field_count`）。文面を出すのは、起動の知らせ用の `STARTUP_LOGGER`（`logs/output.py`）と、uvicorn の起動・終了・接続の知らせ（`_UVICORN_FIXED_MESSAGES` にある文の形だけ）。uvicorn のアクセスの記録は `access_log=False` で止めている。会議に関わる記録は `log_processing`・`log_error`・`log_connection` で出す。`runtime` は基本設計書の 3 種別の外で、起動できない理由を日本語の文で出すために設けた。ワーカーなど別のプロセスを足すときは、最初に `configure_logging` を呼ぶ。`print` は ruff（T20）で禁止している
 - 画面へ返すエラーは 4 項目（分類・コード・何が起きたか・次に行う操作）。画面はサーバーが返した文面を表示せず、エラーコードごとの文言の一覧（`errorMessages.ts`）から引く。未登録のコードは分類ごとの汎用の文言。機能を足すときは、コードと文言の両方を足す（`docs/errors.md`）
+- WebSocket の処理（接続を受け付けたあと）が `AppError` を起こしたときは、HTTP の応答を返せないため、ログを出して、分類の符号（入力・業務は 1008、システムは 1011）とエラーコードの理由で接続を閉じる（`errors.py` の `_handle_app_error`）。接続を受け付ける前なら 403 で断られる。Starlette の TestClient は受け付け済みの接続へ HTTP の応答を返しても失敗するため、確かめるテストは本物の uvicorn を使う（`test_websocket_server.py`）。画面側で閉じる理由を読む処理は、接続を扱う作業で足す
 - お知らせ帯は `AppFrame` が `NoticeProvider` と `NoticeBand` を持つ。画面の部品は `useNoticeActions`（出す・消す）と `useWarning`（条件が成り立つ間だけ出す）を使う。エラーは `role="alert"`、警告は `aria-live="polite"`。警告を入れる領域は、空のときも文書に残す（あとから入った警告を読み上げソフトへ伝えるため）
 - エラーと警告は、文字の札（エラーは塗り・警告は枠）・アイコンの形（丸・三角）・色の 3 つで区別する。つながらないことの表示（`kind: 'offline'`）はエラーコードを付けない（サーバーが返せない状況のため）。検出と再接続は Task 3.4.1
 - 確認の表示（`ConfirmDialog`）は body 直下へ portal で出し、背景の要素に `inert` を付ける。既定のフォーカスは「取りやめる」。暗い背景を押しても閉じない。削除の確認（Task 6.2.3）と終了の確認（Task 3.4.2）で使い回す

@@ -13,18 +13,23 @@
 - エラーの文言(何が起きたか、次に行う操作)にも、会議の内容を入れない。固定の文を渡す。
 
 想定外の例外の変換は UnhandledErrorMiddleware が行う（応答の途中や WebSocket の例外も受け止める）。
+
+WebSocket の処理が AppError を起こしたときは、HTTP の応答を返せない。ログは HTTP と同じ分類ごとの
+レベルで出し、接続を閉じる。閉じる符号は分類で決め、閉じる理由にエラーコードを入れる。
 """
 
 import re
 from types import TracebackType
-from typing import ClassVar, Final, Literal
+from typing import ClassVar, Final, Literal, cast
 
 from fastapi import FastAPI, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field, field_validator
 from starlette.exceptions import HTTPException as StarletteHTTPException
+from starlette.requests import HTTPConnection
 from starlette.types import ASGIApp, Message, Receive, Scope, Send
+from starlette.websockets import WebSocket, WebSocketDisconnect, WebSocketState
 
 from .logs import LogLevel, log_error
 
@@ -51,6 +56,9 @@ _ERROR_CODE_PATTERN: Final = re.compile(
 
 # 文言の最大の文字数。画面の枠に収まる長さにして、長い文(内容の流し込みなど)を入れにくくする。
 _MAX_WORDING_CHARS: Final = 300
+
+# WebSocket の閉じる理由の最大のバイト数(WebSocket の規格 RFC 6455 の上限)。
+_MAX_CLOSE_REASON_BYTES: Final = 123
 
 # 内部の都合で、アプリのモジュールの名前の先頭。発生場所を、アプリのコードの中から選ぶために使う。
 _APP_PACKAGE: Final = "meeting_interpreter"
@@ -89,6 +97,8 @@ class AppError(Exception):
     category: ClassVar[ErrorCategory]
     # HTTP の状態の既定値。子クラスが決める。
     default_status: ClassVar[int]
+    # WebSocket の処理が起こしたときに、接続を閉じる符号。子クラスが決める。
+    websocket_close_code: ClassVar[int]
     # ログのレベル。None は、ログに出さない。
     log_level: ClassVar[LogLevel | None]
 
@@ -127,6 +137,8 @@ class InputAppError(AppError):
 
     category = "input_error"
     default_status = 422
+    # 1008: 方針に反する要求(受け付けられない内容)。
+    websocket_close_code = 1008
     log_level = None
 
 
@@ -135,6 +147,8 @@ class BusinessAppError(AppError):
 
     category = "business_error"
     default_status = 409
+    # 1008: 方針に反する要求(いまの状態では受け付けられない操作)。
+    websocket_close_code = 1008
     log_level = LogLevel.WARNING
 
 
@@ -143,6 +157,8 @@ class SystemAppError(AppError):
 
     category = "system_error"
     default_status = 500
+    # 1011: サーバーの内部エラー。
+    websocket_close_code = 1011
     log_level = LogLevel.ERROR
 
 
@@ -254,10 +270,37 @@ def _log_unexpected(exc: Exception) -> None:
     )
 
 
-async def _handle_app_error(request: Request, exc: Exception) -> JSONResponse:
-    """AppError を、共通の形の応答とエラーログに変える。"""
+async def _close_websocket(websocket: WebSocket, error: AppError) -> None:
+    """WebSocket の接続を、エラーコードを理由にして閉じる。
+
+    閉じる符号は分類で決める(AppError.websocket_close_code)。画面は、エラーコードから文言を引く。
+    接続を受け付ける前なら、接続は断られる(HTTP の 403)。このときは、符号と理由は相手に届かない。
+    処理がすでに閉じているとき、相手がすでに切れているときは、何もしない。
+    これらは異常ではなく、想定外のエラーとして記録しない。
+    """
+    if websocket.application_state not in (WebSocketState.CONNECTING, WebSocketState.CONNECTED):
+        return
+    # エラーコードは英大文字・数字・アンダースコアだけ。バイト数と文字数が同じ。
+    # 上限を超えるコードは、途中で切ると別のコードに見えるため、理由を空にする。
+    code = error.body.code
+    reason = code if len(code) <= _MAX_CLOSE_REASON_BYTES else ""
+    try:
+        await websocket.close(code=error.websocket_close_code, reason=reason)
+    except (WebSocketDisconnect, RuntimeError, OSError):
+        return
+
+
+async def _handle_app_error(connection: HTTPConnection, exc: Exception) -> JSONResponse | None:
+    """AppError を、エラーログと、共通の形の応答に変える。
+
+    HTTP は、共通の形の JSON を返す。WebSocket は、HTTP の応答を返せない(接続を受け付けたあとに
+    返そうとすると、uvicorn が失敗し、想定外のエラーが重ねて記録される)。接続を閉じる。
+    """
     assert isinstance(exc, AppError)
     _log_app_error(exc)
+    if connection.scope["type"] == "websocket":
+        await _close_websocket(cast(WebSocket, connection), exc)
+        return None
     return error_response(exc.status_code, exc.body)
 
 
