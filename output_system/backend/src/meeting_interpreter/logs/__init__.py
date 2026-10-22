@@ -7,12 +7,14 @@
 - 処理の識別子: `with trace_scope(): ...`。ワーカーへは `attach_trace_id` でメッセージに付ける
 
 会議の内容（字幕・要約・質問の本文、タイトル、指示と出力、音声）は、ログに書けない。
-詳しくは fields.py。
+3 種類のログは、許可リスト（fields.py）が防ぐ。標準のロガー（logging）の記録は、文面を出さない
+（出してよい固定の文は、起動の知らせ用の STARTUP_LOGGER と、uvicorn の起動と終了の知らせだけ）。
+詳しくは fields.py と output.py。
 """
 
 from .events import log_connection, log_error, log_processing
 from .fields import FieldSpec, LogKind, LogLevel
-from .output import configure_logging
+from .output import STARTUP_LOGGER, configure_logging
 from .trace import (
     TRACE_ID_KEY,
     attach_trace_id,
@@ -23,6 +25,7 @@ from .trace import (
 )
 
 __all__ = [
+    "STARTUP_LOGGER",
     "TRACE_ID_KEY",
     "FieldSpec",
     "LogKind",

@@ -165,7 +165,9 @@ def test_should_serve_websocket_with_the_implementation_named_in_the_entrypoint(
     【期待結果】WebSocket の実装が見つかること（見つからなければ読み込みで失敗する）。
                 部品が無いまま黙って起動し、/ws が動かない状態を作らないため
     """
-    config = uvicorn.Config(create_app(settings), ws=WEBSOCKET_IMPLEMENTATION)
+    # log_config=None: uvicorn の既定のログの設定を、プロセス全体へ書き込ませない。
+    # 書き込むと、ほかのテストの出力が変わる。
+    config = uvicorn.Config(create_app(settings), ws=WEBSOCKET_IMPLEMENTATION, log_config=None)
 
     config.load()
 

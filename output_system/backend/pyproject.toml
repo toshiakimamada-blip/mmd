@@ -44,4 +44,5 @@ src = ["src", "test"]
 
 [tool.ruff.lint]
 # E/F: pycodestyle と pyflakes。I: import の並び順。B: バグの出やすい書き方。
-select = ["E", "F", "I", "B", "UP"]
+# T20: print の禁止。print は、ログの許可リストを通らずに標準出力へ出てしまう。
+select = ["E", "F", "I", "B", "UP", "T20"]

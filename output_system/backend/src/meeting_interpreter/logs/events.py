@@ -18,7 +18,7 @@ from .fields import (
     LogKind,
     LogLevel,
 )
-from .output import APP_LOGGER
+from .output import write_app_line
 from .trace import current_trace_id
 
 
@@ -80,7 +80,7 @@ def build_line(
 
 def _emit(kind: LogKind, level: LogLevel, values: Mapping[str, object]) -> None:
     """ログ 1 件を組み立てて、標準出力へ出す。"""
-    APP_LOGGER.log(level.number, build_line(kind, level, values))
+    write_app_line(level.number, build_line(kind, level, values))
 
 
 def _trace_id_or_current(trace_id: str | None) -> str | None:

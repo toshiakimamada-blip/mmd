@@ -82,6 +82,24 @@ def test_should_name_the_websocket_implementation_explicitly(
     assert entrypoint.WEBSOCKET_IMPLEMENTATION not in ("auto", "none")
 
 
+def test_should_not_write_the_access_log(monkeypatch: pytest.MonkeyPatch, tmp_path):
+    """
+    【テスト対象】main（uvicorn の起動の引数）
+    【テスト内容】起動する（サーバーの起動は差し替える）
+    【期待結果】アクセスの記録を止めて、uvicorn の独自のログの設定も使わないこと。
+                アクセスの記録には、要求の経路と問い合わせの文字列がそのまま入る。
+                会議の内容を URL に載せる誤りがあっても、ログに出ないようにするため
+    """
+    run = MagicMock()
+    monkeypatch.setattr(entrypoint.uvicorn, "run", run)
+    monkeypatch.setenv("MMD_STATIC_DIR", str(tmp_path))
+
+    entrypoint.main()
+
+    assert run.call_args.kwargs["access_log"] is False
+    assert run.call_args.kwargs["log_config"] is None
+
+
 def test_should_stop_with_a_clear_message_when_a_required_variable_is_missing(
     monkeypatch: pytest.MonkeyPatch, capsys
 ):
@@ -150,8 +168,8 @@ def test_should_send_logs_to_stdout_at_the_configured_level(
     monkeypatch.setenv("MMD_STATIC_DIR", str(tmp_path))
 
     entrypoint.main()
-    logging.getLogger("probe").info("hidden")
-    logging.getLogger("probe").warning("shown")
+    logging.getLogger("meeting_interpreter.startup").info("hidden")
+    logging.getLogger("meeting_interpreter.startup").warning("shown")
 
     captured = capsys.readouterr()
     assert captured.err == ""
