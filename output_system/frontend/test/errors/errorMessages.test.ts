@@ -46,6 +46,25 @@ describe('ERROR_WORDINGS', () => {
   });
 });
 
+describe('ERROR_WORDINGS for access restriction', () => {
+  /**
+   * 【テスト対象】ERROR_WORDINGS（接続制限が返すコード）
+   * 【テスト内容】アプリサーバーの接続制限部が、要求を断るときに返す 3 つのコードが、一覧にあるかを調べる
+   * 【期待結果】ACCESS_HOST_NOT_ALLOWED・ACCESS_ORIGIN_MISSING・ACCESS_ORIGIN_MISMATCH が
+   *            すべてあり、次に行う操作に、localhost で開き直すことが書かれていること
+   */
+  it('should register the codes returned when the server refuses a request', () => {
+    for (const code of [
+      'ACCESS_HOST_NOT_ALLOWED',
+      'ACCESS_ORIGIN_MISSING',
+      'ACCESS_ORIGIN_MISMATCH',
+    ]) {
+      expect(Object.keys(ERROR_WORDINGS), code).toContain(code);
+      expect(ERROR_WORDINGS[code].action, code).toContain('localhost');
+    }
+  });
+});
+
 describe('GENERIC_WORDINGS', () => {
   /**
    * 【テスト対象】GENERIC_WORDINGS

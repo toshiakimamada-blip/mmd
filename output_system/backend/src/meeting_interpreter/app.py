@@ -2,6 +2,7 @@
 
 ミドルウェアと経路の登録は、すべてこのファイルの create_app にまとめる。
 接続制限などの、すべての要求に効かせる処理を足すときに、登録し漏れた経路を作らないため。
+ミドルウェアは、配信部(最後に取り付ける)を含むすべての経路を包む。
 
 経路は次の 3 つに分ける。
 - /api: HTTP（JSON）
@@ -15,6 +16,7 @@ from fastapi import FastAPI, Request, WebSocket
 from fastapi.responses import JSONResponse
 
 from . import APP_NAME
+from .access import AccessControlMiddleware
 from .api import health
 from .errors import (
     ROUTE_NOT_FOUND,
@@ -25,6 +27,7 @@ from .errors import (
 from .frontend import INDEX_FILE, FrontendFiles
 from .logs import STARTUP_LOGGER
 from .logs.asgi import TraceIdMiddleware
+from .security_headers import SecurityHeadersMiddleware
 from .settings import Settings
 
 # 存在しない経路で、エラーを返す対象にする HTTP のメソッド。
@@ -106,10 +109,18 @@ def create_app(settings: Settings) -> FastAPI:
     app.state.settings = settings
 
     register_exception_handlers(app)
-    # add_middleware は、あとから足したものほど外側になる。
-    # 想定外の例外の変換(内側)を先に、処理の識別子(外側)をあとに足す。
-    # こうすると、エラーログにも処理の識別子が入る。接続制限は、識別子の内側に足す。
+    # add_middleware は、あとから足したものほど外側になる。内側から順に足す。
+    # 1. 想定外の例外の変換(最も内側): 経路の処理の想定外の例外を、共通の形のエラーに変える。
+    # 2. 接続制限: 宛先と送り元を確かめ、条件を満たさない要求を、経路に渡さず断る。
+    #    想定外の例外の変換より外側に置く。内側に置くと、どの例外も必ず通る接続制限の中が、
+    #    エラーログの発生場所に選ばれてしまうため。
+    #    切り替える設定は持たない。コンテナ名だけを渡す。
+    # 3. 応答ヘッダー: 読み込み先と通信先をアプリ自身に限る指示などを、HTTP の応答のすべてに付ける。
+    #    接続制限が断った応答と、想定外の例外の応答にも付くよう、その外側に置く。
+    # 4. 処理の識別子(最も外側): 接続ログとエラーログに、同じ識別子が入る。
     app.add_middleware(UnhandledErrorMiddleware)
+    app.add_middleware(AccessControlMiddleware, app_hostname=settings.app_hostname)
+    app.add_middleware(SecurityHeadersMiddleware)
     app.add_middleware(TraceIdMiddleware)
 
     _register_api_routes(app)

@@ -6,7 +6,7 @@ import re
 from fastapi import FastAPI, WebSocket
 from fastapi.testclient import TestClient
 
-from conftest import add_probe_route
+from conftest import add_probe_route, local_client
 from meeting_interpreter.app import create_app
 from meeting_interpreter.logs import current_trace_id, log_processing
 from meeting_interpreter.logs.asgi import TraceIdMiddleware
@@ -69,7 +69,7 @@ def test_should_pass_lifespan_events_through(settings: Settings):
     【テスト内容】TestClient をコンテキストマネージャーで開いて閉じる(起動と終了の通知が流れる)
     【期待結果】例外にならないこと。識別子の範囲に入るのは、HTTP と WebSocket だけ
     """
-    with TestClient(create_app(settings)) as client:
+    with local_client(create_app(settings)) as client:
         assert client.get("/api/health").status_code == 200
 
 
@@ -88,7 +88,7 @@ def test_should_be_registered_in_the_real_app(settings: Settings, capsys):
 
     add_probe_route(app, "/api/probe", handler)
 
-    with TestClient(app) as client:
+    with local_client(app) as client:
         client.get("/api/probe")
         client.get("/api/probe")
 

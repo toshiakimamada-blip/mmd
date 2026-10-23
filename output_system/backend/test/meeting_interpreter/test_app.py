@@ -6,7 +6,7 @@ import pytest
 from fastapi.testclient import TestClient
 from starlette.websockets import WebSocketDisconnect
 
-from conftest import FrontendSite
+from conftest import FrontendSite, local_client
 from meeting_interpreter.app import create_app
 from meeting_interpreter.settings import Settings
 
@@ -132,7 +132,7 @@ class TestFrontendDelivery:
         empty.mkdir()
         app = create_app(replace(settings, static_dir=empty))
 
-        with TestClient(app) as client:
+        with local_client(app) as client:
             assert client.get("/").status_code == 404
             # 画面のファイルが無くても、API は動く
             assert client.get("/api/health").status_code == 200
@@ -148,7 +148,7 @@ class TestFrontendDelivery:
         missing = tmp_path / "no-such-dir"
         app = create_app(replace(settings, static_dir=missing))
 
-        with TestClient(app) as client:
+        with local_client(app) as client:
             assert client.get("/api/health").status_code == 200
             assert client.get("/").status_code == 404
 

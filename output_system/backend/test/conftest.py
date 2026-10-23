@@ -19,6 +19,13 @@ from meeting_interpreter.tuning import TUNING_FILE_NAME, load_tuning
 # このファイルは backend/test/ にあるため、2 つ上が output_system/。
 REPO_CONFIG_DIR = Path(__file__).resolve().parents[2] / "config"
 
+# テストで使う、アプリのコンテナ名(MMD_APP_HOSTNAME の代わり)。接続制限が宛先として通す。
+APP_HOSTNAME = "test-container"
+
+# 利用者が画面を開く接続先(宛先と送り元)。画面は、この接続先からアプリへ要求する。
+LOCAL_HOST = "localhost:3001"
+LOCAL_ORIGIN = f"http://{LOCAL_HOST}"
+
 
 @pytest.fixture(autouse=True)
 def restore_logging() -> Iterator[None]:
@@ -87,7 +94,7 @@ def settings(site: FrontendSite, tmp_path: Path) -> Settings:
     assert tuning is not None, problems
     return Settings(
         port=3001,
-        app_hostname="test-container",
+        app_hostname=APP_HOSTNAME,
         records_dir=tmp_path / "records",
         models_dir=tmp_path / "models",
         static_dir=site.root,
@@ -97,10 +104,29 @@ def settings(site: FrontendSite, tmp_path: Path) -> Settings:
     )
 
 
+def local_client(app: FastAPI) -> TestClient:
+    """利用者が自分の PC のブラウザーで画面(http://localhost:3001)を開いたときと同じ要求を送るクライアント。
+
+    接続制限は、利用時と同じ条件で効く。宛先(Host)と送り元(Origin)をそれに合わせて付ける。
+    - HTTP の宛先は、base_url から付く。
+    - WebSocket の宛先は、TestClient が base_url を使わない(testserver になる)ため、
+      Host を明示する。
+    - 送り元は、状態を変える要求と WebSocket の接続に必須のため、すべての要求に付ける。
+    別の宛先や送り元を試すテストは、要求ごとに headers を渡して上書きするか、
+    専用のクライアントを作る。
+    起動と終了の通知(lifespan)を流すには、with 文で開く。
+    """
+    return TestClient(
+        app,
+        base_url=LOCAL_ORIGIN,
+        headers={"host": LOCAL_HOST, "origin": LOCAL_ORIGIN},
+    )
+
+
 @pytest.fixture
 def client(settings: Settings) -> Iterator[TestClient]:
     """アプリ全体を組み立てて、HTTP と WebSocket で呼べるクライアントを返す。"""
-    with TestClient(create_app(settings)) as test_client:
+    with local_client(create_app(settings)) as test_client:
         yield test_client
 
 
@@ -136,8 +162,18 @@ class HandshakeResponse:
     body: bytes
 
 
+# request_websocket_handshake の origin に渡す印。宛先と同じ接続先の Origin を付ける。
+SAME_ORIGIN = "same-origin"
+
+
 def request_websocket_handshake(
-    host: str, port: int, path: str, timeout: float = 5.0
+    host: str,
+    port: int,
+    path: str,
+    timeout: float = 5.0,
+    *,
+    origin: str | None = SAME_ORIGIN,
+    host_header: str | None = None,
 ) -> HandshakeResponse:
     """WebSocket の接続要求を生のソケットで送り、応答のステータスとヘッダーを読む。
 
@@ -150,13 +186,22 @@ def request_websocket_handshake(
         port: 接続先のポート。
         path: 要求の経路（例: /ws/unknown）。
         timeout: 接続と読み取りを待つ秒数。
+        origin: Origin ヘッダーの値。SAME_ORIGIN（既定）なら、宛先と同じ接続先
+            （http://ホスト:ポート）を付ける。None なら Origin ヘッダーを付けない。
+            接続制限は WebSocket の接続に Origin を必須とするため、既定で付ける。
+        host_header: Host ヘッダーの値。省略すると「ホスト:ポート」。
 
     Returns:
         サーバーの応答。
     """
+    origin_line = ""
+    if origin is not None:
+        origin_value = f"http://{host}:{port}" if origin == SAME_ORIGIN else origin
+        origin_line = f"Origin: {origin_value}\r\n"
     request = (
         f"GET {path} HTTP/1.1\r\n"
-        f"Host: {host}:{port}\r\n"
+        f"Host: {host_header if host_header is not None else f'{host}:{port}'}\r\n"
+        f"{origin_line}"
         "Upgrade: websocket\r\n"
         "Connection: Upgrade\r\n"
         # RFC 6455 の例に載っている鍵。接続の相手を確かめるための値で、秘密ではない。

@@ -12,7 +12,7 @@
 | `tools/` | 補助の道具。画面の依存を足すときに、固定した Node.js で実行する `with-pinned-node.sh` など |
 | `docs/` | 実装に付ける文書。エラーの扱いと、エラーコードの一覧は `docs/errors.md`。お知らせ帯とエラー表示の部品の使い方は `docs/notices.md` |
 
-テストは、各フォルダの `src/` と同じ階層の `test/` に置き、`src/` と同じ構造にします。起動したコンテナを相手にするテストだけは、`backend/test/container/` に置きます。
+テストは、各フォルダの `src/` と同じ階層の `test/` に置き、`src/` と同じ構造にします。起動したコンテナを相手にするテストだけは、`backend/test/container/` に置きます。ブラウザーで手動で確かめるための確認用のサーバーは、`backend/test/browser/` に置きます（pytest は集めません）。
 
 ## 画面の URL
 
@@ -26,6 +26,17 @@
 | 会議の記録（S-04） | `/meetings/<会議番号>` |
 
 どの画面にも当たらない URL は、会議の一覧へ移ります。
+
+## 画面の実装の規約
+
+画面は、会議の内容（字幕・要約・質問・タイトル）を、次のように扱います。基本設計書の非機能要件設計書「セキュリティ」の「画面に残す情報」「画面からの送信の防止」に従います。
+
+- **会議の内容を、ブラウザーの保存領域へ書きません。** 保存領域は、`localStorage`・`sessionStorage`・`IndexedDB`・Cache API・Cookie・`window.name` です。画面を開くたびに、アプリサーバーから読み直します。保存領域の中身は、ブラウザーを閉じたあとも、利用者のほかの操作から見える場所に残るためです。
+- **外部の資源を読み込みません。** 外部の CDN・Web フォント・解析サービスを使いません。必要なフォントや画像は、`frontend/` の中に置き、アプリに同梱します。ビルドの最後に、`scripts/check-no-external-urls.ts` が、ビルドした画面のファイルに外部の URL への参照が無いことを確かめます。参照があると、`npm run build` が失敗します。
+- **小さな画像やフォントを、`data:` の URL として埋め込みません。** 応答ヘッダー（CSP）が `data:` を止めるためです。ビルドの設定（`vite.config.ts` の `assetsInlineLimit: 0`）で埋め込みを止めています。
+- **スクリプトとスタイルを、HTML の中に直接書きません（インラインにしません）。** 同じ理由で、ブラウザーが実行を止めます。Worker とワークレットは、`blob:` の URL ではなく、アプリが配信するファイルから読み込みます。
+- 会議の内容を、URL（経路と問い合わせの文字列）に載せません。URL はログと履歴に残るためです。
+- 会議の内容は、常に文字として表示します（`dangerouslySetInnerHTML` と `innerHTML` への代入は、ESLint が禁止しています）。
 
 ## アプリサーバーの経路と設定
 
@@ -64,6 +75,42 @@ Starlette の `TestClient` は uvicorn を通らないため、部品が無く�
 - 記録とモデルの置き場は、既定値を持たせません。名前付きボリュームの置き場と食い違ったまま、別の場所へ黙って書き込む事故を防ぐためです。
 - 誤りは起動の時点で見つけます。必須の環境変数が無いとき、値が誤っているとき、調整値のファイルが読めないときは、サーバーを起動せず、終了コード 2 で止まります。誤りは見つけたものをすべて、標準出力に 1 行 1 件で出します。
 - 秘密の情報（パスワード・鍵）は持ちません。設定を画面から変える機能もありません。
+
+### 接続制限
+
+アプリはログインを求めません。代わりに、接続元を「動かしている PC の中」に限ります。判定は `backend/src/meeting_interpreter/access.py` にあり、HTTP の要求も WebSocket の接続も、同じ関数（`judge_access`）を使います。
+
+| 確かめる対象 | 通す条件 | 守っている場所 |
+|---|---|---|
+| 公開するポート | PC のループバック（`127.0.0.1`）にだけ公開します | `docker-compose.yml` の `ports` |
+| 要求の宛先（Host ヘッダー） | `localhost`・`127.0.0.1`・アプリのコンテナ名（`MMD_APP_HOSTNAME`）のどれかです。ポートは確かめません | `access.py` |
+| 要求の送り元（Origin ヘッダー） | 付いていれば、宛先と同じ接続先（スキーム・ホスト・ポート）です。読み取りだけのメソッド（`GET`・`HEAD`・`OPTIONS`）以外では、必ず付いている必要があります。WebSocket の接続では、常に必須です | `access.py` |
+| ほかのサイトへの読み取りの許可 | 出しません（`Access-Control-*` のヘッダーを付けません） | ― |
+
+- ミドルウェア（`AccessControlMiddleware`）が、`create_app` で配信部を含むすべての経路を包みます。経路をあとから足しても、この確認を通らない経路は作れません。
+- 断った HTTP の要求は、本文を読まずに、`403` と `ACCESS_HOST_NOT_ALLOWED`・`ACCESS_ORIGIN_MISSING`・`ACCESS_ORIGIN_MISMATCH` のどれかの共通の形で返します。受け取った宛先と送り元の値は、応答に含めません。
+- 断った WebSocket の接続は、受け付けずに閉じます（符号 1008）。サーバー（uvicorn）は、接続要求に `403` を返します。ブラウザーは、ほかのサイトからの WebSocket の接続を止めません。そのため、アプリが確かめる送り元が唯一の守りです。
+- 断った記録は、接続ログ（警告）に出ます。項目は、断った理由の種類（`host_not_allowed`・`origin_missing`・`origin_mismatch`）と、宛先・送り元の名前だけです。経路・問い合わせ・本文は出しません。
+- Host と Origin は、1 件ずつだけ読みます。同じヘッダーが複数あるときは断ります。
+- コンテナの死活の確認（`HEALTHCHECK`）は `127.0.0.1` 宛てに送るため、そのまま通ります。
+- 出荷するコンテナで確かめるテストは、`backend/test/container/` にあります（[出荷するコンテナの WebSocket の確認](#出荷するコンテナの-websocket-の確認)と同じ手順で動きます）。
+- 通す条件は、利用時も自動テスト時も同じです。テストのために切り替える設定はありません。自動テストのブラウザーは、コンテナ名（`http://toshiakimamada-blip-mmd-output-system:3001`）でアプリへ接続し、宛先と送り元の両方がコンテナ名になるため、そのまま通ります。
+- サーバーのテストは、`backend/test/conftest.py` の `local_client` で作るクライアントを使います。利用者が `http://localhost:3001` を開いたときと同じ宛先と送り元を付けます。別の宛先や送り元を試すときは、要求ごとに `headers` を渡します。
+
+### 応答ヘッダー（画面の読み込み先と通信先の制限）
+
+アプリサーバーは、HTTP の応答のすべてに、次のヘッダーを付けます（`backend/src/meeting_interpreter/security_headers.py`）。画面のファイル、API、エラー、接続制限が断った応答にも付きます。経路が同じ名前のヘッダーを付けても、決めた値に置き換えます。
+
+| ヘッダー | 値 | 目的 |
+|---|---|---|
+| `Content-Security-Policy` | 既定は `default-src 'none'`。スクリプト・スタイル・画像・フォント・通信先は `'self'`（アプリ自身）だけ。`base-uri`・`form-action`・`object-src`・`frame-ancestors` は `'none'` | 外部の資源の読み込みと、外への送信を、ブラウザーに止めさせる |
+| `X-Content-Type-Options` | `nosniff` | 宣言した種類と違う種類として、中身を解釈させない |
+| `Referrer-Policy` | `no-referrer` | 外へ出る要求に、アプリの URL（会議番号を含む）を送らない |
+| `X-Frame-Options` | `DENY` | ほかのサイトが、画面をフレームに埋め込めない。`frame-ancestors 'none'` の重ね書き |
+
+- 通信先の `'self'` は、同じホストとポートの WebSocket（`ws:`）を含みます。Chrome（156）と Edge（155）で、`localhost`・`127.0.0.1`・ホスト名の 3 通りの宛先から WebSocket が接続できることを確かめました。手順は、[ブラウザーでの WebSocket の確認](#ブラウザーでの-websocket-の確認)にあります。`'self'` が WebSocket を含まないブラウザーが出たら、`CONTENT_SECURITY_POLICY` の `connect-src` に `ws://localhost:3001` などの接続先を明示します。
+- `upgrade-insecure-requests` は付けません。アプリは `http://localhost` で開くためです。
+- WebSocket の接続には、ヘッダーを足しません。ヘッダーを付けるのは、HTTP の応答だけです。
 
 ### 調整値
 
@@ -135,7 +182,8 @@ npm test                  # テスト（Vitest）
 npm run test:coverage     # カバレッジ付きのテスト
 npm run lint              # lint（ESLint）
 npm run typecheck         # 型チェック
-npm run build             # 本番用のビルド（dist/ に出る）
+npm run build             # 本番用のビルド（dist/ に出る）。最後に、外部の URL への参照が無いことも確かめる
+npm run check:dist        # ビルドした dist/ だけを、外部の URL への参照が無いか確かめる
 ```
 
 ## 依存の追加と更新
@@ -203,8 +251,32 @@ MMD_CONTAINER_URL=http://toshiakimamada-blip-mmd-output-system:3001 uv run pytes
 ```
 
 - 存在しない `/ws` への WebSocket の接続要求を、コンテナが 403 で断れば合格です。WebSocket の部品が無いイメージでは、404 の JSON が返り、失敗します。
+- 接続制限も同じ手順で確かめます。宛先を変えた HTTP の要求（`test_container_access.py`）と、送り元が無い・違う WebSocket の接続要求（`test_container_websocket.py`）が、コンテナの設定（`MMD_APP_HOSTNAME` とコンテナ名の対応）まで含めて通ることを見ます。
+- 応答ヘッダー（CSP など）も同じ手順で確かめます。画面のファイル・API・エラー・接続制限が断った応答のすべてに、決めたヘッダーが付くことを見ます（`test_container_access.py`）。古いイメージを起動していると、ここで失敗します。
 - `MMD_CONTAINER_URL` が未設定のときは、この確認を飛ばします（`uv run pytest` の通常の実行では skipped になります）。
 - 受け付ける経路ができたあとは、その経路の接続と往復を、このフォルダーのテストに足します。
+
+### ブラウザーでの WebSocket の確認
+
+画面の読み込み先と通信先の制限（CSP）のもとで、ブラウザーが WebSocket を接続できることを確かめます。`connect-src 'self'` が WebSocket（`ws:`）を含むかどうかは、ブラウザーごとに差が出うるため、Edge と Chrome の両方で確かめます。自動テスト（pytest）はブラウザーを使いません。
+
+出荷するアプリには、まだ接続を受け付ける `/ws` の経路がありません。そこで、確認用のサーバーを使います（`backend/test/browser/serve_websocket_check.py`）。本物のアプリ（`create_app`）に、確認用の経路（`/ws/probe`）を 1 つ足したものです。接続制限と応答ヘッダーはアプリのままで、確認のために緩める設定はありません。
+
+```bash
+cd backend
+uv run python test/browser/serve_websocket_check.py --port 3101 --app-hostname <この PC のコンテナ名>
+```
+
+ブラウザーで、次の URL を順に開きます。コンテナ名の URL は、`--app-hostname` に渡した名前を使います。
+
+- `http://localhost:3101/`
+- `http://127.0.0.1:3101/`
+- `http://<コンテナ名>:3101/`
+
+- 画面に「接続できました」と出れば、接続できています。
+- ブラウザーのコンソールに、CSP の違反（`violates the following Content Security Policy directive`）が出ないことも見ます。
+- 出荷するアプリの 4 つの画面を開き、コンソールに何も出ないことも見ます（外部の資源を読み込まない確認）。
+- Ctrl+C で止めます。確認用の画面は一時のフォルダーに作り、止めると消えます。
 
 ### 社内の証明書
 

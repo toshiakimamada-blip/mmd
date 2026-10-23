@@ -30,6 +30,9 @@ const RETRY_OR_REPORT =
   'もう一度操作してください。直らない場合は、このエラーコードを開発を担う AI へ伝えてください。';
 const REOPEN_OR_REPORT =
   '画面を開き直してください。直らない場合は、このエラーコードを開発を担う AI へ伝えてください。';
+// 接続制限部が要求を断ったときの、次に行う操作。サーバーの文(backend の access.py)と同じ内容にする。
+const REOPEN_WITH_LOCALHOST =
+  'アプリを動かしている PC のブラウザーで、アドレスに localhost を使って開き直してください。直らない場合は、このエラーコードを開発を担う AI へ伝えてください。';
 
 /**
  * エラーコードごとの文言。キーは エラーコード（領域_出来事）。
@@ -55,6 +58,18 @@ export const ERROR_WORDINGS: Readonly<Record<string, ErrorWording>> = Object.fre
   SYSTEM_REQUEST_FAILED: {
     message: '要求を処理できませんでした。',
     action: RETRY_OR_REPORT,
+  },
+  ACCESS_HOST_NOT_ALLOWED: {
+    message: 'この宛先からは、アプリを利用できません。',
+    action: REOPEN_WITH_LOCALHOST,
+  },
+  ACCESS_ORIGIN_MISSING: {
+    message: '送り元を確かめられない要求のため、受け付けませんでした。',
+    action: REOPEN_WITH_LOCALHOST,
+  },
+  ACCESS_ORIGIN_MISMATCH: {
+    message: 'アプリの画面とは別の送り元からの要求のため、受け付けませんでした。',
+    action: REOPEN_WITH_LOCALHOST,
   },
 });
 

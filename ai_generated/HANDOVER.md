@@ -17,6 +17,8 @@ output_system/
 │   ├── src/meeting_interpreter/
 │   │   ├── app.py            # create_app: ミドルウェアと経路の登録を 1 か所にまとめる
 │   │   ├── frontend.py       # 配信部（SPA の配信）
+│   │   ├── access.py         # 接続制限（宛先 Host と送り元 Origin の判定。HTTP も WebSocket も judge_access 1 つ）
+│   │   ├── security_headers.py # 応答ヘッダー（CSP・nosniff・Referrer-Policy・X-Frame-Options）
 │   │   ├── settings.py       # 環境変数 MMD_* の読み込み（起動時に検証）
 │   │   ├── tuning.py         # config/tuning.toml の調整値（MMD_TUNING_* で上書き）
 │   │   ├── config_error.py   # 設定の誤りで起動を止める例外
@@ -24,9 +26,10 @@ output_system/
 │   │   ├── errors.py         # 画面へ返すエラーの共通の形（3 分類・9 領域・例外ハンドラー）
 │   │   ├── healthcheck.py    # HEALTHCHECK 用
 │   │   └── api/health.py     # GET /api/health
-│   └── test/                 # src と同じ構造。test/container/ は起動したコンテナを相手にする（MMD_CONTAINER_URL のときだけ動く）
+│   └── test/                 # src と同じ構造。test/container/ は起動したコンテナを相手にする（MMD_CONTAINER_URL のときだけ動く）。test/browser/ はブラウザーで手動で確かめる確認用のサーバー（pytest は集めない）
 ├── frontend/
 │   ├── src/{routes.ts,router.tsx,components/AppFrame.tsx,screens/*,styles/{frame,notices}.css}
+│   ├── scripts/              # ビルドした dist/ に外部の URL への参照が無いかの検査（npm run build の最後に走る）
 │   ├── src/errors/           # エラーの型と、エラーコードごとの文言の一覧（errorMessages.ts）
 │   ├── src/components/notices/ # お知らせ帯・7 つのエラー表示パターン・確認の表示（使い方は docs/notices.md）
 │   └── test/                 # src と同じ構造
@@ -40,14 +43,18 @@ output_system/
 - 開発用コンテナから開く URL: `http://toshiakimamada-blip-mmd-output-system:3001`（`localhost` は使わない）
 - テスト: `backend/` で `uv sync --locked && uv run pytest`、`frontend/` で `npm ci && npm test`。`npm ci` と `npm install` は Node 24 / npm 11.10 以上が要る。開発用コンテナ（Node 22 / npm 10）では `../tools/with-pinned-node.sh npm ci` のように付けて実行する
 - 出荷するコンテナの WebSocket の確認: `docker compose up -d --build` のあと、`backend/` で `MMD_CONTAINER_URL=http://toshiakimamada-blip-mmd-output-system:3001 uv run pytest test/container --no-cov`
+- ブラウザーでの WebSocket の確認（CSP のもとで接続できるか）: `backend/` で `uv run python test/browser/serve_websocket_check.py --port 3101 --app-hostname <開発用コンテナ名>` を起動し、`playwright-cli` で `http://localhost:3101/`・`http://127.0.0.1:3101/`・`http://<コンテナ名>:3101/` を開く。Edge は `--config` の `executablePath` で指す（README「ブラウザーでの WebSocket の確認」）
 - 社内の証明書: 既定でリポジトリ直下の `ssl-certificates/` を登録する。フォルダーが無い環境は `SSL_CERTS_DIR=<空のフォルダー>` を付ける
 
 ## 設計判断
 - 経路の接頭辞を `/api`（HTTP）と `/ws`（WebSocket）に分け、それ以外は画面のファイル。存在しない `/api` と `/ws` は、HTTP の要求には画面のファイルではなく 404 の JSON を返し、WebSocket の接続要求は 403 で断る。後続の経路は、`app.py` の「存在しない経路」の受け皿より先に登録する
 - 拡張子を持つ名前（`/assets/x.js`）は、無ければ 404。画面の URL にだけ index.html を返す。会議番号に「.」を使わないこと
 - uvicorn には WebSocket の実装を名前で指定する（`__main__.py` の `WEBSOCKET_IMPLEMENTATION` = `websockets-sansio`）。既定の `auto` は、部品が無いと黙って WebSocket 無しで起動し、`/ws` がふつうの HTTP になる。名前で指定すると、部品が無いイメージは起動で失敗する
-- 接続制限（Task 1.3.1）は、`create_app` にミドルウェアとして足す。配信部（最後の mount）にも効く
-- 画面の読み込み先と通信先を限る応答ヘッダー（Task 1.3.3）は、まだ入れていない
+- 接続制限は、`create_app` にミドルウェアとして足す（`AccessControlMiddleware`）。配信部（最後の mount）にも効くため、あとから足した経路も必ず通る。通す宛先は `localhost`・`127.0.0.1`・コンテナ名（`MMD_APP_HOSTNAME`）。`127.0.0.1` は HEALTHCHECK の宛先。送り元は、付いていれば宛先と同じ接続先だけ。GET・HEAD・OPTIONS 以外と WebSocket では必須。条件を切り替える設定は持たない。自動テストのブラウザーはコンテナ名で接続し、そのまま通る（ADR-13）。断った要求は接続ログ（`log_type: connection`、警告）に理由・宛先・送り元の名前だけを残す。CORS の許可ヘッダーは出さない（出さなければ、ほかのサイトは応答を読めない）
+- ミドルウェアの順（内側から）: 想定外の例外の変換 → 接続制限 → 応答ヘッダー → 処理の識別子。応答ヘッダーを接続制限の外側に置くのは、断った応答と想定外の例外の応答にも付けるため。経路が同じ名前のヘッダーを付けても、決めた値で置き換える
+- 応答ヘッダーの CSP は `default-src 'none'` から始め、スクリプト・スタイル・画像・フォント・通信先を `'self'` だけにする。`base-uri`・`form-action`・`object-src` は `'none'`、`frame-ancestors 'none'`（X-Frame-Options: DENY を重ねる）。`upgrade-insecure-requests` は付けない（アプリは http で開く）。WebSocket の接続（101）にはヘッダーを足さない。`connect-src 'self'` は、Chrome 156 と Edge 155 のどちらでも同じホストとポートの `ws:` を含んだ（接続先の明示は不要）。Firefox と Safari は対象外
+- 画面は、インラインのスクリプトとスタイル、`data:`・`blob:` の URL、`eval` を使えない。Vite は `assetsInlineLimit: 0` で画像とフォントの `data:` 埋め込みを止めている。画面の実装の規約（ブラウザーの保存領域へ会議の内容を書かない、など）は README「画面の実装の規約」
+- `frontend/scripts/check-no-external-urls.ts` は、`npm run build` の最後（Dockerfile のビルドでも）に、dist/ の外部の URL への参照を検査して失敗させる。スクリプトの中の文字列として許す URL（XML の名前空間、React のエラーの案内など）は `scripts/externalUrls.ts` の `ALLOWED_SCRIPT_URL_PREFIXES` に理由つきで置く。部品の更新で失敗したら、取得に使われない文字列かを確かめてから足す
 - 設定は `Settings`（`MMD_PORT`、`MMD_APP_HOSTNAME`、`MMD_RECORDS_DIR`、`MMD_MODELS_DIR`、`MMD_STATIC_DIR`、`MMD_CONFIG_DIR`、`MMD_LOG_LEVEL`）。記録とモデルの置き場は既定値を持たせない（ボリュームと食い違ったまま別の場所へ黙って書く事故を防ぐ）。誤りは起動時にすべて出し、終了コード 2 で止める
 - ログは標準出力（標準エラーではない）。許可リスト（`logs/fields.py`）に無い項目と、決めた形に合わない値は捨てる。項目を足すときは `FieldSpec` を足す
 - 標準のロガー（`logging`）の記録は `log_type: runtime` で出し、文面を出さない（ロガーの名前・レベル・例外の種類だけ。出さなかった数は `dropped_field_count`）。文面を出すのは、起動の知らせ用の `STARTUP_LOGGER`（`logs/output.py`）と、uvicorn の起動・終了・接続の知らせ（`_UVICORN_FIXED_MESSAGES` にある文の形だけ）。uvicorn のアクセスの記録は `access_log=False` で止めている。会議に関わる記録は `log_processing`・`log_error`・`log_connection` で出す。`runtime` は基本設計書の 3 種別の外で、起動できない理由を日本語の文で出すために設けた。ワーカーなど別のプロセスを足すときは、最初に `configure_logging` を呼ぶ。`print` は ruff（T20）で禁止している
@@ -77,8 +84,12 @@ output_system/
 - uvicorn を更新すると、起動と終了の知らせの文の形が変わることがある。変わった記録は文面なしで出る。`backend/test/meeting_interpreter/test_entrypoint_process.py` が、起動と終了の知らせが読める形で出ることを確かめる
 - Starlette の TestClient は uvicorn を通らない。WebSocket の部品が無くても、WebSocket のテストは通る。出荷するイメージの確認は `backend/test/container/` で行う
 - starlette の TestClient は httpx2 を使う（httpx は非推奨の警告が出る）
+- 出荷するアプリには、接続を受け付ける `/ws` の経路がまだ無い。CSP のもとでの WebSocket の接続は、確認用のサーバー（`backend/test/browser/serve_websocket_check.py`）で確かめる。出荷するアプリへ WebSocket を張ると、CSP を通ったうえで 403 になる（コンソールの文言が「CSP に違反」ではなく「handshake: Unexpected response code: 403」なら、CSP は通っている）
+- 開発用コンテナに Edge は入っていない。Microsoft の公式リポジトリの `microsoft-edge-stable` の .deb を、SHA-256 を `Packages` の値と突き合わせて別のフォルダーへ `dpkg -x` で展開し、playwright-cli の `--config`（`launchOptions.executablePath`、`chromiumSandbox: false`、`--no-sandbox`）で指す。システムへはインストールしない
+- コンテナを作り直したつもりで、古いイメージのまま起動していることがある。出荷するコンテナへの確認（`test/container/`）は、応答ヘッダーの有無で古いイメージに気づける
 - Docker に buildx が無く、`docker build` は旧ビルダーになる。追加の文脈（`certs`）は `docker compose build` で渡す
 
 ## 実装済み機能
 - PBI #2: コンテナの起動、共通の枠と 4 画面の骨組み、`GET /api/health`、配信部、名前付きボリューム 2 つ、自動再起動
 - PBI #7: 設定の読み込み（環境変数と調整値）、3 種類のログ（標準出力・許可リスト）、共通のエラーの形（サーバーと画面）、お知らせ帯・7 つのエラー表示パターン・確認の表示の部品、対応していないブラウザーの案内
+- PBI #12: 接続元の制限（宛先 Host と送り元 Origin の判定、WebSocket の送り元必須、CORS なし、断った要求の接続ログ）、応答ヘッダー（CSP・nosniff・Referrer-Policy・X-Frame-Options）、ビルドの外部 URL 検査

@@ -1,6 +1,10 @@
 // @vitest-environment node
 import { ESLint } from 'eslint';
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
+
+// ESLint は、最初の検査で設定と TypeScript の構文解析を読み込むため、数秒かかる。
+// 機械が忙しいとき(ほかのテストが同時に動いているときなど)は、既定の 5 秒では足りない。
+vi.setConfig({ testTimeout: 30_000 });
 
 /** 指定したコードを、この画面の ESLint の設定で検査した結果の指摘を返す。 */
 async function lint(code: string, filePath: string) {
