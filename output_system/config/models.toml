@@ -1,6 +1,132 @@
 # AI モデルの定義。アプリに同梱し、起動のときに読み込む。
 #
-# 文字起こし・翻訳・文章生成の 3 つの AI モデルについて、名前・配布元・固定した版・
+# 文字起こし・翻訳・文章生成の 3 つの AI モデルについて、名前・役割・配布元・固定した版・
 # ファイルごとの名前と大きさと SHA-256・ライセンス名を書く。
+# 入手と確認は、この定義のとおりに行う（機能設計書 F-16、ADR-14）。
 #
-# 中身は、AI モデルの入手を作る作業で足す。いまは置き場だけを用意している。
+# 決まり
+# - 版（revision）は、配布元のリポジトリのコミット（40 桁）で固定する。ブランチ名やタグ、「最新」は使わない。
+# - 入手先は `<repository_url>/resolve/<revision>/<ファイル名>`。HTTPS だけで入手する。
+# - sha256 は、入手したファイルが配布元のものと一致するかの確認に使う。一致しないファイルは捨てる。
+# - 業務で使えるライセンスの AI モデルだけを書く。非商用に限るライセンスは書けない（読み込みで失敗する）。
+# - ファイルは、動かすのに要るものだけを書く。同じリポジトリの別の量子化など、使わないファイルは書かない。
+#
+# SHA-256 の出どころ
+# - 「配布元が公開している値」とあるファイルは、配布元（Hugging Face）の API が返す LFS の sha256 を使った。
+# - 「求めた値」とあるファイルは、配布元が値を公開していない（LFS ではなく Git で保管された小さなファイル）。
+#   固定した版の URL から公式の配布元のファイルを入手し、sha256sum で求めた値を書いた。
+#
+# 項目を足す・版を上げるときは、backend/src/meeting_interpreter/models/definition.py の検証を通る形にする。
+# 翻訳モデルの代わりになる候補は、同じフォルダーの translation_alternatives.md にある。
+
+# --- 文字起こし: Whisper small.en（CTranslate2 形式） -----------------------------------
+# 実行基盤は faster-whisper。OpenAI の Whisper small.en を CTranslate2 の形式に変換したもので、
+# faster-whisper の開発元（SYSTRAN）が配布している。OpenAI 自身の配布物ではない。
+# この配布元を要件の「公式の配布元」として扱ってよいかは、利用者に確認中。確認が取れるまでの仮置き。
+# OpenAI の配布物（PyTorch 形式）から自前で変換する案もある（ADR-16 の翻訳モデルと同じ方式）。
+[[models]]
+name = "whisper-small-en"
+role = "transcription"
+repository_url = "https://huggingface.co/Systran/faster-whisper-small.en"
+revision = "d1d751a5f8271d482d14ca55d9e2deeebbae577f"
+license = "MIT"
+
+# 配布元が公開している値。
+[[models.files]]
+name = "model.bin"
+size_bytes = 483545366
+sha256 = "62b2a45b05ee59acb4a5341b33ee35e041395d378d418a18acfe4c9e768ee37a"
+
+# 以下の 3 つは求めた値。
+[[models.files]]
+name = "config.json"
+size_bytes = 2657
+sha256 = "666a9605530ac1f61fa8177f3702b4dacec9966749e42610839fcc32661d5fae"
+
+[[models.files]]
+name = "tokenizer.json"
+size_bytes = 2128466
+sha256 = "929c5252409436dce1b38a75d1abbcb5e132d170d8e324e4e04ed915fa2d22df"
+
+[[models.files]]
+name = "vocabulary.txt"
+size_bytes = 422309
+sha256 = "ff77588746d3a2595d32ab5b69ffd7b95ce2441ac57533cb66fc3eb575a115cf"
+
+# --- 翻訳: FuguMT 英語から日本語（変換前） -----------------------------------------------
+# 開発元（staka）が配布するのは、Marian-NMT の PyTorch 形式。実行基盤（CTranslate2）の形式への変換は、
+# 入手と確認のあとに行う（ADR-16）。変換前のファイルを、ここに書いた SHA-256 で確かめる。
+# ファイルの要否（文字の分割に使う source.spm・target.spm など）は、翻訳モデルの変換方式を決める作業で
+# 確かめる。それまでは、リポジトリのモデルのファイルをすべて書いておく（README と .gitattributes を除く）。
+#
+# ライセンスの補足: CC BY-SA 4.0。ただし作者の README（https://github.com/s-taka/fugumt）に
+# 「本モデルは研究用を目的に公開しています。」の記載がある。業務で使えるかは、利用者が社内の
+# 法務・知財部門に確認中。確認が取れるまでの仮置き。使えないと分かった場合の代わりの候補は、
+# translation_alternatives.md にある。
+[[models]]
+name = "fugumt-en-ja"
+role = "translation"
+repository_url = "https://huggingface.co/staka/fugumt-en-ja"
+revision = "fbb91252110cf97d90291eb808629ab0b10f7928"
+license = "CC BY-SA 4.0"
+license_note = "作者の README（https://github.com/s-taka/fugumt）に「本モデルは研究用を目的に公開しています。」の記載がある。業務で使えるかは、利用者が社内の法務・知財部門に確認中。確認が取れるまでの仮置き。"
+
+# 配布元が公開している値。
+[[models.files]]
+name = "pytorch_model.bin"
+size_bytes = 121192965
+sha256 = "8b2d3d3b7da2f66dfd46187646dd1ea48918e9a5406f0153c497478432425fe8"
+
+# 以下の 7 つは求めた値。
+[[models.files]]
+name = "config.json"
+size_bytes = 1032
+sha256 = "5b4ff210716e782cc407508f1b68a29cd5563e807cbbd6f55985a625565958a5"
+
+[[models.files]]
+name = "generation_config.json"
+size_bytes = 289
+sha256 = "449c2099e7ef43fd1ebd71d6e7d62dcf6b66831b01eda640b6f579498b3a0570"
+
+[[models.files]]
+name = "source.spm"
+size_bytes = 768297
+sha256 = "92fcbf6449e47457866ec98891dab09ef625e57d9637fe3fdbbe44fc1a365b6d"
+
+[[models.files]]
+name = "special_tokens_map.json"
+size_bytes = 74
+sha256 = "5e4d1f5e759d74cb1c2fe1d165cfc62b5237aa904de759380cd6f43042eec723"
+
+# source.spm と target.spm は、中身が同じ（同じ SHA-256）。配布元がそのように公開している。
+[[models.files]]
+name = "target.spm"
+size_bytes = 768297
+sha256 = "92fcbf6449e47457866ec98891dab09ef625e57d9637fe3fdbbe44fc1a365b6d"
+
+[[models.files]]
+name = "tokenizer_config.json"
+size_bytes = 42
+sha256 = "3694dea2589d0672ce7c10986b3f9f8e6b06c62dcfc78d62b91d197f77eb93a0"
+
+[[models.files]]
+name = "vocab.json"
+size_bytes = 791091
+sha256 = "2c0b445181f51bdea35b976a909ba450447ca9d00a2e8d9c978ae1ef46ef964e"
+
+# --- 文章生成: Qwen3-4B（4 ビット量子化 GGUF） -----------------------------------------
+# 開発元（Qwen）が GGUF 形式で配布している。実行基盤は llama.cpp。
+# 同じリポジトリには Q5_0・Q5_K_M・Q6_K・Q8_0 もある（各 2.8GB から 4.3GB）。メモリの配分は
+# 4 ビット（Q4_K_M）で見積もっているため、Q4_K_M だけを入手する。
+[[models]]
+name = "qwen3-4b-q4-k-m"
+role = "generation"
+repository_url = "https://huggingface.co/Qwen/Qwen3-4B-GGUF"
+revision = "bc640142c66e1fdd12af0bd68f40445458f3869b"
+license = "Apache 2.0"
+
+# 配布元が公開している値。
+[[models.files]]
+name = "Qwen3-4B-Q4_K_M.gguf"
+size_bytes = 2497280256
+sha256 = "7485fe6f11af29433bc51cab58009521f205840f5b4ae3a32fa7f92e8534fdf5"

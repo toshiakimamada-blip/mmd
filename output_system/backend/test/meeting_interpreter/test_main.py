@@ -174,3 +174,31 @@ def test_should_send_logs_to_stdout_at_the_configured_level(
     captured = capsys.readouterr()
     assert captured.err == ""
     assert [json.loads(line)["message"] for line in captured.out.splitlines()] == ["shown"]
+
+
+def test_should_apply_the_offline_environment_before_starting_the_server(
+    monkeypatch: pytest.MonkeyPatch, tmp_path
+):
+    """
+    【テスト対象】main（実行基盤の自動入手と利用状況の送信を止める環境変数）
+    【テスト内容】止める環境変数が無い状態で起動し、サーバーを起動する時点の環境変数を記録する
+    【期待結果】サーバーを起動する時点で、止める環境変数がすべて 1 になっていること
+                （サーバーが起動するワーカーと変換プロセスは、これを引き継ぐ）
+    """
+    from meeting_interpreter.child_process import OFFLINE_ENVIRONMENT
+
+    for name in OFFLINE_ENVIRONMENT:
+        monkeypatch.delenv(name, raising=False)
+    seen: dict[str, str | None] = {}
+
+    def record(*args, **kwargs):
+        import os
+
+        seen.update({name: os.environ.get(name) for name in OFFLINE_ENVIRONMENT})
+
+    monkeypatch.setattr(entrypoint.uvicorn, "run", record)
+    monkeypatch.setenv("MMD_STATIC_DIR", str(tmp_path))
+
+    entrypoint.main()
+
+    assert seen == dict(OFFLINE_ENVIRONMENT)

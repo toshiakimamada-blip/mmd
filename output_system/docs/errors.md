@@ -112,4 +112,20 @@ FastAPI が自動で返す応答も、共通の形に変えています。
 
 `ACCESS_*` の 3 つは、接続制限部（`access.py`）が要求を断るときに返します（HTTP の状態は 403）。例外を起こさず共通の形の本文を直接返すため、エラーログには出ません。断った記録は接続ログに出ます（README の「接続制限」を参照）。
 
+### AI モデルの入手（MODEL_*）
+
+入手に失敗した原因の種類ごとのコードです。準備状況の取得（`GET /api/models/status`）と通知の `error_code` に入ります。HTTP のエラーとしては返しません（準備状況の一部のため）。画面は、このコードから文言を引きます。
+
+| コード | 分類 | 原因の種類（`failure_kind`） | 何が起きたか |
+|---|---|---|---|
+| `MODEL_NETWORK_UNREACHABLE` | システムエラー | `network_unreachable` | ネットワークにつながらない（名前が引けない、接続を断られた、経路が無い） |
+| `MODEL_CERTIFICATE_INVALID` | システムエラー | `certificate_invalid` | 配布元の証明書を確かめられない（社内のネットワークの証明書が未登録の場合など） |
+| `MODEL_SOURCE_UNRESPONSIVE` | システムエラー | `source_unresponsive` | 配布元が応答しない（時間切れ、エラーの応答、途中で切れた） |
+| `MODEL_HASH_MISMATCH` | システムエラー | `hash_mismatch` | 入手したファイルが、定義の SHA-256（配布元のもの）と一致しない。そのファイルは捨てた |
+| `MODEL_DISK_INSUFFICIENT` | システムエラー | `disk_insufficient` | ディスクの空きが足りない。入手を始める前の確認で足りないとき、書き込みで空きが無くなったとき |
+| `MODEL_DOWNLOAD_FAILED` | システムエラー | `unknown` | 上のどれにも分類できない失敗（想定外）。例外の種類と発生場所がエラーログに出る |
+| `MODEL_RETRY_NOT_ALLOWED` | 業務エラー（409） | — | 入手失敗でないときに、入手のやり直しを求めた（`POST /api/models/retry`） |
+
+「翻訳モデルを変換できない」は、翻訳モデルの変換を作る作業でコードを足します。
+
 各機能のコードは、その機能の作業で足します。

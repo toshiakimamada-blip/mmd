@@ -30,6 +30,8 @@ const RETRY_OR_REPORT =
   'もう一度操作してください。直らない場合は、このエラーコードを開発を担う AI へ伝えてください。';
 const REOPEN_OR_REPORT =
   '画面を開き直してください。直らない場合は、このエラーコードを開発を担う AI へ伝えてください。';
+// 操作を試しても直らないときの案内。サーバーの文(backend)ではなく、画面側で持つ。
+const REPORT_IF_NOT_FIXED = '直らない場合は、このエラーコードを開発を担う AI へ伝えてください。';
 // 接続制限部が要求を断ったときの、次に行う操作。サーバーの文(backend の access.py)と同じ内容にする。
 const REOPEN_WITH_LOCALHOST =
   'アプリを動かしている PC のブラウザーで、アドレスに localhost を使って開き直してください。直らない場合は、このエラーコードを開発を担う AI へ伝えてください。';
@@ -70,6 +72,36 @@ export const ERROR_WORDINGS: Readonly<Record<string, ErrorWording>> = Object.fre
   ACCESS_ORIGIN_MISMATCH: {
     message: 'アプリの画面とは別の送り元からの要求のため、受け付けませんでした。',
     action: REOPEN_WITH_LOCALHOST,
+  },
+  // --- AI モデルの入手の失敗（準備状況が入手失敗のときの、原因の種類ごとの文言） ---
+  MODEL_NETWORK_UNREACHABLE: {
+    message: 'ネットワークにつながらないため、AI モデルを入手できませんでした。',
+    action: `ネットワークの接続を確かめてから、「入手をやり直す」を押してください。${REPORT_IF_NOT_FIXED}`,
+  },
+  MODEL_CERTIFICATE_INVALID: {
+    message: '配布元の証明書を確かめられないため、AI モデルを入手できませんでした。',
+    action:
+      '社内のネットワークの証明書が要る場合があります。このエラーコードを開発を担う AI へ伝えて、証明書を登録してもらってください。',
+  },
+  MODEL_SOURCE_UNRESPONSIVE: {
+    message: 'AI モデルの配布元が応答しないため、入手できませんでした。',
+    action: `しばらくしてから、「入手をやり直す」を押してください。${REPORT_IF_NOT_FIXED}`,
+  },
+  MODEL_HASH_MISMATCH: {
+    message: '入手した AI モデルのファイルが配布元のものと一致しなかったため、使わずに捨てました。',
+    action: `「入手をやり直す」を押してください。${REPORT_IF_NOT_FIXED}`,
+  },
+  MODEL_DISK_INSUFFICIENT: {
+    message: 'ディスクの空きが足りないため、AI モデルを入手できませんでした。',
+    action: `ディスクの空きを増やしてから、「入手をやり直す」を押してください。${REPORT_IF_NOT_FIXED}`,
+  },
+  MODEL_DOWNLOAD_FAILED: {
+    message: 'AI モデルの入手に失敗しました。',
+    action: `「入手をやり直す」を押してください。${REPORT_IF_NOT_FIXED}`,
+  },
+  MODEL_RETRY_NOT_ALLOWED: {
+    message: 'いまは、AI モデルの入手をやり直せません。',
+    action: '入手をやり直せるのは、入手に失敗したときだけです。準備状況を確かめてください。',
   },
 });
 

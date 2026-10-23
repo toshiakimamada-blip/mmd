@@ -2,6 +2,7 @@
 
 import dataclasses
 import re
+import shutil
 from pathlib import Path
 
 import pytest
@@ -75,6 +76,44 @@ def test_should_load_tuning_values_into_the_settings():
     assert settings.tuning.silence_wait_seconds == 10.0
 
 
+class TestModelCatalog:
+    """AI モデルの定義（同梱の models.toml）の読み込み。"""
+
+    def test_should_load_the_model_catalog_into_the_settings(self):
+        """
+        【テスト対象】load_settings（AI モデルの定義）
+        【テスト内容】同梱の設定の置き場を指して読み込む
+        【期待結果】settings.model_catalog に、3 つの AI モデルの定義が入ること
+        """
+        settings = load_settings(_env())
+
+        assert [m.role.value for m in settings.model_catalog.models] == [
+            "transcription",
+            "translation",
+            "generation",
+        ]
+
+    def test_should_stop_the_startup_when_the_model_catalog_is_invalid(self, tmp_path):
+        """
+        【テスト対象】load_settings（AI モデルの定義の誤り）
+        【テスト内容】同梱の調整値のファイルと、版が固定されていない AI モデルの定義を置いた
+                      置き場で読み込む
+        【期待結果】ConfigError になり、models.toml のどの項目が誤りかが文面に出ること
+                    （調整値は正しいため、AI モデルの定義の誤りだけが出る）
+        """
+        shutil.copy(REPO_CONFIG_DIR / "tuning.toml", tmp_path / "tuning.toml")
+        text = (REPO_CONFIG_DIR / "models.toml").read_text(encoding="utf-8")
+        broken = re.sub(r'revision = "[0-9a-f]{40}"', 'revision = "main"', text, count=1)
+        (tmp_path / "models.toml").write_text(broken, encoding="utf-8")
+
+        with pytest.raises(ConfigError) as caught:
+            load_settings(_env(MMD_CONFIG_DIR=str(tmp_path)))
+
+        assert len(caught.value.problems) == 1
+        assert "models.toml" in caught.value.problems[0]
+        assert "revision" in caught.value.problems[0]
+
+
 def test_should_treat_blank_optional_values_as_unset():
     """
     【テスト対象】load_settings
@@ -143,7 +182,8 @@ class TestRequiredValues:
         assert "MMD_RECORDS_DIR" in joined
         assert "MMD_MODELS_DIR" in joined
         assert "tuning.toml" in joined
-        assert len(caught.value.problems) == 5
+        assert "models.toml" in joined
+        assert len(caught.value.problems) == 6
 
     def test_should_be_a_value_error(self):
         """

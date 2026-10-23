@@ -165,11 +165,16 @@ COPY --from=frontend-build /build/dist /app/static
 # PYTHONPATH: アプリのコードの場所（アプリは、パッケージとしては入れない）。
 # PYTHONDONTWRITEBYTECODE: 読み取り専用のコードの置き場へ、コンパイルの結果を書こうとしない。
 # PYTHONUNBUFFERED: ログを、すぐにコンテナの標準出力へ出す。
+# SSL_CERT_FILE・SSL_CERT_DIR: AI モデルの入手（HTTPS）が、システムの証明書の保管先を読むように指す。
+#   社内のネットワークの証明書は、base の段で、この保管先に登録済み。certifi の証明書の一覧は使わず、
+#   書き換えもしない。Python の TLS の文脈（ssl.create_default_context）は、この 2 つを読む。
 # MMD_*: 動かす場所で変わる値の既定。docker-compose.yml の environment で上書きできる。
 ENV PATH=/opt/venv/bin:${PATH} \
     PYTHONPATH=/app/src \
     PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
+    SSL_CERT_FILE=/etc/ssl/certs/ca-certificates.crt \
+    SSL_CERT_DIR=/etc/ssl/certs \
     MMD_PORT=3001 \
     MMD_STATIC_DIR=/app/static \
     MMD_CONFIG_DIR=/app/config \

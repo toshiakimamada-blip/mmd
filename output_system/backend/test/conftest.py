@@ -1,5 +1,6 @@
 """テスト全体で使う部品。"""
 
+import ipaddress
 import logging
 import socket
 from collections.abc import Iterator
@@ -11,9 +12,19 @@ from fastapi import FastAPI
 from fastapi.routing import APIRoute, APIWebSocketRoute
 from fastapi.testclient import TestClient
 
+import meeting_interpreter.app as app_module
 from meeting_interpreter.app import create_app
+from meeting_interpreter.child_process import OFFLINE_ENVIRONMENT
+from meeting_interpreter.models.definition import MODELS_FILE_NAME, load_model_catalog
+from meeting_interpreter.models.fetch import ModelFetcher
+from meeting_interpreter.models.manager import ModelManager
+from meeting_interpreter.models.store import ModelStore
 from meeting_interpreter.settings import Settings
 from meeting_interpreter.tuning import TUNING_FILE_NAME, load_tuning
+from model_fakes import FakeDownloader
+
+# 擬似の配布元（HTTPS）の fixture。AI モデルの入手を確かめるテストが共通で使う。
+pytest_plugins = ["distribution_server"]
 
 # アプリに同梱する設定ファイルの置き場（output_system/config）。
 # このファイルは backend/test/ にあるため、2 つ上が output_system/。
@@ -41,6 +52,108 @@ def restore_logging() -> Iterator[None]:
     root.handlers[:] = saved_handlers
     root.setLevel(saved_levels[0])
     app_logger.setLevel(saved_levels[1])
+
+
+# 手元（このコンピューターの中）を表す接続先。テストが接続してよいのは、ここだけ。
+_LOCAL_HOSTS = frozenset({"localhost", "127.0.0.1", "::1", "0.0.0.0", "::", ""})
+
+
+def _is_local_address(address: object) -> bool:
+    """ソケットの接続先が、手元（ループバック）か、ファイルの経路（UNIX ドメイン）かを返す。"""
+    if isinstance(address, str | bytes):
+        return True  # UNIX ドメインソケット。コンピューターの外へは出ない。
+    host = address[0] if isinstance(address, tuple) and address else None
+    return isinstance(host, str) and (host in _LOCAL_HOSTS or host.startswith("127."))
+
+
+@pytest.fixture(autouse=True)
+def forbid_external_connections(
+    monkeypatch: pytest.MonkeyPatch, request: pytest.FixtureRequest
+) -> None:
+    """テストが、このコンピューターの外へ通信しないようにする。
+
+    アプリが外へ通信するのは、AI モデルを入手するときだけ。その入手の部品も、テストでは
+    手元の擬似の配布元（127.0.0.1）へ向ける。数 GB の本物の入手や、意図しない外部への通信が
+    テストから起きないよう、手元以外への接続と、手元以外の名前の解決を失敗にする。
+
+    起動したコンテナを相手にするテスト（test/container/）は、コンテナ名で接続するため対象外。
+    """
+    if "container" in request.path.parts:
+        return
+
+    original_connect = socket.socket.connect
+    original_connect_ex = socket.socket.connect_ex
+    original_getaddrinfo = socket.getaddrinfo
+
+    def guarded_connect(self: socket.socket, address: object) -> None:
+        if not _is_local_address(address):
+            raise AssertionError(f"テストが手元以外へ接続しようとしました: {address!r}")
+        return original_connect(self, address)  # type: ignore[arg-type]
+
+    def guarded_connect_ex(self: socket.socket, address: object) -> int:
+        if not _is_local_address(address):
+            raise AssertionError(f"テストが手元以外へ接続しようとしました: {address!r}")
+        return original_connect_ex(self, address)  # type: ignore[arg-type]
+
+    def guarded_getaddrinfo(host: object, *args: object, **kwargs: object):
+        # 数値の IP アドレスは名前の解決を伴わない。名前（localhost 以外）だけを止める。
+        if isinstance(host, str) and not _is_numeric_host(host) and host not in _LOCAL_HOSTS:
+            raise AssertionError(f"テストが手元以外の名前を解決しようとしました: {host!r}")
+        return original_getaddrinfo(host, *args, **kwargs)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(socket.socket, "connect", guarded_connect)
+    monkeypatch.setattr(socket.socket, "connect_ex", guarded_connect_ex)
+    monkeypatch.setattr(socket, "getaddrinfo", guarded_getaddrinfo)
+
+
+def _is_numeric_host(host: str) -> bool:
+    """文字列が、数値の IP アドレス（IPv4 または IPv6）かを返す。"""
+    try:
+        ipaddress.ip_address(host.split("%")[0])
+    except ValueError:
+        return False
+    return True
+
+
+@pytest.fixture(autouse=True)
+def restore_offline_environment(monkeypatch: pytest.MonkeyPatch) -> None:
+    """アプリの起動が反映した、自動入手を止める環境変数を、テストの終わりに元へ戻す。
+
+    アプリの起動（main）と apply_offline_environment は、プロセスの環境変数へ書き込む。
+    戻さないと、あるテストの書き込みが、次のテストの「環境変数が無い状態」を変えてしまう。
+    """
+    for name in OFFLINE_ENVIRONMENT:
+        # 値を入れてから消すと、monkeypatch が元の状態（無い）を覚え、終わりに元へ戻す。
+        monkeypatch.setenv(name, "")
+        monkeypatch.delenv(name)
+
+
+class IdleModelManager(ModelManager):
+    """開始しても何もしないモデル管理部。
+
+    他のテストが、AI モデルの入手を引き起こさないための代わり。
+    """
+
+    def start(self) -> bool:
+        return False
+
+
+@pytest.fixture(autouse=True)
+def idle_model_manager(monkeypatch: pytest.MonkeyPatch) -> None:
+    """アプリの起動で AI モデルの入手が始まらないようにする。
+
+    本番のアプリは、起動で AI モデルの確認と入手を始める。同梱の定義のまま起動すると、数 GB の
+    本物の入手が走るため、テストでは、開始しても何もしない管理部に差し替える。
+    入手を確かめるテストは、create_app に model_manager を渡して、通信しない部品で動かす。
+    """
+
+    def build(settings: Settings) -> ModelManager:
+        store = ModelStore(settings.models_dir)
+        return IdleModelManager(
+            settings.model_catalog, store, ModelFetcher(store, FakeDownloader())
+        )
+
+    monkeypatch.setattr(app_module, "build_model_manager", build)
 
 
 @dataclass(frozen=True)
@@ -92,6 +205,8 @@ def settings(site: FrontendSite, tmp_path: Path) -> Settings:
     problems: list[str] = []
     tuning = load_tuning(REPO_CONFIG_DIR / TUNING_FILE_NAME, {}, problems)
     assert tuning is not None, problems
+    model_catalog = load_model_catalog(REPO_CONFIG_DIR / MODELS_FILE_NAME, problems)
+    assert model_catalog is not None, problems
     return Settings(
         port=3001,
         app_hostname=APP_HOSTNAME,
@@ -101,6 +216,7 @@ def settings(site: FrontendSite, tmp_path: Path) -> Settings:
         log_level="info",
         config_dir=REPO_CONFIG_DIR,
         tuning=tuning,
+        model_catalog=model_catalog,
     )
 
 

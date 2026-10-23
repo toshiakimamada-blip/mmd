@@ -8,7 +8,7 @@
 |---|---|
 | `backend/` | アプリサーバー。Python 3.12 と FastAPI で作ります。ロックファイルは `uv.lock` です |
 | `frontend/` | 画面。TypeScript と React を Vite でビルドします。ロックファイルは `package-lock.json` です |
-| `config/` | アプリに同梱する設定ファイル |
+| `config/` | アプリに同梱する設定ファイル。調整値（`tuning.toml`）と、AI モデルの定義（`models.toml`。翻訳モデルの代わりの候補は `translation_alternatives.md`） |
 | `tools/` | 補助の道具。画面の依存を足すときに、固定した Node.js で実行する `with-pinned-node.sh` など |
 | `docs/` | 実装に付ける文書。エラーの扱いと、エラーコードの一覧は `docs/errors.md`。お知らせ帯とエラー表示の部品の使い方は `docs/notices.md` |
 
@@ -115,6 +115,59 @@ Starlette の `TestClient` は uvicorn を通らないため、部品が無く�
 ### 調整値
 
 発話の区切りの長さの上限、警告を出すしきい値、文章生成モデルへ一度に渡す量、CPU の割り当てなどは、アプリに同梱するファイル `config/tuning.toml` で持ちます。値はすべて仮置きで、利用者の PC で測った結果をもとに見直します。環境変数でも上書きできます。名前は、項目名を大文字にして `MMD_TUNING_` を付けます（例: `utterance_max_seconds` は `MMD_TUNING_UTTERANCE_MAX_SECONDS`）。項目の一覧と意味は `config/tuning.toml` のコメントにあります。
+
+## AI モデルの入手
+
+3 つの AI モデル（文字起こし・翻訳・文章生成）は、コンテナのイメージに含めません。アプリの起動のたびに、モデル管理部（`backend/src/meeting_interpreter/models/`）が、置き場の確認と、足りないファイルの入手を非同期で始めます。アプリの起動は、入手の完了を待ちません。
+
+### 流れ
+
+1. **確認**: 同梱の定義（`config/models.toml`）の全ファイルについて、モデル置き場のファイルが定義の SHA-256 と一致するかを確かめます。一致しないファイルは捨てます。一致を確認できたファイルは入手し直しません。
+2. **ディスクの空きの確認**: 入手するファイルがあれば、先に空きを確かめます。必要な量は「入手する分 + 予備 2GiB」です（`fetch.py` の `DISK_RESERVE_BYTES`。非機能要件設計書の「約 5GB」は仮置きの見込みで、入手するファイルの大きさが決まったため、この式にしました）。足りなければ、入手を始めずに失敗にします。
+3. **入手**: 一時名（`<ファイル名>.part`）で入手し、定義の SHA-256 と一致してから、正しい名前へ移します。途中で止まったときは、次の起動で、一時名のファイルの続きから入手します（Range 要求）。
+4. **変換**: 翻訳モデルの変換は、まだ接続していません。接続するまでは、変換前のファイルが一致していても準備完了にならず、準備状況は変換中で止まります（取得の `conversion_implemented` が `false`）。
+
+モデル置き場（名前付きボリューム `MMD_MODELS_DIR`）の配置は `<モデル名>/<固定した版>/<ファイル名>` です。版を上げても、古い版のファイルを上書きしません。
+
+### 準備状況の取得とやり直し
+
+| 経路 | 内容 |
+|---|---|
+| `GET /api/models/status` | 準備状況（`checking`・`downloading`・`converting`・`ready`・`failed`）。入手中は進み具合（`progress.downloaded_bytes` と `progress.total_bytes`）。入手失敗のときは原因の種類（`failure_kind`）とエラーコード（`error_code`） |
+| `POST /api/models/retry` | 入手のやり直し。入手失敗のときだけ受け付け（202）、それ以外は業務エラー `MODEL_RETRY_NOT_ALLOWED`（409）。入手は非同期で始まります |
+
+準備状況は、アプリサーバーのメモリの上だけで持ちます（記録データベースには置きません）。変化は、通知 `model.status_changed` として発行します。通知の送り先（画面への WebSocket）は別の作業で作るため、いまは `ModelStatusNotifier` の形の受け口だけがあります。原因の種類とエラーコードは [docs/errors.md](docs/errors.md) にあります。
+
+入手の自動の再試行はしません。失敗したら止まり、利用者の「入手をやり直す」で再開します。
+
+### 外向きの通信を行う箇所は 1 つだけ
+
+アプリが外向きに通信するのは、**`backend/src/meeting_interpreter/models/download.py`（`HttpsDownloader`）だけ**です。準備完了のあとは、アプリが外部と通信しません（ADR-14）。
+
+- 通信の部品（`socket`・`ssl`・`http.client`・`urllib.request`・`requests`・`httpx`・`huggingface_hub` など）を取り込んでよいモジュールは、`download.py` だけです。例外は `healthcheck.py` の 1 つで、同じコンテナの中のアプリサーバー（`127.0.0.1`）への死活の確認に `urllib.request` を使います。
+- この決まりは、自動テスト `backend/test/meeting_interpreter/test_network_boundary.py` が守ります。ソースコード全体を構文木で調べる**依存の向きの検査**（違反するとテストが失敗します）と、ソケットの接続を監視する**実行時の検査**（入手の部品以外のアプリのコードが接続すると失敗します。準備完了のあと、接続も名前の解決も起きないことを確かめます）です。
+- 新しい処理が通信を必要とするときは、`download.py` に足します。ほかのモジュールは、通信しない形の入口（`fetch.py` の `FileDownloader`）を介して使います。
+- AI の実行基盤の自動入手と利用状況の送信は使いません。入手は、標準ライブラリの HTTPS クライアントで自前に行います。
+
+### ワーカーと変換プロセスの起動
+
+実行基盤（Hugging Face の部品、llama.cpp など）は、モデルを自動で入手する機能と、利用状況を送る機能を持つことがあります。ワーカーと変換プロセスは、必ず `backend/src/meeting_interpreter/child_process.py` の `start_child_process` で起動します。次の環境変数が必ず付き、呼び出し側から外せません。アプリサーバー自身にも、起動のときに反映します（子のプロセスは引き継ぎます）。
+
+| 環境変数 | 止めるもの |
+|---|---|
+| `HF_HUB_OFFLINE`・`TRANSFORMERS_OFFLINE`・`HF_DATASETS_OFFLINE` | Hugging Face の部品の、モデルとデータの自動入手 |
+| `HF_HUB_DISABLE_TELEMETRY`・`DO_NOT_TRACK` | 利用状況の送信 |
+| `LLAMA_ARG_OFFLINE` | llama.cpp の通信（キャッシュだけを使う） |
+
+`subprocess` と `multiprocessing` を取り込んでよいのは `child_process.py` だけです（上のテストが守ります）。
+
+### 証明書
+
+HTTPS の証明書は、必ず確かめます（確認を無効にする設定は持ちません。自動テストが、そのような書き方を探します）。社内のネットワークが通信を検査する場合の証明書は、イメージのビルドでシステムの証明書の保管先に登録します（[社内の証明書](#社内の証明書)）。入手の部品の TLS の文脈（`ssl.create_default_context`）は、その保管先と、環境変数 `SSL_CERT_FILE`・`SSL_CERT_DIR` を読みます（`Dockerfile` が指します）。certifi の証明書の一覧は、使わず、書き換えもしません。プロキシは、環境変数（`https_proxy`・`no_proxy`）に従います。
+
+### 自動テストでの扱い
+
+数 GB の本物の入手を避けるため、テストは手元の擬似の配布元（`backend/test/distribution_server.py`。HTTPS・自己署名の証明書・Range 対応）を使います。`backend/test/conftest.py` は、テスト全体で、手元（ループバック）以外への接続と名前の解決を失敗にします。アプリの起動で入手が始まらないよう、他のテストのアプリは、開始しても何もしないモデル管理部で組み立てます。
 
 ## ログ
 

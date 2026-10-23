@@ -65,6 +65,75 @@ describe('ERROR_WORDINGS for access restriction', () => {
   });
 });
 
+describe('ERROR_WORDINGS for AI model download', () => {
+  const FAILURE_CODES = [
+    'MODEL_NETWORK_UNREACHABLE',
+    'MODEL_CERTIFICATE_INVALID',
+    'MODEL_SOURCE_UNRESPONSIVE',
+    'MODEL_HASH_MISMATCH',
+    'MODEL_DISK_INSUFFICIENT',
+    'MODEL_DOWNLOAD_FAILED',
+  ];
+
+  /**
+   * 【テスト対象】ERROR_WORDINGS（AI モデルの入手の失敗の原因）
+   * 【テスト内容】AI モデルの入手に失敗した原因のコード 6 つ（5 つの原因 + 分類できない失敗）を調べる
+   * 【期待結果】どれも一覧にあり、「何が起きたか」が AI モデルの入手に触れていること。
+   *            コードごとに文言が異なる（原因を取り違えて案内しない）
+   */
+  it('should register a distinct wording for every cause of a download failure', () => {
+    const messages = FAILURE_CODES.map((code) => {
+      expect(Object.keys(ERROR_WORDINGS), code).toContain(code);
+      return ERROR_WORDINGS[code].message;
+    });
+
+    expect(new Set(messages).size).toBe(FAILURE_CODES.length);
+    for (const message of messages) {
+      expect(message).toContain('AI モデル');
+    }
+  });
+
+  /**
+   * 【テスト対象】ERROR_WORDINGS（入手をやり直す案内）
+   * 【テスト内容】やり直しで直る可能性のある失敗の、次に行う操作を調べる
+   * 【期待結果】ネットワーク・配布元の応答・一致しない・分類できない失敗の案内に、
+   *            「入手をやり直す」ボタンを押すことが書かれていること
+   */
+  it('should tell the user to press the retry button when a retry may help', () => {
+    for (const code of [
+      'MODEL_NETWORK_UNREACHABLE',
+      'MODEL_SOURCE_UNRESPONSIVE',
+      'MODEL_HASH_MISMATCH',
+      'MODEL_DOWNLOAD_FAILED',
+      'MODEL_DISK_INSUFFICIENT',
+    ]) {
+      expect(ERROR_WORDINGS[code].action, code).toContain('入手をやり直す');
+    }
+  });
+
+  /**
+   * 【テスト対象】ERROR_WORDINGS（証明書を確かめられない）
+   * 【テスト内容】証明書の失敗の案内を調べる
+   * 【期待結果】社内のネットワークの証明書が要る場合があること、開発を担う AI へエラーコードを
+   *            伝えることが書かれていること（利用者はコンテナを操作しない）
+   */
+  it('should explain the company certificate for a certificate failure', () => {
+    const wording = ERROR_WORDINGS.MODEL_CERTIFICATE_INVALID;
+
+    expect(wording.action).toContain('証明書');
+    expect(wording.action).toContain('開発を担う AI');
+  });
+
+  /**
+   * 【テスト対象】ERROR_WORDINGS（入手のやり直しを断られた）
+   * 【テスト内容】入手失敗でないときにやり直しを求めたときの業務エラーの文言を調べる
+   * 【期待結果】MODEL_RETRY_NOT_ALLOWED が一覧にあること
+   */
+  it('should register the business error for a refused retry', () => {
+    expect(Object.keys(ERROR_WORDINGS)).toContain('MODEL_RETRY_NOT_ALLOWED');
+  });
+});
+
 describe('GENERIC_WORDINGS', () => {
   /**
    * 【テスト対象】GENERIC_WORDINGS
