@@ -69,3 +69,10 @@ def failure_from_os_error(error: OSError) -> ModelFailure:
     if error.errno in _DISK_FULL_ERRNOS:
         return ModelFailure(FailureKind.DISK_INSUFFICIENT)
     return ModelFailure(FailureKind.UNKNOWN)
+
+
+class DownloadCancelled(Exception):
+    """入手の中止。アプリの停止などで、入手の途中で止めたことを表す。
+
+    失敗ではない。それまでに受け取った分は一時名のファイルに残し、次の起動で続きから入手する。
+    """

@@ -1,5 +1,6 @@
 """テスト全体で使う部品。"""
 
+import ipaddress
 import logging
 import socket
 from collections.abc import Iterator
@@ -14,6 +15,9 @@ from fastapi.testclient import TestClient
 from meeting_interpreter.app import create_app
 from meeting_interpreter.settings import Settings
 from meeting_interpreter.tuning import TUNING_FILE_NAME, load_tuning
+
+# 擬似の配布元（HTTPS）の fixture。AI モデルの入手を確かめるテストが共通で使う。
+pytest_plugins = ["distribution_server"]
 
 # アプリに同梱する設定ファイルの置き場（output_system/config）。
 # このファイルは backend/test/ にあるため、2 つ上が output_system/。
@@ -41,6 +45,67 @@ def restore_logging() -> Iterator[None]:
     root.handlers[:] = saved_handlers
     root.setLevel(saved_levels[0])
     app_logger.setLevel(saved_levels[1])
+
+
+# 手元（このコンピューターの中）を表す接続先。テストが接続してよいのは、ここだけ。
+_LOCAL_HOSTS = frozenset({"localhost", "127.0.0.1", "::1", "0.0.0.0", "::", ""})
+
+
+def _is_local_address(address: object) -> bool:
+    """ソケットの接続先が、手元（ループバック）か、ファイルの経路（UNIX ドメイン）かを返す。"""
+    if isinstance(address, str | bytes):
+        return True  # UNIX ドメインソケット。コンピューターの外へは出ない。
+    host = address[0] if isinstance(address, tuple) and address else None
+    return isinstance(host, str) and (host in _LOCAL_HOSTS or host.startswith("127."))
+
+
+@pytest.fixture(autouse=True)
+def forbid_external_connections(
+    monkeypatch: pytest.MonkeyPatch, request: pytest.FixtureRequest
+) -> None:
+    """テストが、このコンピューターの外へ通信しないようにする。
+
+    アプリが外へ通信するのは、AI モデルを入手するときだけ。その入手の部品も、テストでは
+    手元の擬似の配布元（127.0.0.1）へ向ける。数 GB の本物の入手や、意図しない外部への通信が
+    テストから起きないよう、手元以外への接続と、手元以外の名前の解決を失敗にする。
+
+    起動したコンテナを相手にするテスト（test/container/）は、コンテナ名で接続するため対象外。
+    """
+    if "container" in request.path.parts:
+        return
+
+    original_connect = socket.socket.connect
+    original_connect_ex = socket.socket.connect_ex
+    original_getaddrinfo = socket.getaddrinfo
+
+    def guarded_connect(self: socket.socket, address: object) -> None:
+        if not _is_local_address(address):
+            raise AssertionError(f"テストが手元以外へ接続しようとしました: {address!r}")
+        return original_connect(self, address)  # type: ignore[arg-type]
+
+    def guarded_connect_ex(self: socket.socket, address: object) -> int:
+        if not _is_local_address(address):
+            raise AssertionError(f"テストが手元以外へ接続しようとしました: {address!r}")
+        return original_connect_ex(self, address)  # type: ignore[arg-type]
+
+    def guarded_getaddrinfo(host: object, *args: object, **kwargs: object):
+        # 数値の IP アドレスは名前の解決を伴わない。名前（localhost 以外）だけを止める。
+        if isinstance(host, str) and not _is_numeric_host(host) and host not in _LOCAL_HOSTS:
+            raise AssertionError(f"テストが手元以外の名前を解決しようとしました: {host!r}")
+        return original_getaddrinfo(host, *args, **kwargs)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(socket.socket, "connect", guarded_connect)
+    monkeypatch.setattr(socket.socket, "connect_ex", guarded_connect_ex)
+    monkeypatch.setattr(socket, "getaddrinfo", guarded_getaddrinfo)
+
+
+def _is_numeric_host(host: str) -> bool:
+    """文字列が、数値の IP アドレス（IPv4 または IPv6）かを返す。"""
+    try:
+        ipaddress.ip_address(host.split("%")[0])
+    except ValueError:
+        return False
+    return True
 
 
 @dataclass(frozen=True)
