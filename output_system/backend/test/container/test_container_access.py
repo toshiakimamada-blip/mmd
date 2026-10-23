@@ -14,6 +14,8 @@ from urllib.parse import urlsplit
 
 import pytest
 
+from meeting_interpreter.security_headers import SECURITY_HEADERS
+
 CONTAINER_URL = os.environ.get("MMD_CONTAINER_URL", "").strip()
 
 pytestmark = pytest.mark.skipif(
@@ -115,3 +117,34 @@ class TestShippedContainerAccessControl:
             assert status == 403
         else:
             assert status in (404, 405)
+
+
+class TestShippedContainerSecurityHeaders:
+    """起動したコンテナが、画面の読み込み先と通信先を限る応答ヘッダーを付けること。"""
+
+    @pytest.mark.parametrize(
+        ("path", "host_header", "expected_status"),
+        [
+            ("/", None, 200),
+            ("/api/health", None, 200),
+            ("/api/unknown", None, 404),
+            ("/api/health", "evil.example:3001", 403),
+        ],
+        ids=["screen", "api", "error", "refusal"],
+    )
+    def test_should_add_the_security_headers_to_every_kind_of_response(
+        self, path: str, host_header: str | None, expected_status: int
+    ):
+        """
+        【テスト対象】出荷するコンテナの応答ヘッダー（CSP など）
+        【テスト内容】画面のファイル・API・存在しない経路（エラー）・接続制限が断った要求の
+                      それぞれで、応答のヘッダーを調べる
+        【期待結果】どの応答にも、CSP・nosniff・Referrer-Policy・X-Frame-Options が、
+                    アプリが決めた値で付くこと。古いイメージを起動していると、ここで失敗する
+        """
+        response = _send("GET", path, host_header=host_header)
+        headers = {name.lower(): value for name, value in response.getheaders()}
+
+        assert response.status == expected_status
+        for name, value in SECURITY_HEADERS.items():
+            assert headers.get(name) == value, f"{name} が付いていないか、値が違います"

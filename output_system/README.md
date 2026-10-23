@@ -12,7 +12,7 @@
 | `tools/` | 補助の道具。画面の依存を足すときに、固定した Node.js で実行する `with-pinned-node.sh` など |
 | `docs/` | 実装に付ける文書。エラーの扱いと、エラーコードの一覧は `docs/errors.md`。お知らせ帯とエラー表示の部品の使い方は `docs/notices.md` |
 
-テストは、各フォルダの `src/` と同じ階層の `test/` に置き、`src/` と同じ構造にします。起動したコンテナを相手にするテストだけは、`backend/test/container/` に置きます。
+テストは、各フォルダの `src/` と同じ階層の `test/` に置き、`src/` と同じ構造にします。起動したコンテナを相手にするテストだけは、`backend/test/container/` に置きます。ブラウザーで手動で確かめるための確認用のサーバーは、`backend/test/browser/` に置きます（pytest は集めません）。
 
 ## 画面の URL
 
@@ -108,7 +108,7 @@ Starlette の `TestClient` は uvicorn を通らないため、部品が無く�
 | `Referrer-Policy` | `no-referrer` | 外へ出る要求に、アプリの URL（会議番号を含む）を送らない |
 | `X-Frame-Options` | `DENY` | ほかのサイトが、画面をフレームに埋め込めない。`frame-ancestors 'none'` の重ね書き |
 
-- 通信先の `'self'` は、同じホストとポートの WebSocket（`ws:`）を含みます。Chrome（156）で、`localhost`・`127.0.0.1`・ホスト名の 3 通りの宛先から WebSocket が接続できることを確かめました。`'self'` が WebSocket を含まないブラウザーが出たら、`CONTENT_SECURITY_POLICY` の `connect-src` に `ws://localhost:3001` などの接続先を明示します。
+- 通信先の `'self'` は、同じホストとポートの WebSocket（`ws:`）を含みます。Chrome（156）と Edge（155）で、`localhost`・`127.0.0.1`・ホスト名の 3 通りの宛先から WebSocket が接続できることを確かめました。手順は、[ブラウザーでの WebSocket の確認](#ブラウザーでの-websocket-の確認)にあります。`'self'` が WebSocket を含まないブラウザーが出たら、`CONTENT_SECURITY_POLICY` の `connect-src` に `ws://localhost:3001` などの接続先を明示します。
 - `upgrade-insecure-requests` は付けません。アプリは `http://localhost` で開くためです。
 - WebSocket の接続には、ヘッダーを足しません。ヘッダーを付けるのは、HTTP の応答だけです。
 
@@ -252,8 +252,31 @@ MMD_CONTAINER_URL=http://toshiakimamada-blip-mmd-output-system:3001 uv run pytes
 
 - 存在しない `/ws` への WebSocket の接続要求を、コンテナが 403 で断れば合格です。WebSocket の部品が無いイメージでは、404 の JSON が返り、失敗します。
 - 接続制限も同じ手順で確かめます。宛先を変えた HTTP の要求（`test_container_access.py`）と、送り元が無い・違う WebSocket の接続要求（`test_container_websocket.py`）が、コンテナの設定（`MMD_APP_HOSTNAME` とコンテナ名の対応）まで含めて通ることを見ます。
+- 応答ヘッダー（CSP など）も同じ手順で確かめます。画面のファイル・API・エラー・接続制限が断った応答のすべてに、決めたヘッダーが付くことを見ます（`test_container_access.py`）。古いイメージを起動していると、ここで失敗します。
 - `MMD_CONTAINER_URL` が未設定のときは、この確認を飛ばします（`uv run pytest` の通常の実行では skipped になります）。
 - 受け付ける経路ができたあとは、その経路の接続と往復を、このフォルダーのテストに足します。
+
+### ブラウザーでの WebSocket の確認
+
+画面の読み込み先と通信先の制限（CSP）のもとで、ブラウザーが WebSocket を接続できることを確かめます。`connect-src 'self'` が WebSocket（`ws:`）を含むかどうかは、ブラウザーごとに差が出うるため、Edge と Chrome の両方で確かめます。自動テスト（pytest）はブラウザーを使いません。
+
+出荷するアプリには、まだ接続を受け付ける `/ws` の経路がありません。そこで、確認用のサーバーを使います（`backend/test/browser/serve_websocket_check.py`）。本物のアプリ（`create_app`）に、確認用の経路（`/ws/probe`）を 1 つ足したものです。接続制限と応答ヘッダーはアプリのままで、確認のために緩める設定はありません。
+
+```bash
+cd backend
+uv run python test/browser/serve_websocket_check.py --port 3101 --app-hostname <この PC のコンテナ名>
+```
+
+ブラウザーで、次の URL を順に開きます。コンテナ名の URL は、`--app-hostname` に渡した名前を使います。
+
+- `http://localhost:3101/`
+- `http://127.0.0.1:3101/`
+- `http://<コンテナ名>:3101/`
+
+- 画面に「接続できました」と出れば、接続できています。
+- ブラウザーのコンソールに、CSP の違反（`violates the following Content Security Policy directive`）が出ないことも見ます。
+- 出荷するアプリの 4 つの画面を開き、コンソールに何も出ないことも見ます（外部の資源を読み込まない確認）。
+- Ctrl+C で止めます。確認用の画面は一時のフォルダーに作り、止めると消えます。
 
 ### 社内の証明書
 
