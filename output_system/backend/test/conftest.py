@@ -14,6 +14,7 @@ from fastapi.testclient import TestClient
 
 import meeting_interpreter.app as app_module
 from meeting_interpreter.app import create_app
+from meeting_interpreter.child_process import OFFLINE_ENVIRONMENT
 from meeting_interpreter.models.definition import MODELS_FILE_NAME, load_model_catalog
 from meeting_interpreter.models.fetch import ModelFetcher
 from meeting_interpreter.models.manager import ModelManager
@@ -112,6 +113,19 @@ def _is_numeric_host(host: str) -> bool:
     except ValueError:
         return False
     return True
+
+
+@pytest.fixture(autouse=True)
+def restore_offline_environment(monkeypatch: pytest.MonkeyPatch) -> None:
+    """アプリの起動が反映した、自動入手を止める環境変数を、テストの終わりに元へ戻す。
+
+    アプリの起動（main）と apply_offline_environment は、プロセスの環境変数へ書き込む。
+    戻さないと、あるテストの書き込みが、次のテストの「環境変数が無い状態」を変えてしまう。
+    """
+    for name in OFFLINE_ENVIRONMENT:
+        # 値を入れてから消すと、monkeypatch が元の状態（無い）を覚え、終わりに元へ戻す。
+        monkeypatch.setenv(name, "")
+        monkeypatch.delenv(name)
 
 
 class IdleModelManager(ModelManager):

@@ -10,6 +10,7 @@ from typing import Final
 import uvicorn
 
 from .app import create_app
+from .child_process import apply_offline_environment
 from .config_error import ConfigError
 from .logs import STARTUP_LOGGER, configure_logging, log_error
 from .settings import DEFAULT_LOG_LEVEL, load_settings
@@ -46,6 +47,8 @@ def main() -> None:
     誤りの内容は標準出力に出る。コンテナのログで、起動できない理由が分かる。
     """
     configure_logging(DEFAULT_LOG_LEVEL)
+    # 実行基盤の自動入手と利用状況の送信を止める。このプロセスが起動する子のプロセスも引き継ぐ。
+    apply_offline_environment()
     try:
         settings = load_settings()
     except ConfigError as error:

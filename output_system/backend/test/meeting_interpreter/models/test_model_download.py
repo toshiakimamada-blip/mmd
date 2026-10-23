@@ -667,6 +667,7 @@ class TestSourceCode:
             "PYTHONHTTPSVERIFY",
         )
 
+        assert (source_root / "meeting_interpreter" / "models" / "download.py").is_file()
         hits = [
             f"{path.relative_to(source_root)}: {token}"
             for path in source_root.rglob("*.py")

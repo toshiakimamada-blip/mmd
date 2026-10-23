@@ -23,39 +23,13 @@ from meeting_interpreter.models.manager import (
 from meeting_interpreter.models.store import ModelStore
 from model_fakes import (
     TOTAL_BYTES,
+    Clock,
+    FakeConversion,
     FakeDownloader,
     RecordingNotifier,
     place_all_files,
     small_catalog,
 )
-
-
-class FakeConversion:
-    """翻訳モデルの変換の代わり。変換が済んでいるか、変換でどうなるかを指定できる。"""
-
-    def __init__(self, *, complete: bool = False, error: Exception | None = None) -> None:
-        self.complete = complete
-        self.error = error
-        self.converted = 0
-
-    def is_complete(self) -> bool:
-        return self.complete
-
-    async def convert(self) -> None:
-        self.converted += 1
-        if self.error is not None:
-            raise self.error
-        self.complete = True
-
-
-class Clock:
-    """進めた分だけ進む時計。進み具合の通知の間引きを、時間に頼らず確かめる。"""
-
-    def __init__(self) -> None:
-        self.now = 0.0
-
-    def __call__(self) -> float:
-        return self.now
 
 
 def _manager(
