@@ -6,6 +6,7 @@
 - テスト: pytest（+ pytest-cov、httpx2。本物の uvicorn を起動するテストを含む）、Vitest 5（+ Testing Library、jsdom）。lint は ruff と ESLint 10
 - 実行基盤: Docker コンテナ 1 つ（土台 ubuntu:24.04）。名前付きボリューム 2 つ（記録・モデル）
 - クールダウン: uv は `exclude-newer = "7 days"`（`backend/pyproject.toml`）、npm は `min-release-age=7`（`frontend/.npmrc`）
+- AI モデルの入手: 依存を足さず、標準ライブラリの HTTPS クライアント（urllib）で自前に行う。実行基盤のライブラリ（faster-whisper、llama.cpp、CTranslate2 など）は、まだ入れていない
 
 ## ディレクトリ構成
 ```
@@ -24,9 +25,11 @@ output_system/
 │   │   ├── config_error.py   # 設定の誤りで起動を止める例外
 │   │   ├── logs/             # 3 種類のログ（標準出力・JSON 1 行）。許可リストは fields.py
 │   │   ├── errors.py         # 画面へ返すエラーの共通の形（3 分類・9 領域・例外ハンドラー）
-│   │   ├── healthcheck.py    # HEALTHCHECK 用
-│   │   └── api/health.py     # GET /api/health
-│   └── test/                 # src と同じ構造。test/container/ は起動したコンテナを相手にする（MMD_CONTAINER_URL のときだけ動く）。test/browser/ はブラウザーで手動で確かめる確認用のサーバー（pytest は集めない）
+│   │   ├── healthcheck.py    # HEALTHCHECK 用（外向きの通信の例外: 127.0.0.1 だけ）
+│   │   ├── child_process.py  # ワーカー・変換プロセスの起動の入口。自動入手と利用状況の送信を止める環境変数を必ず付ける
+│   │   ├── models/           # モデル管理部。definition.py（定義の検証）、store.py（置き場・一致の確認）、download.py（唯一の外向きの通信）、fetch.py（確認→入手の流れ）、manager.py（準備状況）、failure.py（失敗の原因）
+│   │   └── api/{health,models}.py  # GET /api/health、GET /api/models/status、POST /api/models/retry
+│   └── test/                 # src と同じ構造。test/container/ は起動したコンテナを相手にする（MMD_CONTAINER_URL のときだけ動く）。test/browser/ はブラウザーで手動で確かめる確認用のサーバー（pytest は集めない）。test/distribution_server.py（擬似の配布元、HTTPS）と test/model_fakes.py（小さな定義・偽の入手の部品）は共通の道具
 ├── frontend/
 │   ├── src/{routes.ts,router.tsx,components/AppFrame.tsx,screens/*,styles/{frame,notices}.css}
 │   ├── scripts/              # ビルドした dist/ に外部の URL への参照が無いかの検査（npm run build の最後に走る）
@@ -34,7 +37,7 @@ output_system/
 │   ├── src/components/notices/ # お知らせ帯・7 つのエラー表示パターン・確認の表示（使い方は docs/notices.md）
 │   └── test/                 # src と同じ構造
 ├── tools/with-pinned-node.sh # Dockerfile と同じ版の Node.js で、渡されたコマンド（npm install など）を実行する
-├── config/                   # tuning.toml（調整値の仮置き）、models.toml（置き場のみ。中身は Task 2.1.1）
+├── config/                   # tuning.toml（調整値の仮置き）、models.toml（3 つの AI モデルの定義）、translation_alternatives.md（翻訳モデルの代わりの候補）
 ├── docs/                     # errors.md（エラーの扱い・コード一覧）、notices.md（画面の部品の使い方）
 ```
 
@@ -45,6 +48,7 @@ output_system/
 - 出荷するコンテナの WebSocket の確認: `docker compose up -d --build` のあと、`backend/` で `MMD_CONTAINER_URL=http://toshiakimamada-blip-mmd-output-system:3001 uv run pytest test/container --no-cov`
 - ブラウザーでの WebSocket の確認（CSP のもとで接続できるか）: `backend/` で `uv run python test/browser/serve_websocket_check.py --port 3101 --app-hostname <開発用コンテナ名>` を起動し、`playwright-cli` で `http://localhost:3101/`・`http://127.0.0.1:3101/`・`http://<コンテナ名>:3101/` を開く。Edge は `--config` の `executablePath` で指す（README「ブラウザーでの WebSocket の確認」）
 - 社内の証明書: 既定でリポジトリ直下の `ssl-certificates/` を登録する。フォルダーが無い環境は `SSL_CERTS_DIR=<空のフォルダー>` を付ける
+- AI モデルの入手: コンテナを起動すると、自動で始まる（初回は約 3.1GB、10MB/s 前後で約 5 分）。`curl http://toshiakimamada-blip-mmd-output-system:3001/api/models/status` で見る。2 回目以降の起動は、確認（約 5 秒）だけで入手しない。モデル置き場のボリューム `toshiakimamada-blip-mmd-models` を消すと入手し直しになる
 
 ## 設計判断
 - 経路の接頭辞を `/api`（HTTP）と `/ws`（WebSocket）に分け、それ以外は画面のファイル。存在しない `/api` と `/ws` は、HTTP の要求には画面のファイルではなく 404 の JSON を返し、WebSocket の接続要求は 403 で断る。後続の経路は、`app.py` の「存在しない経路」の受け皿より先に登録する
@@ -67,6 +71,16 @@ output_system/
 - 確認の表示（`ConfirmDialog`）は body 直下へ portal で出し、背景の要素に `inert` を付ける。既定のフォーカスは「取りやめる」。暗い背景を押しても閉じない。削除の確認（Task 6.2.3）と終了の確認（Task 3.4.2）で使い回す
 - 対応するブラウザーはユーザーエージェントで判定する（`isSupportedBrowser`）。Chrome の名前を含む別のブラウザー（Opera・Samsung Internet・旧 Edge など）と、iOS 版の Chrome・Edge は非対応として扱う。ヘッドレスの Chromium は Chrome として扱う（画面を通した自動テストに案内が出ないように）
 - ESLint は 10 系。eslint-plugin-react と jsx-a11y は ESLint 10 に未対応のため入れていない。dangerouslySetInnerHTML と innerHTML は `no-restricted-syntax` で禁止（`frontend/eslint.config.js`）
+- AI モデルの定義（`config/models.toml`）は、起動の時点で `Settings.model_catalog` に読み込んで検証する（版は 40 桁のコミットだけ、SHA-256 は 64 桁の小文字、役割は 3 つ 1 つずつ、非商用のライセンス名は拒否）。配布元の API が返す LFS の sha256 が無い小さなファイルは、固定した版のファイルを入手して求めた。取り込むファイルは、動かすのに要るものだけ（Qwen は Q4_K_M の 1 つ。FuguMT は README と .gitattributes を除く全部）
+- 外向きの通信を行うのは `models/download.py` だけ。許可の例外は `healthcheck.py`（127.0.0.1）。この決まりは `test/meeting_interpreter/test_network_boundary.py` が、構文木の検査（違反の見本つき）とソケットの接続の監視の 2 つで守る。新しく通信が要るときは `download.py` に足す
+- 子のプロセスの起動は `child_process.py` だけ。止める環境変数（`HF_HUB_OFFLINE` など 6 つ。llama.cpp は `LLAMA_ARG_OFFLINE`）は最後に書き込み、呼び出し側から外せない。`main()` もサーバー自身の環境変数へ反映する。`subprocess`・`multiprocessing` を取り込めるのも、このモジュールだけ
+- 入手は標準ライブラリの urllib。証明書の検証は必ず有効（`ssl.create_default_context`）。HTTPS 以外への転送は拒む。環境変数のプロキシに従う。自動の再試行はしない（利用者の「入手をやり直す」）
+- 一時名は `<ファイル名>.part`。確認を終えるまで入手済みと扱わず、一致したら同じフォルダーの中で名前を変える。続きに使えない一時名（定義より大きい）は捨てる。置き場の配置は `<モデル名>/<版>/<ファイル名>`
+- ディスクの空きは「入手する分 + 予備 2GiB」で確かめる（`fetch.py` の `DISK_RESERVE_BYTES`。設計書の約 5GB は仮置きの見込みで、実際のファイルの大きさが決まったため）
+- 準備状況は `ModelManager` がメモリの上で持つ。変更はイベントループの上だけで行い、入手と確認は別のスレッドで動かす。進み具合の通知は 0.25 秒の間隔で間引く（全体に達した報告は必ず通知する）。通知の送り先は `ModelStatusNotifier` の受け口だけで、既定は何もしない
+- 翻訳モデルの変換が未接続の間は、準備完了にしない。準備状況は変換中で止まり、取得の `conversion_implemented` が `false`（開発用の区別）。変換を作る作業は `ModelManager(conversion=...)` に `TranslationConversion`（`is_complete()` と `async convert()`）を渡せばよい。変換の失敗は `ModelFailure` で知らせる（「翻訳モデルを変換できない」の原因の種類とエラーコードは、その作業で足す）
+- 失敗の原因は `FailureKind`（5 つ + 分類できない `unknown`）。エラーコードは `MODEL_*`。画面の文言は `frontend/src/errors/errorMessages.ts`。取得の応答は HTTP のエラーではなく準備状況の一部として返す。入手失敗でない状態のやり直しだけが業務エラー（409）
+- テスト: 本物の入手はしない。`test/distribution_server.py` が手元の HTTPS の擬似の配布元（openssl で自己署名の証明書をテストごとに作る）を立てる。`conftest.py` の自動の見張りが、手元以外への接続と名前の解決をテスト全体で失敗にする。他のテストのアプリは、開始しても何もしない `IdleModelManager` で組み立てる（アプリの起動が入手を始めるため）
 - Node.js は 24.21.0 に固定（24.22.0 は公開から 7 日未満のため見送り）。SHA-256 も Dockerfile で固定
 - コンテナは非 root（uid 10001 の app）。2 つのボリュームの置き場は、イメージの中で app が持ち主になる
 
@@ -87,9 +101,17 @@ output_system/
 - 出荷するアプリには、接続を受け付ける `/ws` の経路がまだ無い。CSP のもとでの WebSocket の接続は、確認用のサーバー（`backend/test/browser/serve_websocket_check.py`）で確かめる。出荷するアプリへ WebSocket を張ると、CSP を通ったうえで 403 になる（コンソールの文言が「CSP に違反」ではなく「handshake: Unexpected response code: 403」なら、CSP は通っている）
 - 開発用コンテナに Edge は入っていない。Microsoft の公式リポジトリの `microsoft-edge-stable` の .deb を、SHA-256 を `Packages` の値と突き合わせて別のフォルダーへ `dpkg -x` で展開し、playwright-cli の `--config`（`launchOptions.executablePath`、`chromiumSandbox: false`、`--no-sandbox`）で指す。システムへはインストールしない
 - コンテナを作り直したつもりで、古いイメージのまま起動していることがある。出荷するコンテナへの確認（`test/container/`）は、応答ヘッダーの有無で古いイメージに気づける
+- 追加の `conftest.py` を別のフォルダーに置かない。テストの共通の道具は `test/` 直下（`distribution_server.py`・`model_fakes.py`）に置く。`pytest_plugins` で fixture を登録し、テストのファイル名は全体で一意にする（`__init__.py` が無いため）
+- テストのアプリは `create_app(settings, model_manager=...)` で管理部を渡す。渡さないと、conftest の自動の差し替えで開始しない管理部になる。入手を確かめるテストは、本物の `ModelManager` と `FakeDownloader`（または擬似の配布元）を渡す
+- 構文木の検査（`test_network_boundary.py`）は、検査の対象のフォルダーの指定を誤ると 0 件を検査して通る。`test_should_actually_scan_the_application_source` が見張っている
+- llama.cpp の offline の環境変数は `LLAMA_OFFLINE` ではなく `LLAMA_ARG_OFFLINE`（ソースの `common/arg.cpp` で確認）
+- FuguMT の重みは `pytorch_model.bin` だけ（pickle 形式）。変換で torch が読むときは、固定した SHA-256 で確かめた後でも、安全な読み込み（`weights_only=True` など）を使う
+- Whisper の CTranslate2 形式は、SYSTRAN（faster-whisper の開発元）の配布。OpenAI の配布ではなく、公式の配布元として扱ってよいかは利用者に確認中（PBI のコメント）。OpenAI の HF 側のライセンス表示は Apache 2.0 で、SYSTRAN 側の MIT と食い違う
+- 社内の通信を検査する証明書の下での入手は、実機では未確認。このコンテナの経路では HF の証明書は検査されていない（発行元は Amazon）。仕組みは `SSL_CERT_FILE` を使う自動テストで確認した
 - Docker に buildx が無く、`docker build` は旧ビルダーになる。追加の文脈（`certs`）は `docker compose build` で渡す
 
 ## 実装済み機能
 - PBI #2: コンテナの起動、共通の枠と 4 画面の骨組み、`GET /api/health`、配信部、名前付きボリューム 2 つ、自動再起動
 - PBI #7: 設定の読み込み（環境変数と調整値）、3 種類のログ（標準出力・許可リスト）、共通のエラーの形（サーバーと画面）、お知らせ帯・7 つのエラー表示パターン・確認の表示の部品、対応していないブラウザーの案内
 - PBI #12: 接続元の制限（宛先 Host と送り元 Origin の判定、WebSocket の送り元必須、CORS なし、断った要求の接続ログ）、応答ヘッダー（CSP・nosniff・Referrer-Policy・X-Frame-Options）、ビルドの外部 URL 検査
+- PBI #17: AI モデルの定義と検証、モデル置き場と一致の確認、HTTPS での入手（続きから・進み具合・失敗の原因 5 種）、準備状況の取得とやり直し（`/api/models/status`・`/retry`）、起動時の非同期の開始、外向きの通信を入手の部品だけに限る検査、ワーカー・変換プロセスの起動の入口。翻訳モデルの変換と、通知の送り先は未接続

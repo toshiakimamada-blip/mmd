@@ -22,7 +22,8 @@
 # --- 文字起こし: Whisper small.en（CTranslate2 形式） -----------------------------------
 # 実行基盤は faster-whisper。OpenAI の Whisper small.en を CTranslate2 の形式に変換したもので、
 # faster-whisper の開発元（SYSTRAN）が配布している。OpenAI 自身の配布物ではない。
-# この配布元を要件の「公式の配布元」として扱ってよいかは、利用者に確認中（PBI #17 のコメントを参照）。
+# この配布元を要件の「公式の配布元」として扱ってよいかは、利用者に確認中。確認が取れるまでの仮置き。
+# OpenAI の配布物（PyTorch 形式）から自前で変換する案もある（ADR-16 の翻訳モデルと同じ方式）。
 [[models]]
 name = "whisper-small-en"
 role = "transcription"
