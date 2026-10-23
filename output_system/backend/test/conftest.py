@@ -12,9 +12,15 @@ from fastapi import FastAPI
 from fastapi.routing import APIRoute, APIWebSocketRoute
 from fastapi.testclient import TestClient
 
+import meeting_interpreter.app as app_module
 from meeting_interpreter.app import create_app
+from meeting_interpreter.models.definition import MODELS_FILE_NAME, load_model_catalog
+from meeting_interpreter.models.fetch import ModelFetcher
+from meeting_interpreter.models.manager import ModelManager
+from meeting_interpreter.models.store import ModelStore
 from meeting_interpreter.settings import Settings
 from meeting_interpreter.tuning import TUNING_FILE_NAME, load_tuning
+from model_fakes import FakeDownloader
 
 # 擬似の配布元（HTTPS）の fixture。AI モデルの入手を確かめるテストが共通で使う。
 pytest_plugins = ["distribution_server"]
@@ -108,6 +114,34 @@ def _is_numeric_host(host: str) -> bool:
     return True
 
 
+class IdleModelManager(ModelManager):
+    """開始しても何もしないモデル管理部。
+
+    他のテストが、AI モデルの入手を引き起こさないための代わり。
+    """
+
+    def start(self) -> bool:
+        return False
+
+
+@pytest.fixture(autouse=True)
+def idle_model_manager(monkeypatch: pytest.MonkeyPatch) -> None:
+    """アプリの起動で AI モデルの入手が始まらないようにする。
+
+    本番のアプリは、起動で AI モデルの確認と入手を始める。同梱の定義のまま起動すると、数 GB の
+    本物の入手が走るため、テストでは、開始しても何もしない管理部に差し替える。
+    入手を確かめるテストは、create_app に model_manager を渡して、通信しない部品で動かす。
+    """
+
+    def build(settings: Settings) -> ModelManager:
+        store = ModelStore(settings.models_dir)
+        return IdleModelManager(
+            settings.model_catalog, store, ModelFetcher(store, FakeDownloader())
+        )
+
+    monkeypatch.setattr(app_module, "build_model_manager", build)
+
+
 @dataclass(frozen=True)
 class FrontendSite:
     """テスト用に作った、画面のファイルの置き場と、その内容。"""
@@ -157,6 +191,8 @@ def settings(site: FrontendSite, tmp_path: Path) -> Settings:
     problems: list[str] = []
     tuning = load_tuning(REPO_CONFIG_DIR / TUNING_FILE_NAME, {}, problems)
     assert tuning is not None, problems
+    model_catalog = load_model_catalog(REPO_CONFIG_DIR / MODELS_FILE_NAME, problems)
+    assert model_catalog is not None, problems
     return Settings(
         port=3001,
         app_hostname=APP_HOSTNAME,
@@ -166,6 +202,7 @@ def settings(site: FrontendSite, tmp_path: Path) -> Settings:
         log_level="info",
         config_dir=REPO_CONFIG_DIR,
         tuning=tuning,
+        model_catalog=model_catalog,
     )
 
 

@@ -8,7 +8,7 @@
   読み込みは tuning.py。
 
 AI モデルの定義も、アプリに同梱するファイル（config/models.toml）で持つ。
-読み込みは後続の作業で足す。
+読み込みと検証は models/definition.py。誤りは、ほかの設定の誤りとまとめて、起動の時点で知らせる。
 
 秘密の情報（パスワード・鍵）は持たない。ログインと外部サービスの利用が無いため。
 設定を画面から変える機能も設けない。
@@ -24,6 +24,7 @@ from pathlib import Path
 from typing import Final, Literal, cast
 
 from .config_error import ConfigError
+from .models.definition import MODELS_FILE_NAME, ModelCatalog, load_model_catalog
 from .tuning import TUNING_FILE_NAME, Tuning, load_tuning
 
 # 環境変数の名前。名前の先頭を MMD_ にそろえて、ほかの設定と混ざらないようにする。
@@ -66,6 +67,8 @@ class Settings:
     config_dir: Path
     # 調整値。同梱のファイルの値を、環境変数で上書きしたもの。
     tuning: Tuning
+    # AI モデルの定義（同梱の models.toml）。入手と確認のとおりになる。
+    model_catalog: ModelCatalog
 
 
 def _read(environ: Mapping[str, str], name: str) -> str | None:
@@ -169,10 +172,12 @@ def load_settings(environ: Mapping[str, str] | None = None) -> Settings:
     log_level = _parse_log_level(_read(source, ENV_LOG_LEVEL), problems)
 
     tuning = load_tuning(config_dir / TUNING_FILE_NAME, source, problems)
+    model_catalog = load_model_catalog(config_dir / MODELS_FILE_NAME, problems)
 
-    if problems or tuning is None:
-        # tuning が None のときは、必ず誤りを控えている。念のため空の一覧を渡さない。
-        raise ConfigError(problems or ["調整値を読み込めませんでした"])
+    if problems or tuning is None or model_catalog is None:
+        # tuning と model_catalog が None のときは、必ず誤りを控えている。
+        # 念のため、空の一覧を渡さない。
+        raise ConfigError(problems or ["調整値または AI モデルの定義を読み込めませんでした"])
 
     return Settings(
         port=port,
@@ -183,4 +188,5 @@ def load_settings(environ: Mapping[str, str] | None = None) -> Settings:
         log_level=log_level,
         config_dir=config_dir,
         tuning=tuning,
+        model_catalog=model_catalog,
     )

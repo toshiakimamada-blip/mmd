@@ -5,93 +5,22 @@ F-16 の正常系と、重複を防ぐ規約「一致を確認できたファイ
 """
 
 import dataclasses
-import hashlib
 import threading
 from pathlib import Path
 
 import pytest
 
 from distribution_server import Behavior, DistributionServer
-from meeting_interpreter.models.definition import (
-    ModelCatalog,
-    ModelDefinition,
-    ModelFile,
-    ModelRole,
-)
+from meeting_interpreter.models.definition import ModelCatalog
 from meeting_interpreter.models.download import HttpsDownloader
 from meeting_interpreter.models.failure import DownloadCancelled, FailureKind, ModelFailure
 from meeting_interpreter.models.fetch import DISK_RESERVE_BYTES, ModelFetcher
 from meeting_interpreter.models.store import FileState, ModelStore
+from model_fakes import CONTENTS, REVISION, FakeDownloader, serve_catalog, small_catalog
 
-_REVISION = "e" * 40
-
-# 3 つの AI モデルの代わりの、小さなファイルの内容。
-_CONTENTS = {
-    ("asr", "model.bin"): b"A" * 3000,
-    ("asr", "config.json"): b'{"k": 1}' * 10,
-    ("mt", "weights.bin"): b"B" * 5000,
-    ("llm", "model.gguf"): b"C" * 7000,
-}
-
-
-def _file(content: bytes, name: str) -> ModelFile:
-    return ModelFile(name=name, size_bytes=len(content), sha256=hashlib.sha256(content).hexdigest())
-
-
-def _catalog(base_url: str = "https://models.test") -> ModelCatalog:
-    """3 つの役割を 1 つずつ持つ、小さな定義を作る。"""
-    models = []
-    roles = {
-        "asr": ModelRole.TRANSCRIPTION,
-        "mt": ModelRole.TRANSLATION,
-        "llm": ModelRole.GENERATION,
-    }
-    for name, role in roles.items():
-        files = tuple(_file(c, f) for (m, f), c in _CONTENTS.items() if m == name)
-        models.append(
-            ModelDefinition(
-                name=name,
-                role=role,
-                repository_url=f"{base_url}/org/{name}",
-                revision=_REVISION,
-                license="MIT",
-                license_note="",
-                files=files,
-            )
-        )
-    return ModelCatalog(models=tuple(models))
-
-
-def _content_for(url: str) -> bytes:
-    """URL の最後の 2 つの区切りから、置いてある内容を引く（resolve/<版>/<ファイル名>）。"""
-    parts = url.split("/")
-    model = parts[4]  # https: '' host org model
-    return _CONTENTS[(model, parts[-1])]
-
-
-class FakeDownloader:
-    """通信しない入手の部品。URL に対応する内容を、一時名のファイルへ書く。"""
-
-    def __init__(self, *, fail_on: str | None = None, error: Exception | None = None) -> None:
-        self.calls: list[tuple[str, int]] = []
-        self._fail_on = fail_on
-        self._error = error
-        # 内容を書き換えて返す（一致しないファイルの再現）。
-        self.corrupt = False
-
-    def download(self, url, destination, *, expected_size, on_progress=None, cancel=None) -> None:
-        offset = destination.stat().st_size if destination.exists() else 0
-        self.calls.append((url, offset))
-        if self._error is not None and (self._fail_on is None or url.endswith(self._fail_on)):
-            raise self._error
-        destination.parent.mkdir(parents=True, exist_ok=True)
-        content = _content_for(url)
-        if self.corrupt:
-            content = b"?" * len(content)
-        destination.write_bytes(content)
-        if on_progress is not None:
-            on_progress(offset)
-            on_progress(expected_size)
+_REVISION = REVISION
+_CONTENTS = CONTENTS
+_catalog = small_catalog
 
 
 @pytest.fixture
@@ -403,8 +332,7 @@ class TestWithHttpsDistribution:
     @staticmethod
     def _serve(distribution: DistributionServer) -> ModelCatalog:
         """擬似の配布元に全ファイルを置き、その配布元を指す定義を返す。"""
-        for (model, name), content in _CONTENTS.items():
-            distribution.files[f"/org/{model}/resolve/{_REVISION}/{name}"] = content
+        serve_catalog(distribution.files)
         return _catalog(distribution.base_url)
 
     def test_should_obtain_all_models_over_https_and_verify_hashes(self, distribution, tmp_path):

@@ -10,6 +10,8 @@
 - それ以外: 画面のファイル（配信部）
 """
 
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
 from typing import Final
 
 from fastapi import FastAPI, Request, WebSocket
@@ -17,7 +19,7 @@ from fastapi.responses import JSONResponse
 
 from . import APP_NAME
 from .access import AccessControlMiddleware
-from .api import health
+from .api import health, models
 from .errors import (
     ROUTE_NOT_FOUND,
     UnhandledErrorMiddleware,
@@ -27,6 +29,10 @@ from .errors import (
 from .frontend import INDEX_FILE, FrontendFiles
 from .logs import STARTUP_LOGGER
 from .logs.asgi import TraceIdMiddleware
+from .models.download import HttpsDownloader
+from .models.fetch import ModelFetcher
+from .models.manager import ModelManager
+from .models.store import ModelStore
 from .security_headers import SecurityHeadersMiddleware
 from .settings import Settings
 
@@ -56,6 +62,7 @@ def _register_api_routes(app: FastAPI) -> None:
     個別の経路は、末尾の「存在しない経路」の受け皿より先に登録する。
     """
     app.include_router(health.router, prefix="/api")
+    app.include_router(models.router, prefix="/api")
     # 存在しない /api の経路。画面のファイルへ落ちないよう、明示して受ける。
     app.add_api_route("/api", _route_not_found, methods=_ALL_METHODS, include_in_schema=False)
     app.add_api_route(
@@ -89,17 +96,49 @@ def _mount_frontend(app: FastAPI, settings: Settings) -> None:
     app.mount("/", FrontendFiles(directory=settings.static_dir, check_dir=False), name="frontend")
 
 
-def create_app(settings: Settings) -> FastAPI:
+def build_model_manager(settings: Settings) -> ModelManager:
+    """本番のモデル管理部を組み立てる（開始はしない）。
+
+    外向きの通信を行う部品（HttpsDownloader）を、ここでモデル管理部へ渡す。通信を行うのは、
+    アプリでこの 1 つだけ。翻訳モデルの変換は、変換を作る作業で接続する。
+    通知の送り先は、通知の仕組みを作る作業で渡す（いまは何もしない発行先）。
+    """
+    store = ModelStore(settings.models_dir)
+    fetcher = ModelFetcher(store, HttpsDownloader())
+    return ModelManager(settings.model_catalog, store, fetcher)
+
+
+@asynccontextmanager
+async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
+    """アプリの起動と停止。
+
+    起動で、AI モデルの確認と入手を非同期で始める（アプリの起動を待たせない）。
+    停止で、実行中の入手を中止する（受け取った分は残り、次の起動で続きから入手する）。
+    起動の順序（記録データベースの確認 → 途中だった会議の復旧 → AI モデルの確認）は、
+    起動の順序を整える作業で、ここに足す。
+    """
+    manager: ModelManager = app.state.model_manager
+    manager.start()
+    try:
+        yield
+    finally:
+        await manager.shutdown()
+
+
+def create_app(settings: Settings, *, model_manager: ModelManager | None = None) -> FastAPI:
     """アプリサーバーを組み立てる。
 
     Args:
         settings: 起動の時点で読み込んだ設定。
+        model_manager: モデル管理部。省略すると、設定から本番のものを組み立てる。
+            テストが、通信しない部品の管理部を渡すために使う。
 
     Returns:
         経路をすべて登録した FastAPI のアプリ。
     """
     app = FastAPI(
         title=APP_NAME,
+        lifespan=_lifespan,
         # API の文書の画面（Swagger UI と ReDoc）は、外部の CDN から部品を読み込む。
         # 外部の資源を読み込まない方針のため、画面は出さない。定義（JSON）だけを /api に置く。
         docs_url=None,
@@ -107,6 +146,7 @@ def create_app(settings: Settings) -> FastAPI:
         openapi_url="/api/openapi.json",
     )
     app.state.settings = settings
+    app.state.model_manager = model_manager or build_model_manager(settings)
 
     register_exception_handlers(app)
     # add_middleware は、あとから足したものほど外側になる。内側から順に足す。
