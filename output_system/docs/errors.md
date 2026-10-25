@@ -122,10 +122,11 @@ FastAPI が自動で返す応答も、共通の形に変えています。
 | `MODEL_CERTIFICATE_INVALID` | システムエラー | `certificate_invalid` | 配布元の証明書を確かめられない（社内のネットワークの証明書が未登録の場合など） |
 | `MODEL_SOURCE_UNRESPONSIVE` | システムエラー | `source_unresponsive` | 配布元が応答しない（時間切れ、エラーの応答、途中で切れた）。転送先が HTTPS でない、または許したホストでない場合も、ここに入れる |
 | `MODEL_HASH_MISMATCH` | システムエラー | `hash_mismatch` | 入手したファイルが、定義の SHA-256（配布元のもの）と一致しない。そのファイルは捨てた |
-| `MODEL_DISK_INSUFFICIENT` | システムエラー | `disk_insufficient` | ディスクの空きが足りない。入手を始める前の確認で足りないとき、書き込みで空きが無くなったとき |
+| `MODEL_DISK_INSUFFICIENT` | システムエラー | `disk_insufficient` | ディスクの空きが足りない。入手を始める前の確認で足りないとき、書き込みで空きが無くなったとき。翻訳モデルの変換の前の確認と、変換の書き込みでも同じ |
+| `MODEL_CONVERSION_FAILED` | システムエラー | `conversion_failed` | 翻訳モデルを、実行基盤の形式へ変換できない（変換プロセスの失敗、時間切れ）。変換の途中のファイルは捨てた。入手したファイルは残る |
 | `MODEL_DOWNLOAD_FAILED` | システムエラー | `unknown` | 上のどれにも分類できない失敗（想定外）。例外の種類と発生場所がエラーログに出る |
 | `MODEL_RETRY_NOT_ALLOWED` | 業務エラー（409） | — | 入手失敗でないときに、入手のやり直しを求めた（`POST /api/models/retry`） |
 
-「翻訳モデルを変換できない」は、翻訳モデルの変換を作る作業でコードを足します。
+- 入手のやり直し（`POST /api/models/retry`）は、入手失敗のうち、変換の失敗にも使えます。入手済みのファイルは一致を確かめるだけで入手し直さず、変換だけをやり直します。
 
 各機能のコードは、その機能の作業で足します。

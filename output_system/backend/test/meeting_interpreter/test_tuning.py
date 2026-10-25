@@ -78,6 +78,17 @@ class TestShippedTuningFile:
             1 <= tuning.generation_cpu_threads_during_meeting < tuning.generation_cpu_threads_normal
         )
 
+    def test_should_quantize_the_translation_model_to_8_bit_integers_by_default(self):
+        """
+        【テスト対象】同梱の tuning.toml（翻訳モデルの量子化）
+        【テスト内容】環境変数なしで読み込む
+        【期待結果】translation_quantization が int8（8 ビット整数）であること。
+                    要件の既定。測定で見直す調整値
+        """
+        tuning = _load(REPO_CONFIG_DIR / TUNING_FILE_NAME)
+
+        assert tuning.translation_quantization == "int8"
+
     def test_should_not_contain_secret_like_keys(self):
         """
         【テスト対象】同梱の tuning.toml と Tuning の項目名
@@ -175,6 +186,35 @@ class TestEnvironmentOverride:
         with pytest.raises(ConfigError, match=name):
             _load(REPO_CONFIG_DIR / TUNING_FILE_NAME, {name: value})
 
+    def test_should_override_a_choice_value_with_an_environment_variable(self):
+        """
+        【テスト対象】load_tuning（選択式の項目）
+        【テスト内容】MMD_TUNING_TRANSLATION_QUANTIZATION=float16 を渡す（前後に空白を付ける）
+        【期待結果】ファイルの int8 ではなく、float16 になること
+        """
+        tuning = _load(
+            REPO_CONFIG_DIR / TUNING_FILE_NAME,
+            {"MMD_TUNING_TRANSLATION_QUANTIZATION": " float16 "},
+        )
+
+        assert tuning.translation_quantization == "float16"
+
+    @pytest.mark.parametrize("value", ["int4", "INT8", "int8;rm", "8", "float64"])
+    def test_should_reject_a_value_outside_the_choices(self, value: str):
+        """
+        【テスト対象】load_tuning（選択式の項目の検証）
+        【テスト内容】選択肢に無い値を、環境変数で渡す
+        【期待結果】ConfigError になり、環境変数の名前と選べる値が文面に出ること。
+                    値は変換プロセスへの引数になるため、決めた選択肢以外を通さない
+        """
+        with pytest.raises(ConfigError, match="MMD_TUNING_TRANSLATION_QUANTIZATION") as caught:
+            _load(
+                REPO_CONFIG_DIR / TUNING_FILE_NAME,
+                {"MMD_TUNING_TRANSLATION_QUANTIZATION": value},
+            )
+
+        assert "int8" in str(caught.value)
+
     def test_should_reject_an_unknown_tuning_variable(self):
         """
         【テスト対象】load_tuning（未知の上書き）
@@ -271,6 +311,26 @@ class TestFileValidation:
         path = _write_tuning(tmp_path, text)
 
         with pytest.raises(ConfigError, match=key):
+            _load(path)
+
+    @pytest.mark.parametrize("bad_value", ["8", "true", '"int4"', '""'])
+    def test_should_reject_a_wrong_type_or_unknown_choice_for_a_choice_value(
+        self, tmp_path: Path, bad_value: str
+    ):
+        """
+        【テスト対象】load_tuning（選択式の項目の型と値の検証）
+        【テスト内容】translation_quantization に、数・真偽値・選択肢に無い文字列・空の文字列を書く
+        【期待結果】ConfigError になり、項目の名前が文面に出ること
+        """
+        text = re.sub(
+            r"^translation_quantization\s*=.*$",
+            f"translation_quantization = {bad_value}",
+            (REPO_CONFIG_DIR / TUNING_FILE_NAME).read_text(encoding="utf-8"),
+            flags=re.M,
+        )
+        path = _write_tuning(tmp_path, text)
+
+        with pytest.raises(ConfigError, match="translation_quantization"):
             _load(path)
 
     def test_should_reject_a_meeting_allocation_larger_than_the_normal_one(self, tmp_path: Path):

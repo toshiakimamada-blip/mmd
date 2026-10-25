@@ -35,6 +35,30 @@ def _limits(minimum: float, maximum: float) -> Any:
     return field(metadata={"minimum": minimum, "maximum": maximum})
 
 
+def _choices(*values: str) -> Any:
+    """選択式の項目の、選べる値を、dataclass のメタデータとして持たせる。
+
+    文字列の項目は、選べる値を決めたものだけにする。値が変換プロセスへの引数などになるため、
+    決めた値以外を通さない。
+    """
+    return field(metadata={"choices": values})
+
+
+# 翻訳モデルの量子化で選べる値（CTranslate2 の変換の quantization）。
+# int8: 8 ビット整数（既定）。重みを float32 の 1/4 の大きさにし、CPU で速い。
+# float16・float32 は、大きさと引き換えに精度を保つ。
+TRANSLATION_QUANTIZATIONS: Final = (
+    "int8",
+    "int8_float32",
+    "int8_float16",
+    "int8_bfloat16",
+    "int16",
+    "float16",
+    "bfloat16",
+    "float32",
+)
+
+
 @dataclass(frozen=True, slots=True)
 class Tuning:
     """調整値。起動の時点で 1 回だけ読み込み、以後は変えない。
@@ -62,6 +86,9 @@ class Tuning:
     # 生成ワーカーに割り当てる CPU のスレッド数（会議中）。
     # 字幕の処理を優先するため、通常より小さくする。
     generation_cpu_threads_during_meeting: int = _limits(1, 256)
+    # 翻訳モデルを実行基盤の形式へ変換するときの量子化。選べる値は TRANSLATION_QUANTIZATIONS。
+    # 変換後のファイルの大きさと、翻訳の速さと質に効く。変えると、変換し直しになる。
+    translation_quantization: str = _choices(*TRANSLATION_QUANTIZATIONS)
 
 
 def env_name_for(key: str) -> str:
@@ -78,6 +105,14 @@ def _range_text(minimum: float, maximum: float, expected: type) -> str:
     """範囲の誤りを知らせる文の一部を作る。"""
     kind = "整数" if expected is int else "数"
     return f"{minimum:g} 以上 {maximum:g} 以下の{kind}"
+
+
+def _check_choice(label: str, value: object, choices: tuple[str, ...], problems: list[str]) -> bool:
+    """値が、選べる値のどれかかを調べる。外れていれば誤りを控えて False を返す。"""
+    if not isinstance(value, str) or value not in choices:
+        problems.append(f"{label} は {'・'.join(choices)} のいずれかで指定してください: {value!r}")
+        return False
+    return True
 
 
 def _parse_env_value(name: str, raw: str, expected: type, problems: list[str]) -> Any | None:
@@ -195,10 +230,14 @@ def _resolve_value(
     型と範囲を検証し、誤りは problems へ足して None を返す。
     """
     expected: type = item.type  # type: ignore[assignment]
-    minimum = item.metadata["minimum"]
-    maximum = item.metadata["maximum"]
     env_name = env_name_for(item.name)
     env_raw = environ.get(env_name)
+
+    if "choices" in item.metadata:
+        return _resolve_choice(item, file_values, env_name, env_raw, problems)
+
+    minimum = item.metadata["minimum"]
+    maximum = item.metadata["maximum"]
 
     if not _is_blank(env_raw):
         label = env_name
@@ -216,6 +255,31 @@ def _resolve_value(
     if value is None or not _check_range(label, value, minimum, maximum, expected, problems):
         return None
     return value
+
+
+def _resolve_choice(
+    item: dataclasses.Field[Any],
+    file_values: Mapping[str, Any],
+    env_name: str,
+    env_raw: str | None,
+    problems: list[str],
+) -> str | None:
+    """選択式の項目の値を決める。環境変数があればそれを、無ければファイルの値を使う。
+
+    環境変数の前後の空白は取り除く。選べる値以外は、誤りにする（大文字小文字も区別する）。
+    """
+    choices: tuple[str, ...] = item.metadata["choices"]
+    if not _is_blank(env_raw):
+        label, value = env_name, (env_raw or "").strip()
+    elif item.name in file_values:
+        label, value = f"{TUNING_FILE_NAME} の {item.name}", file_values[item.name]
+    else:
+        problems.append(
+            f"{TUNING_FILE_NAME} に項目 {item.name} がありません。"
+            f"ファイルに足すか、環境変数 {env_name} で指定してください"
+        )
+        return None
+    return value if _check_choice(label, value, choices, problems) else None
 
 
 def _check_relations(tuning: Tuning, problems: list[str]) -> None:

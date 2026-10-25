@@ -41,6 +41,7 @@ class ModelStatusResponse(BaseModel):
             "source_unresponsive",
             "hash_mismatch",
             "disk_insufficient",
+            "conversion_failed",
             "unknown",
         ]
         | None

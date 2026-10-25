@@ -45,3 +45,12 @@ generation_input_max_chars = 4000
 generation_cpu_threads_normal = 8
 # 会議中は、字幕の処理を優先するため、割り当てを減らす（通常以下にすること）。
 generation_cpu_threads_during_meeting = 2
+
+# --- 翻訳モデルの変換 ---------------------------------------------------------
+
+# 翻訳モデルを実行基盤（CTranslate2）の形式へ変換するときの量子化。
+# 選べる値: int8・int8_float32・int8_float16・int8_bfloat16・int16・float16・bfloat16・float32
+# int8（8 ビット整数）は、重みを float16 の半分、float32 の 1/4 の大きさにし、CPU で速い。
+# 訳の質と速さは、output_system/docs/models.md の測定結果のとおり。値を変えると、
+# 次の起動で、入手済みのファイルから変換し直す（変換後のハッシュ値の控えに量子化を記録するため）。
+translation_quantization = "int8"
