@@ -10,7 +10,7 @@
 | `frontend/` | 画面。TypeScript と React を Vite でビルドします。ロックファイルは `package-lock.json` です |
 | `config/` | アプリに同梱する設定ファイル。調整値（`tuning.toml`）と、AI モデルの定義（`models.toml`。翻訳モデルの代わりの候補は `translation_alternatives.md`） |
 | `tools/` | 補助の道具。画面の依存を足すときに、固定した Node.js で実行する `with-pinned-node.sh` など |
-| `docs/` | 実装に付ける文書。エラーの扱いと、エラーコードの一覧は `docs/errors.md`。お知らせ帯とエラー表示の部品の使い方は `docs/notices.md` |
+| `docs/` | 実装に付ける文書。エラーの扱いと、エラーコードの一覧は `docs/errors.md`。お知らせ帯とエラー表示の部品の使い方は `docs/notices.md`。AI モデルの入手と、翻訳モデルの変換（確かめた結果、部品、測定値）は `docs/models.md` |
 
 テストは、各フォルダの `src/` と同じ階層の `test/` に置き、`src/` と同じ構造にします。起動したコンテナを相手にするテストだけは、`backend/test/container/` に置きます。ブラウザーで手動で確かめるための確認用のサーバーは、`backend/test/browser/` に置きます（pytest は集めません）。
 
@@ -201,7 +201,7 @@ HTTPS の証明書は、必ず確かめます（確認を無効にする設定�
 ```bash
 MMD_STATIC_DIR=../frontend/dist MMD_CONFIG_DIR=../config \
 MMD_RECORDS_DIR=/tmp/mmd/records MMD_MODELS_DIR=/tmp/mmd/models \
-PYTHONPATH=src uv run --no-dev python -m meeting_interpreter
+PYTHONPATH=src uv run --no-default-groups python -m meeting_interpreter
 ```
 
 ## 必要な道具
@@ -243,7 +243,8 @@ npm run check:dist        # ビルドした dist/ だけを、外部の URL へ�
 
 依存の版は、ロックファイルで固定します。追加と更新は、次のとおり行います。
 
-- Python: `backend/` で `uv add <パッケージ>` を実行し、`uv.lock` も一緒にコミットします
+- Python: `backend/` で `uv add <パッケージ>` を実行し、`uv.lock` も一緒にコミットします。`uv.lock` の形式の版（`revision`）は、書いた uv の版で決まります。Dockerfile の `UV_VERSION` より新しい uv で書くと、`revision` が上がります。ロックし直すときは、`uvx --from uv==<UV_VERSION の値> uv lock` のように、同じ版の uv を使います
+- Python の依存グループ: `dev`（テスト用）と `conversion`（翻訳モデルの変換の部品。PyTorch など）は、開発環境（`uv sync`）には入りますが、イメージのアプリサーバーの環境には入れません（`--no-default-groups`）。変換の部品は、イメージの別の環境に入れます（[docs/models.md](docs/models.md)）
 - 画面: `frontend/` で `../tools/with-pinned-node.sh npm install <パッケージ>` を実行し、`package-lock.json` も一緒にコミットします。素の `npm install` は、npm が 11.10 未満だと止まります（下の「公開から 7 日未満の版を使わない設定」を参照）
 - 依存は公式の配布元（PyPI と npm）から入手します。既知の脆弱性がある版は選びません
 

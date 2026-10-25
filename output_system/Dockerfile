@@ -134,9 +134,10 @@ ENV UV_PROJECT_ENVIRONMENT=/opt/venv \
 WORKDIR /build
 
 # --locked: uv.lock と pyproject.toml がずれていたら失敗させる。ロックファイルの版だけを入れる。
-# --no-dev: テスト用の依存を入れない。
+# --no-default-groups: テスト用の依存（dev）も、翻訳モデルの変換の部品（conversion）も入れない。
+#   アプリサーバーのメモリの上限は 0.5GB のため、変換の部品はこの環境に入れない（ADR-16）。
 COPY backend/pyproject.toml backend/uv.lock backend/.python-version ./
-RUN /opt/uv-venv/bin/uv sync --locked --no-dev --no-install-project
+RUN /opt/uv-venv/bin/uv sync --locked --no-default-groups --no-install-project
 
 # ---------------------------------------------------------------------------
 # 実行する段。

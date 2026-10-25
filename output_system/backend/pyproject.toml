@@ -13,21 +13,51 @@ dependencies = [
 ]
 
 [dependency-groups]
-# 実行イメージには入れない開発用の依存（`uv sync --no-dev` で除外される）。
+# 実行イメージのアプリサーバーには入れない開発用の依存。
 dev = [
     "httpx2",      # FastAPI の TestClient が使う
     "pytest",
     "pytest-cov",
     "ruff",
 ]
+# 翻訳モデルの変換プロセスだけが使う部品（ADR-16）。アプリサーバーの環境には入れず、
+# イメージの別の環境（/opt/conversion-venv）へ入れる。変換の方式と、部品を選んだ理由は
+# output_system/docs/models.md の「翻訳モデルの変換」にある。
+# 版は uv.lock で固定する。ここに書くのは、下限と、選んだ部品の名前だけ。
+conversion = [
+    # 重みの読み込みと、変換元の Hugging Face の形式の読み込み。
+    # 2.6.0 未満は、torch.load の weights_only=True を回避できる脆弱性（CVE-2025-32434）がある。
+    # CPU 版の wheel（[tool.uv.sources] で指す）に固定し、NVIDIA の CUDA 部品を取り込まない。
+    "torch>=2.6.0",
+    # 変換元の翻訳モデル（Marian の構造）を読み込む。
+    "transformers",
+    # 実行基盤の形式への変換。同じ部品が、翻訳の実行基盤にもなる。
+    "ctranslate2",
+    # 文字の分割。変換元のトークナイザー（MarianTokenizer）が使う。
+    "sentencepiece",
+]
 
 [tool.uv]
 # アプリとして動かすだけで、ライブラリとしては配布しない。
 # コードは PYTHONPATH（pytest では pythonpath 設定）で src/ を指して読み込む。
 package = false
+# 開発環境（uv sync）には、変換の部品も入れる。変換プロセスの自動テストが使うため。
+# イメージでは、アプリサーバーの環境に入れない（Dockerfile が --no-default-groups で外す）。
+default-groups = ["dev", "conversion"]
 # サプライチェーン攻撃への対策。公開から 7 日未満の版は、版の解決の対象にしない。
 # 既にロックファイルへ記録した版には影響しない。
 exclude-newer = "7 days"
+
+# PyTorch は、CPU 版の wheel の配布元から入れる。
+# Linux 向けの標準の wheel は、NVIDIA 独自のライセンスの CUDA 部品を取り込む。
+# CPU 版なら取り込まず、イメージも小さくなる。explicit = true で、torch 以外はこの配布元から入れない。
+[[tool.uv.index]]
+name = "pytorch-cpu"
+url = "https://download.pytorch.org/whl/cpu"
+explicit = true
+
+[tool.uv.sources]
+torch = { index = "pytorch-cpu" }
 
 [tool.pytest.ini_options]
 # テストは src/ と同じ階層の test/ に置き、src/ と同じ構造にする。
