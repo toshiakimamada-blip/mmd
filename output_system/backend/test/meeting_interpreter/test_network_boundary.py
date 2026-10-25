@@ -111,6 +111,10 @@ NETWORK_ALLOWED: dict[str, frozenset[str] | None] = {
     "models/download.py": None,
     # 同じコンテナの中のアプリサーバー（127.0.0.1）への死活の確認。コンテナの外へ出ない。
     "healthcheck.py": frozenset({"urllib.request"}),
+    # 変換プロセスの中で、外への接続と名前の解決を拒む仕組み。通信するためではなく、
+    # socket の関数を拒むものに差し替えるために socket を取り込む。
+    # 接続を作る呼び出しは、ここでも違反になる。
+    "models/conversion/network_guard.py": frozenset({"socket"}),
 }
 
 # プロセスの起動を行ってよいモジュール。
@@ -393,7 +397,8 @@ class TestSourceTree:
         【テスト対象】アプリのソースコード全体
         【テスト内容】通信の部品を取り込んでいるモジュールを、すべて集める
         【期待結果】入手の部品（models/download.py）と、同じコンテナの中への死活の確認
-                    （healthcheck.py）だけであること
+                    （healthcheck.py）と、変換プロセスの中で通信を拒む仕組み
+                    （models/conversion/network_guard.py）だけであること
         """
         importing = {
             path
@@ -404,7 +409,11 @@ class TestSourceTree:
             )
         }
 
-        assert importing == {"models/download.py", "healthcheck.py"}
+        assert importing == {
+            "models/download.py",
+            "healthcheck.py",
+            "models/conversion/network_guard.py",
+        }
 
     def test_should_keep_the_health_check_on_the_loopback_address(self):
         """

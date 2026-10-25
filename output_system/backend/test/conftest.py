@@ -24,7 +24,8 @@ from meeting_interpreter.tuning import TUNING_FILE_NAME, load_tuning
 from model_fakes import FakeDownloader
 
 # 擬似の配布元（HTTPS）の fixture。AI モデルの入手を確かめるテストが共通で使う。
-pytest_plugins = ["distribution_server"]
+# 小さな翻訳モデル（ランダムな重み）の fixture。翻訳モデルの変換を確かめるテストが共通で使う。
+pytest_plugins = ["distribution_server", "tiny_translation_model"]
 
 # アプリに同梱する設定ファイルの置き場（output_system/config）。
 # このファイルは backend/test/ にあるため、2 つ上が output_system/。
