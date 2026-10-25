@@ -527,7 +527,10 @@ def _real_manager(
     """本物の入手の部品（HTTPS）で組み立てたモデル管理部。"""
     store = ModelStore(settings.models_dir)
     downloader = HttpsDownloader(
-        ssl_context=distribution.trusting_context(), timeout=2.0, use_environment_proxy=False
+        ssl_context=distribution.trusting_context(),
+        timeout=2.0,
+        use_environment_proxy=False,
+        allowed_hosts=distribution.allowed_hosts,
     )
     fetcher = ModelFetcher(store, downloader, disk_reserve_bytes=0)
     return ModelManager(

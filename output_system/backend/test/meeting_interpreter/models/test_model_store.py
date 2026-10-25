@@ -30,7 +30,7 @@ def _model(content: bytes = _CONTENT, name: str = "demo-model") -> ModelDefiniti
     return ModelDefinition(
         name=name,
         role=ModelRole.TRANSCRIPTION,
-        repository_url="https://example.test/org/demo",
+        repository_url="https://huggingface.co/org/demo",
         revision=_REVISION,
         license="MIT",
         license_note="",

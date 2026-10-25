@@ -31,7 +31,7 @@ def _model(role: str, name: str, **overrides: object) -> dict[str, object]:
     model: dict[str, object] = {
         "name": name,
         "role": role,
-        "repository_url": f"https://example.test/org/{name}",
+        "repository_url": f"https://huggingface.co/org/{name}",
         "revision": _REVISION,
         "license": "MIT",
         "files": [{"name": "model.bin", "size_bytes": 10, "sha256": _SHA256}],
@@ -179,7 +179,7 @@ class TestModelCatalogValues:
 
         url = model.file_url(model.files[0])
 
-        assert url == f"https://example.test/org/asr-model/resolve/{_REVISION}/model.bin"
+        assert url == f"https://huggingface.co/org/asr-model/resolve/{_REVISION}/model.bin"
 
     def test_should_sum_the_sizes_of_all_files(self, tmp_path):
         """
@@ -265,14 +265,14 @@ class TestModelCatalogValidation:
     @pytest.mark.parametrize(
         "url",
         [
-            "http://example.test/org/model",
-            "ftp://example.test/org/model",
-            "https://user:pass@example.test/org/model",
-            "https://example.test/org/model?download=1",
-            "https://example.test/org/model#top",
-            "https://example.test/org/model/",
+            "http://huggingface.co/org/model",
+            "ftp://huggingface.co/org/model",
+            "https://user:pass@huggingface.co/org/model",
+            "https://huggingface.co/org/model?download=1",
+            "https://huggingface.co/org/model#top",
+            "https://huggingface.co/org/model/",
             "https:///org/model",
-            "example.test/org/model",
+            "huggingface.co/org/model",
         ],
         ids=[
             "http",
@@ -298,6 +298,34 @@ class TestModelCatalogValidation:
         message = _problems(tmp_path, _render(models))
 
         assert "repository_url" in message
+
+    @pytest.mark.parametrize(
+        "url",
+        [
+            "https://example.test/org/model",
+            "https://evil.example/org/model",
+            "https://huggingface.co.evil.example/org/model",
+            "https://www.huggingface.co/org/model",
+            "https://cdn.hf.co/org/model",
+            "https://127.0.0.1/org/model",
+        ],
+        ids=["other-host", "evil-host", "suffix-trick", "subdomain", "cdn-host", "numeric-host"],
+    )
+    def test_should_reject_a_repository_host_outside_the_distribution_source(self, tmp_path, url):
+        """
+        【テスト対象】load_model_catalog（配布元のホスト）
+        【テスト内容】huggingface.co 以外のホスト（似せた名前、サブドメイン、CDN のホスト、
+                      数値の宛先）の URL を読む
+        【期待結果】誤りになること。通信の相手は AI モデルの配布元だけにする
+                    （非機能要件設計書の外部への送信の防止）。CDN のホストは、転送先としてだけ許す
+        """
+        models = _valid_models()
+        models[0]["repository_url"] = url
+
+        message = _problems(tmp_path, _render(models))
+
+        assert "repository_url" in message
+        assert "huggingface.co" in message
 
     @pytest.mark.parametrize(
         "name",

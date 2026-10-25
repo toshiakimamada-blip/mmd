@@ -8,8 +8,8 @@
 呼び出し側が、ほかの設定の誤りとまとめて起動を止められるようにする（tuning.py と同じ作り）。
 
 検証する内容
-- 配布元は HTTPS の URL。版は 40 桁のコミット
-  （ブランチ名やタグは、指す先が動いて「最新」を取ってしまうため認めない）
+- 配布元は HTTPS の URL で、ホストは許した配布元（hosts.py の SOURCE_HOSTS）だけ。
+  版は 40 桁のコミット（ブランチ名やタグは、指す先が動いて「最新」を取ってしまうため認めない）
 - SHA-256 は 64 桁の小文字の 16 進数。ファイル名はモデルのフォルダーの直下の 1 つの名前
 - 役割（文字起こし・翻訳・文章生成）は、1 つずつそろっている
 - 非商用に限るライセンス名を認めない（要件「配布形態とライセンス」）
@@ -23,6 +23,8 @@ from enum import StrEnum
 from pathlib import Path
 from typing import Any, Final
 from urllib.parse import urlsplit
+
+from .hosts import SOURCE_HOSTS, host_matches
 
 # AI モデルの定義のファイルの名前。置き場は MMD_CONFIG_DIR。
 MODELS_FILE_NAME: Final = "models.toml"
@@ -302,6 +304,9 @@ def _repository_url_problem(value: object) -> str | None:
         return "https:// で始まる URL で書いてください"
     if not host:
         return "ホスト名が必要です"
+    if not host_matches(host, SOURCE_HOSTS):
+        # 通信の相手は AI モデルの配布元だけ（非機能要件設計書の外部への送信の防止）。
+        return f"配布元のホストにしてください（許すのは {'・'.join(SOURCE_HOSTS)} だけです）"
     if parts.username is not None or parts.password is not None:
         return "認証情報を含められません"
     if parts.query or parts.fragment:

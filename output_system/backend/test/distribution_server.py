@@ -75,6 +75,11 @@ class DistributionServer:
         """配布元の URL の根。"""
         return f"https://127.0.0.1:{self.port}"
 
+    @property
+    def allowed_hosts(self) -> tuple[str, ...]:
+        """入手の部品に許すホスト。この配布元のホスト（127.0.0.1）だけ。"""
+        return ("127.0.0.1",)
+
     def url(self, path: str) -> str:
         """経路から URL を作る。"""
         return f"{self.base_url}{path}"

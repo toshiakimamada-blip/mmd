@@ -120,7 +120,7 @@ FastAPI が自動で返す応答も、共通の形に変えています。
 |---|---|---|---|
 | `MODEL_NETWORK_UNREACHABLE` | システムエラー | `network_unreachable` | ネットワークにつながらない（名前が引けない、接続を断られた、経路が無い） |
 | `MODEL_CERTIFICATE_INVALID` | システムエラー | `certificate_invalid` | 配布元の証明書を確かめられない（社内のネットワークの証明書が未登録の場合など） |
-| `MODEL_SOURCE_UNRESPONSIVE` | システムエラー | `source_unresponsive` | 配布元が応答しない（時間切れ、エラーの応答、途中で切れた） |
+| `MODEL_SOURCE_UNRESPONSIVE` | システムエラー | `source_unresponsive` | 配布元が応答しない（時間切れ、エラーの応答、途中で切れた）。転送先が HTTPS でない、または許したホストでない場合も、ここに入れる |
 | `MODEL_HASH_MISMATCH` | システムエラー | `hash_mismatch` | 入手したファイルが、定義の SHA-256（配布元のもの）と一致しない。そのファイルは捨てた |
 | `MODEL_DISK_INSUFFICIENT` | システムエラー | `disk_insufficient` | ディスクの空きが足りない。入手を始める前の確認で足りないとき、書き込みで空きが無くなったとき |
 | `MODEL_DOWNLOAD_FAILED` | システムエラー | `unknown` | 上のどれにも分類できない失敗（想定外）。例外の種類と発生場所がエラーログに出る |

@@ -7,13 +7,15 @@ TLS）を取り込んでいないことは、自動テスト（test_network_boun
 
 方針
 - 入手は、標準ライブラリの HTTPS クライアント（urllib）で自前に行う。各ライブラリの自動の入手機能と
-  利用状況の送信は使わない（それらは、実行基盤を起動する側の環境変数でも止める。offline.py）。
+  利用状況の送信は使わない（それらは、実行基盤を起動する側の環境変数でも止める。child_process.py）。
 - 証明書は必ず確かめる。確認を無効にする設定は持たない。社内のネットワークが通信を検査する場合の
   証明書は、コンテナのシステムの証明書の保管先に登録する。TLS の文脈（ssl.create_default_context）は
   その保管先と、環境変数 SSL_CERT_FILE・SSL_CERT_DIR を読む。certifi の証明書の一覧は書き換えない。
 - 途中から続けて入手できる（Range 要求）。配布元が Range を無視したときは、最初から入手し直す。
 - 入手の自動の再試行は行わない。失敗したら原因の種類を返し、利用者の「入手をやり直す」で再開する。
 - HTTP への転送には従わない（暗号化されない経路へ落とさない）。
+- 通信の相手は、許したホスト（hosts.py の TRANSFER_HOSTS）だけ。入手先と、転送先の両方で確かめる。
+  許可リストは設定ファイルではなく、コードの定数にある（許可を広げる変更が、コードの変更として見える）。
 - 失敗は、原因の種類（FailureKind）に分類して ModelFailure で返す。
   例外の文面（URL や OS の文面）は外へ出さない。
 """
@@ -26,13 +28,14 @@ import ssl
 import threading
 import urllib.error
 import urllib.request
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from contextlib import closing
 from pathlib import Path
 from typing import BinaryIO, Final
 from urllib.parse import urlsplit
 
 from .failure import DownloadCancelled, FailureKind, ModelFailure, failure_from_os_error
+from .hosts import TRANSFER_HOSTS, host_matches
 
 # 配布元へ送る User-Agent。アプリの名前だけで、版・利用者・PC を特定する情報を含めない。
 USER_AGENT: Final = "meeting-interpreter-model-fetch"
@@ -67,18 +70,31 @@ class _RangeNotSatisfiable(Exception):
     """配布元が 416（続きの位置が範囲の外）を返した。内部の合図で、外へは出さない。"""
 
 
-class _HttpsOnlyRedirectHandler(urllib.request.HTTPRedirectHandler):
-    """転送に従う。ただし、HTTPS 以外への転送は拒む。"""
+class _RestrictedRedirectHandler(urllib.request.HTTPRedirectHandler):
+    """転送に従う。ただし、HTTPS 以外への転送と、許したホスト以外への転送は拒む。"""
+
+    def __init__(self, allowed_hosts: Sequence[str]) -> None:
+        super().__init__()
+        self._allowed_hosts = tuple(allowed_hosts)
 
     def redirect_request(self, req, fp, code, msg, headers, newurl):  # type: ignore[no-untyped-def]
-        if urlsplit(newurl).scheme != "https":
-            # HTTPError にすると、呼び出し側でエラーの応答（配布元が応答しない）として分類される。
+        target = urlsplit(newurl)
+        # HTTPError にすると、呼び出し側でエラーの応答（配布元が応答しない）として分類される。
+        # 転送先の URL（署名つきの問い合わせを含む）は、例外の文面に残さない。
+        if target.scheme != "https":
             raise urllib.error.HTTPError(newurl, code, "転送先が HTTPS ではありません", headers, fp)
+        if not host_matches(target.hostname, self._allowed_hosts):
+            raise urllib.error.HTTPError(
+                newurl, code, "転送先が許したホストではありません", headers, fp
+            )
         return super().redirect_request(req, fp, code, msg, headers, newurl)
 
 
 def _build_opener(
-    ssl_context: ssl.SSLContext, *, use_environment_proxy: bool
+    ssl_context: ssl.SSLContext,
+    *,
+    use_environment_proxy: bool,
+    allowed_hosts: Sequence[str],
 ) -> urllib.request.OpenerDirector:
     """HTTPS だけを扱う opener を作る。
 
@@ -95,7 +111,7 @@ def _build_opener(
         urllib.request.UnknownHandler(),
         urllib.request.HTTPSHandler(context=ssl_context),
         urllib.request.HTTPDefaultErrorHandler(),
-        _HttpsOnlyRedirectHandler(),
+        _RestrictedRedirectHandler(allowed_hosts),
         urllib.request.HTTPErrorProcessor(),
     ):
         opener.add_handler(handler)
@@ -136,6 +152,7 @@ class HttpsDownloader:
         timeout: float = DEFAULT_TIMEOUT_SECONDS,
         chunk_size: int = DEFAULT_CHUNK_SIZE,
         use_environment_proxy: bool = True,
+        allowed_hosts: Sequence[str] = TRANSFER_HOSTS,
     ) -> None:
         """
         Args:
@@ -145,11 +162,19 @@ class HttpsDownloader:
             timeout: 接続と 1 回の読み取りを待つ秒数。
             chunk_size: 一度に読んで書く量（バイト）。
             use_environment_proxy: 環境変数のプロキシに従うか。テストでは False にする。
+            allowed_hosts: 通信を許すホスト（hosts.py の書き方）。入手先と転送先の両方を確かめる。
+                省略すると、配布元と CDN のホスト（TRANSFER_HOSTS）。テストが、手元の擬似の配布元を
+                許すときだけ指定する。
         """
         self.ssl_context = ssl_context if ssl_context is not None else ssl.create_default_context()
+        self.allowed_hosts = tuple(allowed_hosts)
         self._timeout = timeout
         self._chunk_size = chunk_size
-        self._opener = _build_opener(self.ssl_context, use_environment_proxy=use_environment_proxy)
+        self._opener = _build_opener(
+            self.ssl_context,
+            use_environment_proxy=use_environment_proxy,
+            allowed_hosts=self.allowed_hosts,
+        )
 
     def download(
         self,
@@ -176,12 +201,16 @@ class HttpsDownloader:
             cancel: 中止の合図。立つと、受け取った分を残して DownloadCancelled で止まる。
 
         Raises:
-            ValueError: url が HTTPS でないとき。
+            ValueError: url が HTTPS でないとき。ホストが、許したホストでないとき。
+                どちらも、定義の検証を通った入手先なら起きない。通信の前に止める備え。
             ModelFailure: 入手に失敗したとき。原因の種類を持つ。
             DownloadCancelled: 中止の合図が立ったとき。
         """
-        if urlsplit(url).scheme != "https":
+        parts = urlsplit(url)
+        if parts.scheme != "https":
             raise ValueError("入手先は https:// で始まる URL にしてください")
+        if not host_matches(parts.hostname, self.allowed_hosts):
+            raise ValueError("入手先のホストが、許したホストではありません")
         try:
             destination.parent.mkdir(parents=True, exist_ok=True)
             offset = self._resumable_offset(destination, expected_size)
