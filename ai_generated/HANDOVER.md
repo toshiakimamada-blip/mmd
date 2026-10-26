@@ -6,7 +6,8 @@
 - テスト: pytest（+ pytest-cov、httpx2。本物の uvicorn を起動するテストを含む）、Vitest 5（+ Testing Library、jsdom）。lint は ruff と ESLint 10
 - 実行基盤: Docker コンテナ 1 つ（土台 ubuntu:24.04）。名前付きボリューム 2 つ（記録・モデル）
 - クールダウン: uv は `exclude-newer = "7 days"`（`backend/pyproject.toml`）、npm は `min-release-age=7`（`frontend/.npmrc`）
-- AI モデルの入手: 依存を足さず、標準ライブラリの HTTPS クライアント（urllib）で自前に行う。実行基盤のライブラリ（faster-whisper、llama.cpp、CTranslate2 など）は、まだ入れていない
+- AI モデルの入手: 依存を足さず、標準ライブラリの HTTPS クライアント（urllib）で自前に行う
+- 翻訳モデルの変換: 部品（PyTorch の CPU 版 wheel、transformers、CTranslate2、SentencePiece）は依存グループ `conversion`（`uv.lock` で固定）。開発環境の `uv sync` には入り、イメージではアプリサーバーの環境に入れず `/opt/conversion-venv` にだけ入れる（展開後 約 1.33GB）。faster-whisper と llama.cpp は、まだ入れていない
 
 ## ディレクトリ構成
 ```
@@ -27,7 +28,8 @@ output_system/
 │   │   ├── errors.py         # 画面へ返すエラーの共通の形（3 分類・9 領域・例外ハンドラー）
 │   │   ├── healthcheck.py    # HEALTHCHECK 用（外向きの通信の例外: 127.0.0.1 だけ）
 │   │   ├── child_process.py  # ワーカー・変換プロセスの起動の入口。自動入手と利用状況の送信を止める環境変数を必ず付ける
-│   │   ├── models/           # モデル管理部。definition.py（定義の検証）、store.py（置き場・一致の確認）、download.py（唯一の外向きの通信）、fetch.py（確認→入手の流れ）、manager.py（準備状況）、failure.py（失敗の原因）
+│   │   ├── models/           # モデル管理部。definition.py（定義の検証）、store.py（置き場・一致の確認）、download.py（唯一の外向きの通信）、hosts.py（通信を許すホスト）、fetch.py（確認→入手の流れ）、manager.py（準備状況）、failure.py（失敗の原因）
+│   │   │   └── conversion/   # 翻訳モデルの変換。アプリサーバー側: service.py（管理部への口）・process.py（起動と見届け）・receipt.py（控えと判定）・layout.py・protocol.py。変換プロセス側: worker.py・network_guard.py・sandbox.py・safe_torch.py
 │   │   └── api/{health,models}.py  # GET /api/health、GET /api/models/status、POST /api/models/retry
 │   └── test/                 # src と同じ構造。test/container/ は起動したコンテナを相手にする（MMD_CONTAINER_URL のときだけ動く）。test/browser/ はブラウザーで手動で確かめる確認用のサーバー（pytest は集めない）。test/distribution_server.py（擬似の配布元、HTTPS）と test/model_fakes.py（小さな定義・偽の入手の部品）は共通の道具
 ├── frontend/
@@ -78,7 +80,11 @@ output_system/
 - 一時名は `<ファイル名>.part`。確認を終えるまで入手済みと扱わず、一致したら同じフォルダーの中で名前を変える。続きに使えない一時名（定義より大きい）は捨てる。置き場の配置は `<モデル名>/<版>/<ファイル名>`
 - ディスクの空きは「入手する分 + 予備 2GiB」で確かめる（`fetch.py` の `DISK_RESERVE_BYTES`。設計書の約 5GB は仮置きの見込みで、実際のファイルの大きさが決まったため）
 - 準備状況は `ModelManager` がメモリの上で持つ。変更はイベントループの上だけで行い、入手と確認は別のスレッドで動かす。進み具合の通知は 0.25 秒の間隔で間引く（全体に達した報告は必ず通知する）。通知の送り先は `ModelStatusNotifier` の受け口だけで、既定は何もしない
-- 翻訳モデルの変換が未接続の間は、準備完了にしない。準備状況は変換中で止まり、取得の `conversion_implemented` が `false`（開発用の区別）。変換を作る作業は `ModelManager(conversion=...)` に `TranslationConversion`（`is_complete()` と `async convert()`）を渡せばよい。変換の失敗は `ModelFailure` で知らせる（「翻訳モデルを変換できない」の原因の種類とエラーコードは、その作業で足す）
+- 翻訳モデルの変換は `TranslationConversion`（`is_complete()` と `async convert(cancel)`）の形で管理部へつなぐ。本番は `build_model_manager` が `TranslationConverter` を渡す。変換が済み（変換後のファイルが控えと一致）かつ 3 つがそろって初めて準備完了。変換の失敗は `ModelFailure(CONVERSION_FAILED, exception_type=...)`（エラーコード `MODEL_CONVERSION_FAILED`）。入手のやり直しは確認から流れ直すので、変換前のファイルが一致していれば入手せず変換だけやり直す。`conversion_implemented` は変換を渡さない構成（自動テスト）で `false`、本番は `true`
+- 変換は別のプロセス（`python -m meeting_interpreter.models.conversion`、Python は `MMD_CONVERSION_PYTHON`）。出力は `<モデルのフォルダー>/converted.tmp/output/` に書かせ、成功したら `converted/` へ名前を変え、控え `converted.receipt.json` を最後に書く。失敗と中止では `converted.tmp/`・`converted/`・控えを捨て、変換前のファイルは残す。変換の途中でアプリが止まると控えが無く、次の起動で変換し直す（実機で確認）。結果は標準出力の最後の 1 行の JSON で、親は形が外れたら変換の失敗にする（例外の文面は返さない）
+- 控えには、変換後のファイルごとの大きさと SHA-256 に加え、モデル名・版・量子化・変換前の 5 ファイルの SHA-256 を入れる（量子化や版を変えたら変換し直すため）。変換の部品の版は記録だけで比べない（イメージの更新で変換し直さない）。控えはモデル置き場の JSON で、記録データベースには置かない
+- 変換のために外へ通信しない備えは 3 段: 環境変数、Python の見張り（`network_guard.py`: ソケットの作成・接続・名前の解決を拒んで数え、試みがあれば成功でも失敗にする）、OS の仕組み（`sandbox.py`: seccomp で UNIX ドメイン以外のソケットと io_uring_setup を拒む）。OS の仕組みを入れられないときは変換しない。重みは `safe_torch.py` が `weights_only=True` だけに限る
+- 翻訳モデルの定義は、変換に要る 5 ファイル（`CONVERSION_SOURCE_FILES`）を持つこと（起動時に検査）。ファイル名に `converted`・`converted.tmp`・`converted.receipt.json` は使えない
 - 失敗の原因は `FailureKind`（5 つ + 分類できない `unknown`）。エラーコードは `MODEL_*`。画面の文言は `frontend/src/errors/errorMessages.ts`。取得の応答は HTTP のエラーではなく準備状況の一部として返す。入手失敗でない状態のやり直しだけが業務エラー（409）
 - テスト: 本物の入手はしない。`test/distribution_server.py` が手元の HTTPS の擬似の配布元（openssl で自己署名の証明書をテストごとに作る）を立てる。`conftest.py` の自動の見張りが、手元以外への接続と名前の解決をテスト全体で失敗にする。他のテストのアプリは、開始しても何もしない `IdleModelManager` で組み立てる（アプリの起動が入手を始めるため）
 - Node.js は 24.21.0 に固定（24.22.0 は公開から 7 日未満のため見送り）。SHA-256 も Dockerfile で固定
@@ -110,8 +116,15 @@ output_system/
 - 社内の通信を検査する証明書の下での入手は、実機では未確認。このコンテナの経路では HF の証明書は検査されていない（発行元は Amazon）。仕組みは `SSL_CERT_FILE` を使う自動テストで確認した
 - Docker に buildx が無く、`docker build` は旧ビルダーになる。追加の文脈（`certs`）は `docker compose build` で渡す
 
+- slots の dataclass には `__dict__` が無い。コピーして一部を変えるときは `dataclasses.replace`
+- 変換の自動テストの本物の変換（小さな翻訳モデル）は 1 回で数秒かかる。変換プロセスの結果をアプリサーバーが使う処理は、偽の起動（`FakeRunner`）に差し替えて確かめる
+- CTranslate2 は CPU で、保存された `int8_float16` を `int8_float32` に自動で直し、警告を 1 行出す。翻訳の結果には影響しない
+- イメージの大きさ: `docker image ls` の DISK USAGE は「展開後 + 圧縮後」の合計。増えた分を測るときは `docker history` の層（展開後）と `docker save | wc -c`（圧縮後）で見る
+- `conftest.py` の自動の見張りは、手元以外への接続と名前の解決を失敗にする。本物の変換プロセスは子のプロセスなので、見張りの外で動く（外へ通信しないことは、変換プロセス自身の備えが守る）
+
 ## 実装済み機能
 - PBI #2: コンテナの起動、共通の枠と 4 画面の骨組み、`GET /api/health`、配信部、名前付きボリューム 2 つ、自動再起動
 - PBI #7: 設定の読み込み（環境変数と調整値）、3 種類のログ（標準出力・許可リスト）、共通のエラーの形（サーバーと画面）、お知らせ帯・7 つのエラー表示パターン・確認の表示の部品、対応していないブラウザーの案内
 - PBI #12: 接続元の制限（宛先 Host と送り元 Origin の判定、WebSocket の送り元必須、CORS なし、断った要求の接続ログ）、応答ヘッダー（CSP・nosniff・Referrer-Policy・X-Frame-Options）、ビルドの外部 URL 検査
-- PBI #17: AI モデルの定義と検証、モデル置き場と一致の確認、HTTPS での入手（続きから・進み具合・失敗の原因 5 種）、準備状況の取得とやり直し（`/api/models/status`・`/retry`）、起動時の非同期の開始、外向きの通信を入手の部品だけに限る検査、ワーカー・変換プロセスの起動の入口。翻訳モデルの変換と、通知の送り先は未接続
+- PBI #17: AI モデルの定義と検証、モデル置き場と一致の確認、HTTPS での入手（続きから・進み具合・失敗の原因 5 種）、準備状況の取得とやり直し（`/api/models/status`・`/retry`）、起動時の非同期の開始、外向きの通信を入手の部品だけに限る検査、ワーカー・変換プロセスの起動の入口。通知の送り先は未接続
+- PBI #23: 翻訳モデルの変換（別のプロセス、外へ通信しない 3 段の備え、安全な重みの読み込み）、変換後のハッシュ値の控えと変換し直しの判定、準備状況の「変換中」と失敗（翻訳モデルを変換できない）、入手のやり直しで変換だけをやり直す流れ。測定値（イメージ +1.33GB、変換のメモリの最大値 約 625MB）は `output_system/docs/models.md`
