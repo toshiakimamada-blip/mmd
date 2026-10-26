@@ -69,6 +69,7 @@ Starlette の `TestClient` は uvicorn を通らないため、部品が無く�
 | `MMD_MODELS_DIR` | AI モデルを置く場所 | はい | なし（コンテナのイメージは `/var/lib/mmd/models` を渡します） |
 | `MMD_STATIC_DIR` | ビルドした画面のファイルの場所 | いいえ | `/app/static` |
 | `MMD_CONFIG_DIR` | アプリに同梱する設定ファイル（`tuning.toml`、`models.toml`）の場所 | いいえ | `/app/config` |
+| `MMD_CONVERSION_PYTHON` | 翻訳モデルの変換プロセスを動かす Python（変換の部品を入れた環境のもの）。実行できるファイルであること | いいえ | アプリサーバーを動かしている Python（コンテナのイメージは `/opt/conversion-venv/bin/python` を渡します） |
 | `MMD_LOG_LEVEL` | ログのレベルの下限。`info`・`warning`・`error` のいずれか（大文字小文字は問いません） | いいえ | `info` |
 
 - 空（または空白だけ）の環境変数は、未設定として扱います。

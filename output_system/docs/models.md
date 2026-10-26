@@ -91,5 +91,61 @@ print(target.decode(result[0].hypotheses[0]))                        # これは
 `pytorch_model.bin` は pickle 形式です。SHA-256 の一致は「固定した版と同じファイル」を示すだけで、ファイルが安全であることは示しません。pickle は、読み込むときに任意のコードを実行できます。
 
 - 変換プロセスは、重みを `torch.load(..., weights_only=True)` だけで読みます。この読み込みは、テンソルを組み立てる決まった名前以外の pickle を拒みます。
-- `weights_only=True` でない読み込みは、変換プロセスの中で拒みます。拒む仕組みとテストは、変換プロセスを作る作業（Task 2.2.2）で足します。
+- `weights_only=False` など、安全な読み込みを外す指定は、変換プロセスの中で拒みます（`safe_torch.py`。`weights_only` を指定しない呼び出しには `True` を渡します）。変換の部品（transformers など）が、版の更新で安全でない読み込みを使い始めても、実行されません。
+- 拒むテストは、悪意のある pickle（読み込むと印のファイルを作る）を使い、`weights_only=True` だと印が作られず、`False` だと拒まれることを確かめます（`backend/test/meeting_interpreter/models/conversion/test_safe_torch.py`、`backend/test/meeting_interpreter/test_unsafe_deserialization.py`）。
 - 固定した版のファイルを、実行せずに点検しました（2026-10-25）。pickle が取り込む名前は、`collections.OrderedDict`、`torch.HalfStorage`、`torch._utils._rebuild_tensor_v2` の 3 つだけです。版を上げるときは、同じ点検をします。
+
+### 変換プロセスの置き場所と終わり方
+
+変換は、モデル管理部が起動する別のプロセスで行います（`backend/src/meeting_interpreter/models/conversion/`）。
+
+- アプリサーバーとも 2 つのワーカーとも別のプロセスで、`MMD_CONVERSION_PYTHON`（イメージでは `/opt/conversion-venv/bin/python`）の Python で動きます。アプリサーバーの環境には PyTorch などを入れません。
+- 変換が終わると、成功しても失敗しても、プロセスが止まります。止まると、変換で使ったメモリが戻ります。親（アプリサーバー）が消えたときは、子も自分で終わります。
+- 結果（成功か失敗か、原因の種類、例外の種類、メモリの最大値、部品の版）は、標準出力の最後の 1 行の JSON で返します。親は信頼せず、決めた形に厳密に当てはまるときだけ読み、外れていれば変換の失敗にします。例外の文面は返しません（パスや URL が入りうるため）。
+- 出力は `<モデルのフォルダー>/converted.tmp/output/` に書き、成功したら `<モデルのフォルダー>/converted/` へ名前を変えて移します。変換後のハッシュ値の控え（`converted.receipt.json`）を最後に書きます。失敗と中止では、`converted.tmp/`・`converted/`・控えを捨てます。変換前のファイルは捨てません。
+- 変換の途中でアプリが強制的に止まると、後始末は動きませんが、控えが無いため、次の起動で「控えが無い」と判定され、残りを捨てて変換し直します（実機で確かめました）。
+
+### 変換のために外へ通信しない
+
+変換プロセスは、第三者の部品（PyTorch、transformers、CTranslate2）を動かします。環境変数（`HF_HUB_OFFLINE` など）に従うとは限らないため、次の 3 つの備えを重ねます。
+
+| 備え | 内容 | 防げるもの |
+|---|---|---|
+| 環境変数 | `HF_HUB_OFFLINE`・`TRANSFORMERS_OFFLINE`・`HF_DATASETS_OFFLINE`・`HF_HUB_DISABLE_TELEMETRY`・`DO_NOT_TRACK`・`LLAMA_ARG_OFFLINE` を、起動の入口（`child_process.py`）が必ず付ける | 従う部品の自動入手と利用状況の送信 |
+| Python の中の見張り | `socket.socket` の作成・接続・送信と、名前の解決を拒み、試みを数える（`network_guard.py`）。試みがあれば、変換が済んでいても失敗にする | Python の `socket` を使う通信 |
+| OS の仕組み（seccomp） | IPv4 / IPv6 などのソケットを作る呼び出しを、カーネルが拒む（`sandbox.py`）。管理者の権限は要らず、起動した子のプロセスにも効き、外せない | C や Rust の拡張が、Python の `socket` を通さずに行う通信 |
+
+- OS の仕組みを入れられない環境（知らない機械、seccomp を使えない環境）では、通信を断てないまま第三者の部品を動かさず、変換を失敗にします。
+- 入手の部品（`models/download.py`）が、転送先として認めるホストは、配布元の公式のホスト（`models/hosts.py` の `TRANSFER_HOSTS`）だけです。それ以外のホストへの転送と、HTTP への転送は拒みます（自動テスト `test_model_download.py`）。
+- 確かめる自動テスト: `test_network_guard.py`（見張り）、`test_sandbox.py`（OS の仕組み。実際に子のプロセスで、ソケットを作れないことを確かめる）、`test_conversion_worker.py`（変換の間に通信の試みがあると失敗にする）、`test_network_boundary.py`（外向きの通信を入手の部品だけに限る）。
+
+## 測定結果（2026-10-26）
+
+実機の翻訳モデル（FuguMT、固定した版）を、出荷するイメージのコンテナの中で変換して測りました。
+
+| 項目 | 測定値 | 方法 |
+|---|---|---|
+| イメージの増加（展開後） | **約 1.33GB**（変換用の環境 `/opt/conversion-venv` の層。`du` で 1,270MiB） | `docker history` の層の大きさ。変換の部品を入れる前のイメージ（アプリサーバーだけ）との差 |
+| イメージの増加（圧縮後） | 約 356MB（`docker save` の大きさが 50.2MB から 406.6MB へ） | 配る・取得するときの大きさの目安 |
+| 変換のメモリの最大値 | **約 625MB**（625.1・625.6・625.7MB の 3 回） | 変換プロセスが自分の常駐メモリの最大値（`ru_maxrss`）を結果に入れて返し、処理ログ `model_conversion_finished` の `peak_memory_mb` に出す |
+| 上限の仮置きとの比較 | 上限 1.5GB に対し、約 42% | |
+| 変換にかかる時間 | 約 13〜17 秒（`int8`） | 処理ログの `duration_ms` |
+| 変換後の大きさ | `model.bin` 61.6MB。ほかに `config.json`・`shared_vocabulary.json`・`source.spm`・`target.spm`（合計約 62MB） | 変換前の `pytorch_model.bin` は 121MB |
+| 変換が済んだあとの起動 | 変換も入手もしない（確認だけで準備完了。約 9 秒） | 変換後のファイルが控えと一致するとき |
+| 変換が済んだあとのプロセス | 変換プロセスは残らない（`ps` で、アプリサーバーだけ） | 変換の終了後に確認 |
+
+- イメージの増加の中身は、PyTorch が 769MB、transformers が 118MB、CTranslate2 が合わせて約 138MB（本体 63MB と同梱の部品 75MB）、sympy が 74MB、numpy が合わせて約 70MB です。増加の大半は PyTorch です。
+- 測定したのは、変換の部品を足した増加です。比較に使ったイメージ（変換の部品を入れる前）は、`docker history` で、層の構成が変換用の環境の層を除いて同じであることを確かめました。
+- アプリサーバーのメモリの上限（0.5GB）には影響しません。変換は別のプロセスで、終わると止まります。
+- 変換のメモリの最大値（約 625MB）は、変換だけを動かしたときの値です。変換中に、過去の会議の要約・質問を作る生成ワーカーが同時に動くときの合計は、メモリの配分（`nonfunctional.md`）に含まれています。測っていません。
+- 量子化の既定は `int8` のまま測りました。`float16` などとの比較は、していません（調整値 `translation_quantization` を変えれば、変換し直しになります）。
+
+### 実機で確かめたこと（出荷するイメージのコンテナ）
+
+| 確かめた内容 | 結果 |
+|---|---|
+| 入手済みの翻訳モデルから変換できる | 起動から約 45 秒（確認 26 秒、変換 17 秒）で準備完了になった |
+| 変換後のモデルを実行基盤で読み込んで、翻訳できる | 「This is a cat.」は「これは猫です。」、「The meeting will start in five minutes.」は「会議は5分で始まります。」、「Could you share your screen, please?」は「画面をシェアしていただけますか?」 |
+| 変換後の `model.bin` を 1 バイト変えて再起動する | 変換し直しになり、準備完了になった |
+| 変換の途中でコンテナを強制停止（`docker kill`）して再起動する | 控えが無く、残った `converted.tmp/` を捨てて、変換し直した |
+| 変換の間、準備状況が「変換中」になる | 進み具合は `null` |
