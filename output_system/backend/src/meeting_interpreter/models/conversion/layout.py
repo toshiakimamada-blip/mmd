@@ -30,6 +30,16 @@ RECEIPT_FILE_NAME: Final = "converted.receipt.json"
 # 定義のファイル名に使えない名前。モデルのフォルダーの中で、変換のために使う名前。
 RESERVED_NAMES: Final = frozenset({CONVERTED_DIR_NAME, WORK_DIR_NAME, RECEIPT_FILE_NAME})
 
+# 変換に要る、変換前のファイル（翻訳モデルの定義に、すべて書いてあること）。
+# 重み・構造・語彙・文字の分割。外すと変換できない（docs/models.md の「変換に要るファイル」）。
+CONVERSION_SOURCE_FILES: Final = frozenset(
+    {"pytorch_model.bin", "config.json", "vocab.json", "source.spm", "target.spm"}
+)
+
+# 変換前のフォルダーから、変換後のフォルダーへ複製するファイル。文字の分割は、翻訳の実行時にも要る。
+# 変換後のフォルダーだけで、翻訳に要るものがそろうようにする。
+CONVERSION_COPY_FILES: Final = ("source.spm", "target.spm")
+
 
 @dataclass(frozen=True, slots=True)
 class ConversionLayout:

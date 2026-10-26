@@ -54,8 +54,15 @@ class ModelFailure(Exception):
     （ログにも画面にも、種類とエラーコードだけを出す）。
     """
 
-    def __init__(self, kind: FailureKind) -> None:
+    def __init__(self, kind: FailureKind, *, exception_type: str | None = None) -> None:
+        """
+        Args:
+            kind: 失敗の原因の種類。
+            exception_type: 失敗のもとになった例外の種類（クラス名）。分かれば、エラーログに残す。
+                変換プロセスの中の失敗が、この形で届く。文面は渡さない。
+        """
         self.kind = kind
+        self.exception_type = exception_type
         super().__init__(kind.value)
 
 
