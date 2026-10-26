@@ -16,9 +16,16 @@
 （ModelStatusNotifier）だけを持つ。
 
 翻訳モデルの変換
-- 変換そのものは、翻訳モデルの変換を作る作業で足す。ここでは、変換を接続する口
-  （TranslationConversion）だけを定める。接続されていない間は、変換前のファイルが一致していても、準備完了にしない。
-  変換中のまま止め、準備状況の取得に conversion_implemented = false を出して、開発用に区別する。
+- 変換は、変換を接続する口（TranslationConversion）を通して行う。本番の実装は
+  conversion/service.py の TranslationConverter。
+- 入手と確認が済んだあと、変換後のファイルが控えと一致していれば（変換が済んでいれば）何もしない。
+  そうでなければ、入手済みのファイルから変換する（入手はやり直さない）。
+  3 つの AI モデルがそろい、変換が済んで初めて、準備完了にする。
+- 変換に失敗したら、入手失敗にする（原因: 翻訳モデルを変換できない。
+  ディスクの空き不足は、そのまま原因にする）。
+  入手のやり直しは、確認から流れをやり直す。変換前のファイルが一致していれば、入手せず変換だけやり直す。
+- 変換が接続されていない構成（自動テスト用）では、変換前のファイルが一致していても準備完了にせず、
+  変換中のまま止める。準備状況の取得の conversion_implemented = false で区別する。本番は常に true。
 
 実行
 - 入手と確認は、同期の処理（fetch.py）を別のスレッドで動かす。
@@ -120,14 +127,17 @@ class NullNotifier:
 
 
 class TranslationConversion(Protocol):
-    """翻訳モデルの変換との接続口。変換の実装は、翻訳モデルの変換を作る作業で足す。"""
+    """翻訳モデルの変換との接続口。実装は conversion/service.py の TranslationConverter。"""
 
     def is_complete(self) -> bool:
         """変換後のファイルが、変換後のハッシュ値の控えと一致するか（変換が済んでいるか）を返す。"""
         ...
 
-    async def convert(self) -> None:
-        """入手済みのファイルから変換する。失敗は ModelFailure で知らせる。"""
+    async def convert(self, cancel: threading.Event) -> None:
+        """入手済みのファイルから変換する。
+
+        失敗は ModelFailure、中止の合図（cancel）が立ったときは DownloadCancelled で知らせる。
+        """
         ...
 
 
@@ -236,7 +246,7 @@ class ModelManager:
             except DownloadCancelled:
                 return  # アプリの停止。失敗ではないため、準備状況は変えない。
             except ModelFailure as failure:
-                self._fail(failure.kind)
+                self._fail(failure.kind, exception_type=failure.exception_type)
             except Exception as error:  # noqa: BLE001 (入手の流れの想定外は、入手失敗として扱う)
                 # 例外の文面には、配布元の URL などが入りうる。種類と発生場所だけを残す。
                 _, location = describe_origin(error)
@@ -285,7 +295,7 @@ class ModelManager:
             self._set(self._make(ModelStatus.READY))
             return
         self._set(self._make(ModelStatus.CONVERTING))
-        await conversion.convert()
+        await conversion.convert(self._cancel)
         if not await asyncio.to_thread(conversion.is_complete):
             raise ModelFailure(FailureKind.UNKNOWN)  # 変換が終わったのに、確認を通らない。
         self._set(self._make(ModelStatus.READY))

@@ -5,6 +5,7 @@ import threading
 import meeting_interpreter.app as app_module
 from conftest import local_client
 from meeting_interpreter.app import create_app
+from meeting_interpreter.models.conversion.service import TranslationConverter
 from meeting_interpreter.models.download import HttpsDownloader
 from meeting_interpreter.models.manager import ModelManager, ModelStatus
 from model_fakes import FakeDownloader
@@ -77,7 +78,8 @@ class TestBuildModelManager:
         【テスト対象】build_model_manager
         【テスト内容】設定から、本番のモデル管理部を組み立てる（開始はしない）
         【期待結果】定義は設定の定義、置き場は設定のモデル置き場、入手の部品は HTTPS の入手の部品で
-                    あること。翻訳モデルの変換は接続されていない。組み立てただけでは、確認中のまま動かない
+                    あること。翻訳モデルの変換が接続され、変換に使う Python と量子化は設定のとおりで
+                    あること。組み立てただけでは、確認中のまま動かない
         """
         manager = _REAL_BUILD_MODEL_MANAGER(settings)
 
@@ -86,7 +88,11 @@ class TestBuildModelManager:
         assert manager.store.root == settings.models_dir
         assert isinstance(manager._fetcher._downloader, HttpsDownloader)  # noqa: SLF001
         assert manager.snapshot.status is ModelStatus.CHECKING
-        assert manager.snapshot.conversion_implemented is False
+        conversion = manager._conversion  # noqa: SLF001
+        assert isinstance(conversion, TranslationConverter)
+        assert conversion._python == settings.conversion_python  # noqa: SLF001
+        assert conversion._quantization == settings.tuning.translation_quantization  # noqa: SLF001
+        assert manager.snapshot.conversion_implemented is True
 
     def test_should_use_a_manager_that_does_not_run_in_other_tests(self, settings):
         """

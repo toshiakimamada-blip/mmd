@@ -12,6 +12,7 @@ import pytest
 
 from conftest import REPO_CONFIG_DIR
 from meeting_interpreter.config_error import ConfigError
+from meeting_interpreter.models.conversion.layout import CONVERSION_SOURCE_FILES
 from meeting_interpreter.models.definition import (
     MODELS_FILE_NAME,
     ModelCatalog,
@@ -21,6 +22,11 @@ from meeting_interpreter.models.definition import (
 
 _SHA256 = "a" * 64
 _REVISION = "b" * 40
+
+
+def _file(name: str) -> dict[str, object]:
+    """テスト用の、検証を通るファイル 1 つ分の定義（辞書）を作る。"""
+    return {"name": name, "size_bytes": 10, "sha256": _SHA256}
 
 
 def _model(role: str, name: str, **overrides: object) -> dict[str, object]:
@@ -44,7 +50,13 @@ def _valid_models() -> list[dict[str, object]]:
     """3 つの役割（文字起こし・翻訳・文章生成）を 1 つずつ持つ、検証を通る定義を作る。"""
     return [
         _model("transcription", "asr-model"),
-        _model("translation", "mt-model", license="CC BY-SA 4.0"),
+        _model(
+            "translation",
+            "mt-model",
+            license="CC BY-SA 4.0",
+            # 翻訳モデルは、変換に要る 5 つのファイルを持つ（持たない定義は、読み込みで断る）。
+            files=[_file(name) for name in sorted(CONVERSION_SOURCE_FILES)],
+        ),
         _model("generation", "llm-model", license="Apache 2.0"),
     ]
 
@@ -184,12 +196,13 @@ class TestModelCatalogValues:
     def test_should_sum_the_sizes_of_all_files(self, tmp_path):
         """
         【テスト対象】ModelCatalog.total_bytes
-        【テスト内容】3 つのモデルがそれぞれ 10 バイトのファイルを 1 つずつ持つ定義を読む
-        【期待結果】全体の大きさが 30 バイトになること
+        【テスト内容】文字起こしと文章生成が 10 バイトのファイルを 1 つずつ、翻訳が 5 つ持つ
+                      定義を読む
+        【期待結果】全体の大きさが 70 バイトになること
         """
         catalog = _load(tmp_path, _render(_valid_models()))
 
-        assert catalog.total_bytes == 30
+        assert catalog.total_bytes == 70
 
 
 class TestModelCatalogValidation:
@@ -450,6 +463,49 @@ class TestModelCatalogValidation:
         message = _problems(tmp_path, _render(models))
 
         assert "generation" in message
+
+    @pytest.mark.parametrize("missing", sorted(CONVERSION_SOURCE_FILES))
+    def test_should_reject_a_translation_model_without_a_file_needed_for_conversion(
+        self, tmp_path, missing
+    ):
+        """
+        【テスト対象】load_model_catalog（翻訳モデルの変換に要るファイル）
+        【テスト内容】翻訳モデルの定義から、変換に要る 5 つのファイルのうち 1 つを外して読む
+        【期待結果】足りないファイルの名前を含む誤りになること（変換の段で初めて気づくのを避ける）
+        入力例: pytorch_model.bin・config.json・vocab.json・source.spm・target.spm のそれぞれ
+        """
+        models = _valid_models()
+        models[1]["files"] = [_file(n) for n in sorted(CONVERSION_SOURCE_FILES) if n != missing]
+
+        message = _problems(tmp_path, _render(models))
+
+        assert missing in message
+        assert "変換" in message
+
+    def test_should_return_the_translation_model_from_the_catalog(self, tmp_path):
+        """
+        【テスト対象】ModelCatalog.translation_model
+        【テスト内容】3 つの役割を持つ定義から、翻訳モデルを引く
+        【期待結果】役割が翻訳の定義が返ること
+        """
+        catalog = _load(tmp_path, _render(_valid_models()))
+
+        assert catalog.translation_model.name == "mt-model"
+        assert catalog.translation_model.role is ModelRole.TRANSLATION
+
+    def test_should_bundle_a_translation_model_that_has_every_file_needed_for_conversion(self):
+        """
+        【テスト対象】同梱の models.toml
+        【テスト内容】同梱の定義を読み、翻訳モデルのファイルを調べる
+        【期待結果】変換に要る 5 つのファイルを、すべて持つこと
+        """
+        problems: list[str] = []
+        catalog = load_model_catalog(REPO_CONFIG_DIR / MODELS_FILE_NAME, problems)
+
+        assert problems == []
+        assert catalog is not None
+        names = {file.name for file in catalog.translation_model.files}
+        assert CONVERSION_SOURCE_FILES <= names
 
     def test_should_reject_an_unknown_role(self, tmp_path):
         """

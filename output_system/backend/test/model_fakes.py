@@ -156,7 +156,7 @@ class FakeConversion:
     def is_complete(self) -> bool:
         return self.complete
 
-    async def convert(self) -> None:
+    async def convert(self, cancel: threading.Event) -> None:
         self.converted += 1
         if self.error is not None:
             raise self.error

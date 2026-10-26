@@ -24,7 +24,7 @@ from pathlib import Path
 from typing import Any, Final
 from urllib.parse import urlsplit
 
-from .conversion.layout import RESERVED_NAMES
+from .conversion.layout import CONVERSION_SOURCE_FILES, RESERVED_NAMES
 from .hosts import SOURCE_HOSTS, host_matches
 
 # AI モデルの定義のファイルの名前。置き場は MMD_CONFIG_DIR。
@@ -122,6 +122,18 @@ class ModelCatalog:
     def total_bytes(self) -> int:
         """すべてのファイルの大きさの合計（バイト）。"""
         return sum(model.total_bytes for model in self.models)
+
+    @property
+    def translation_model(self) -> ModelDefinition:
+        """翻訳モデルの定義（変換の対象）。役割ごとに 1 つ（読み込みで検証済み）。
+
+        Raises:
+            LookupError: 翻訳モデルが無いとき。読み込みを通った定義では起きない。
+        """
+        for model in self.models:
+            if model.role is ModelRole.TRANSLATION:
+                return model
+        raise LookupError("翻訳モデルの定義がありません")
 
 
 def load_model_catalog(path: Path, problems: list[str]) -> ModelCatalog | None:
@@ -441,6 +453,8 @@ def _check_catalog(
     counts: dict[ModelRole, int] = {role: 0 for role in ModelRole}
     for model in models:
         counts[model.role] += 1
+        if model.role is ModelRole.TRANSLATION:
+            _check_conversion_files(model, problems)
     for role, count in counts.items():
         if count == 0 and not _has_unreadable_model(raw_models, models):
             problems.append(f"{MODELS_FILE_NAME} に、役割 {role.value} の AI モデルがありません")
@@ -449,6 +463,19 @@ def _check_catalog(
                 f"{MODELS_FILE_NAME} で、役割 {role.value} の AI モデルが {count} 個重なっています"
                 "（役割ごとに 1 つです）"
             )
+
+
+def _check_conversion_files(model: ModelDefinition, problems: list[str]) -> None:
+    """翻訳モデルの定義に、変換に要るファイルがそろっているかを調べる。
+
+    足りないと、変換の段（準備の最後）で初めて失敗する。起動の時点で止めて、気づけるようにする。
+    """
+    missing = sorted(CONVERSION_SOURCE_FILES - {file.name for file in model.files})
+    if missing:
+        problems.append(
+            f"{MODELS_FILE_NAME} の models の {model.name} に、翻訳モデルの変換に要るファイルが"
+            f"ありません: {'・'.join(missing)}"
+        )
 
 
 def _has_unreadable_model(raw_models: list[object], models: list[ModelDefinition]) -> bool:

@@ -48,7 +48,8 @@ class ModelStatusResponse(BaseModel):
     )
     # 入手失敗のエラーコード（MODEL_*）。画面は、このコードから文言を引く。
     error_code: str | None
-    # 翻訳モデルの変換が接続されているか。false の間は、準備完了にならない（開発用の区別）。
+    # 翻訳モデルの変換が接続されているか。false の構成は準備完了にならない。
+    # 自動テスト用の区別で、本番は true。
     conversion_implemented: bool
 
 
