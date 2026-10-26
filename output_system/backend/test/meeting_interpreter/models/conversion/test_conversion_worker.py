@@ -363,6 +363,40 @@ class TestNetworkPolicy:
         assert result.network_attempts == 1
 
 
+class TestWithoutTheSandbox:
+    """OS の仕組みでネットワークを断てないときは、変換しない。"""
+
+    def test_should_not_convert_when_the_network_cannot_be_cut(
+        self, tiny_translation_model, tmp_path
+    ):
+        """
+        【テスト対象】worker.main（OS の仕組みを入れられない）
+        【テスト内容】知らない機械（riscv64）の環境にした新しいプロセスで、変換の入口を呼ぶ
+        【期待結果】変換の失敗（conversion_failed）で、例外の種類は SandboxUnavailable
+                    （モジュール名つき）。出力のフォルダーは作られないこと（ネットワークを断てないまま、
+                    第三者の部品を動かさない）
+        """
+        output = tmp_path / "converted"
+        code = (
+            "import platform, sys\n"
+            "platform.machine = lambda: 'riscv64'\n"
+            "from meeting_interpreter.models.conversion import worker\n"
+            f"sys.exit(worker.main({_command(tiny_translation_model, output)[5:]!r}))\n"
+        )
+
+        outcome = run_child_process(
+            [sys.executable, "-P", "-c", code], env_extra={"PYTHONPATH": str(SOURCE_ROOT)}
+        )
+        result = decode_result(outcome.stdout)
+
+        assert outcome.returncode == 1
+        assert result is not None and result.ok is False
+        assert result.failure_kind is FailureKind.CONVERSION_FAILED
+        assert result.exception_type is not None
+        assert result.exception_type.endswith(".SandboxUnavailable")
+        assert not output.exists()
+
+
 class TestGuardsInAFreshProcess:
     """仕組みが、新しいプロセスでも働くこと（テストの差し替えに頼らない確認）。"""
 

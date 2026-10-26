@@ -6,8 +6,8 @@
 #   certs          社内の証明書の受け口（既定は空）
 #   base           ubuntu:24.04 に、社内の証明書を任意で登録した共通の土台
 #   frontend-build 画面をビルドする段（Node.js を入れる。最終のイメージには残さない）
-#   backend-build  サーバーの依存を入れる段（uv を入れる。最終のイメージには残さない）
-#   runtime        実行する段（Python と、ビルド済みの依存・画面だけを持つ）
+#   backend-build  サーバーの依存と、翻訳モデルの変換の部品を入れる段（uv を入れる。最終のイメージには残さない）
+#   runtime        実行する段（Python と、ビルド済みの依存・変換の部品・画面だけを持つ）
 #
 # ビルドの文脈は output_system/ にする。
 #   docker compose build
@@ -139,6 +139,15 @@ WORKDIR /build
 COPY backend/pyproject.toml backend/uv.lock backend/.python-version ./
 RUN /opt/uv-venv/bin/uv sync --locked --no-default-groups --no-install-project
 
+# 翻訳モデルの変換の部品（PyTorch の CPU 版、transformers、CTranslate2、SentencePiece）を、別の環境へ入れる。
+# 変換は、変換の間だけ動く別のプロセスが、この環境の Python で行う（MMD_CONVERSION_PYTHON が指す）。
+# アプリサーバーの環境と分けるのは、サーバーが PyTorch を取り込めてしまわないようにするため。
+# --only-group conversion: この依存グループだけを入れる（アプリサーバーの依存は、上の環境にある）。
+# PyTorch は、uv.lock が CPU 版の配布元（https://download.pytorch.org/whl/cpu）の wheel に固定している。
+#   ビルドには、この配布元へ HTTPS でつなげることが要る。
+RUN UV_PROJECT_ENVIRONMENT=/opt/conversion-venv \
+    /opt/uv-venv/bin/uv sync --locked --no-default-groups --only-group conversion --no-install-project
+
 # ---------------------------------------------------------------------------
 # 実行する段。
 # ---------------------------------------------------------------------------
@@ -158,6 +167,8 @@ RUN groupadd --system --gid 10001 app \
     && chown app:app /var/lib/mmd/records /var/lib/mmd/models
 
 COPY --from=backend-build /opt/venv /opt/venv
+# 翻訳モデルの変換の部品。アプリサーバーは取り込まない。変換プロセスだけがこの環境の Python で動く。
+COPY --from=backend-build /opt/conversion-venv /opt/conversion-venv
 COPY backend/src /app/src
 # アプリに同梱する設定ファイル（調整値と AI モデルの定義）。置き場は MMD_CONFIG_DIR。
 COPY config /app/config
@@ -170,6 +181,7 @@ COPY --from=frontend-build /build/dist /app/static
 #   社内のネットワークの証明書は、base の段で、この保管先に登録済み。certifi の証明書の一覧は使わず、
 #   書き換えもしない。Python の TLS の文脈（ssl.create_default_context）は、この 2 つを読む。
 # MMD_*: 動かす場所で変わる値の既定。docker-compose.yml の environment で上書きできる。
+# MMD_CONVERSION_PYTHON: 翻訳モデルの変換プロセスを動かす Python（変換の部品を入れた環境のもの）。
 ENV PATH=/opt/venv/bin:${PATH} \
     PYTHONPATH=/app/src \
     PYTHONDONTWRITEBYTECODE=1 \
@@ -180,7 +192,8 @@ ENV PATH=/opt/venv/bin:${PATH} \
     MMD_STATIC_DIR=/app/static \
     MMD_CONFIG_DIR=/app/config \
     MMD_RECORDS_DIR=/var/lib/mmd/records \
-    MMD_MODELS_DIR=/var/lib/mmd/models
+    MMD_MODELS_DIR=/var/lib/mmd/models \
+    MMD_CONVERSION_PYTHON=/opt/conversion-venv/bin/python
 
 USER app
 WORKDIR /app

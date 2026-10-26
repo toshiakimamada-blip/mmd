@@ -327,6 +327,21 @@ class TestModelCatalogValidation:
         assert "repository_url" in message
         assert "huggingface.co" in message
 
+    @pytest.mark.parametrize("name", ["converted", "converted.tmp", "converted.receipt.json"])
+    def test_should_reject_a_file_name_used_for_the_converted_model(self, tmp_path, name):
+        """
+        【テスト対象】load_model_catalog（変換のために使う名前）
+        【テスト内容】変換後のフォルダー・作業用のフォルダー・控えと同じ名前のファイルを定義する
+        【期待結果】誤りになること。入手したファイルと、変換の結果が、同じ名前で混ざらない
+        """
+        models = _valid_models()
+        models[1]["files"] = [{"name": name, "size_bytes": 10, "sha256": _SHA256}]
+
+        message = _problems(tmp_path, _render(models))
+
+        assert name in message
+        assert "変換" in message
+
     @pytest.mark.parametrize(
         "name",
         [

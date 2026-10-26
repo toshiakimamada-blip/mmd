@@ -24,6 +24,7 @@ from pathlib import Path
 from typing import Any, Final
 from urllib.parse import urlsplit
 
+from .conversion.layout import RESERVED_NAMES
 from .hosts import SOURCE_HOSTS, host_matches
 
 # AI モデルの定義のファイルの名前。置き場は MMD_CONFIG_DIR。
@@ -400,6 +401,12 @@ def _parse_file_name(raw: Mapping[str, Any], label: str, problems: list[str]) ->
         problems,
         "モデルのフォルダー直下の 1 つの名前（英数字と . _ -）",
     )
+    if name is not None and name in RESERVED_NAMES:
+        problems.append(
+            f"{MODELS_FILE_NAME} の {label} の name は {name!r} にできません"
+            "（翻訳モデルの変換後のファイル・作業用のフォルダー・控えの名前と重なるため）"
+        )
+        return None
     if name is not None and name.endswith(PARTIAL_SUFFIX):
         problems.append(
             f"{MODELS_FILE_NAME} の {label} の name は {PARTIAL_SUFFIX} で終われません"

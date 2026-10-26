@@ -3,6 +3,7 @@
 変換プロセスは、第三者の部品（PyTorch・transformers・CTranslate2・huggingface_hub など）を動かす。
 部品が環境変数（HF_HUB_OFFLINE など）に従うとは限らない。そこで、プロセスの中で次を拒む。
 
+- IPv4 / IPv6 のソケットを作ること。作るだけでも、外へ出るための準備のため
 - IPv4 / IPv6 のソケットの接続（connect・connect_ex）と、接続しない送信（sendto・sendmsg）
 - 名前の解決（getaddrinfo・gethostbyname など）。名前を問い合わせるだけでも、外へ情報が出る
 
@@ -122,6 +123,8 @@ def install() -> NetworkGuard:
         return _active
     guard = NetworkGuard()
 
+    # ソケットを作ること。
+    guard._patch(socket.socket, "__init__", _guarded_init(guard))
     # 接続と、接続しない送信。
     guard._patch(socket.socket, "connect", _guarded_method(guard, "connect"))
     guard._patch(
@@ -139,6 +142,33 @@ def install() -> NetworkGuard:
     guard._patch(socket, "create_connection", _resolver(guard, "create_connection"))
     _active = guard
     return guard
+
+
+def _guarded_init(guard: NetworkGuard) -> Callable[..., None]:
+    """socket.socket の初期化を包む。IPv4 / IPv6 のソケットを作らせない。
+
+    family を指定した作り方は、作る前に拒む。fileno だけを指定した作り方
+    （family はファイル記述子から決まる）は、作ったあとに family を見て、
+    IPv4 / IPv6 なら閉じて拒む。
+    """
+    original = socket.socket.__init__
+
+    def guarded(
+        self: socket.socket,
+        family: int = -1,
+        type: int = -1,  # noqa: A002 (socket.socket の引数の名前)
+        proto: int = -1,
+        fileno: int | None = None,
+    ) -> None:
+        if family in _INET_FAMILIES:
+            raise guard.record("socket")
+        original(self, family, type, proto, fileno)
+        if self.family in _INET_FAMILIES:
+            self.close()
+            raise guard.record("socket")
+
+    guarded.__name__ = "__init__"
+    return guarded
 
 
 def _resolver(guard: NetworkGuard, name: str) -> Callable[..., Any]:

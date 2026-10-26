@@ -5,7 +5,9 @@
 モデル置き場への移動や、変換後のハッシュ値の控えは、アプリサーバー側が行う（process.py・service.py）。
 
 このプロセスは、第三者の部品（PyTorch・transformers・CTranslate2）を動かす。次の備えがある。
-- 外への通信を拒む（network_guard.py と sandbox.py）。試みがあれば、変換が済んでいても失敗にする
+- 外への通信を拒む。OS の仕組みで、IPv4 / IPv6 のソケットを作れなくし（sandbox.py）、
+  Python の中でも、接続と名前の解決を拒んで数える（network_guard.py）。
+  試みがあれば、変換が済んでいても失敗にする。OS の仕組みを入れられないときは、変換しない
 - pickle 形式の重みを、安全な読み込み（weights_only=True）だけで読む（safe_torch.py）
 - 親のプロセス（アプリサーバー）が消えたら、自分も終わる（start_parent_watchdog）
 - 結果の行以外の標準出力は、標準エラーへ流す（部品の出力が、結果の行に混ざらない）
@@ -30,7 +32,7 @@ from typing import Final, TextIO
 
 from ...tuning import TRANSLATION_QUANTIZATIONS
 from ..failure import FailureKind
-from . import network_guard
+from . import network_guard, sandbox
 from .network_guard import NetworkGuard
 from .protocol import (
     EXIT_FAILED,
@@ -307,12 +309,28 @@ def take_over_standard_output() -> TextIO:
 
 
 def main(argv: Sequence[str] | None = None) -> int:
-    """変換プロセスの入口。結果を 1 行書いて、終了コードを返す。"""
+    """変換プロセスの入口。結果を 1 行書いて、終了コードを返す。
+
+    順序は次のとおり。
+    引数の検証、標準出力の確保、OS の仕組みでネットワークを断つ、
+    見張りと Python の中の仕組み、変換。
+    OS の仕組みは、変換の部品を取り込むより前、ほかのスレッドを起こすより前に入れる
+    （入れたあとに起きるスレッドと子のプロセスに、引き継がれる）。
+    """
     arguments = parse_arguments(argv)
     result_stream = take_over_standard_output()
-    start_parent_watchdog()
-    guard = network_guard.install()
-    result = run(arguments, guard)
+    try:
+        sandbox.install()
+    except sandbox.SandboxUnavailable as error:
+        # ネットワークを断てないまま、第三者の部品を動かさない。
+        result = ConversionResult(
+            ok=False,
+            failure_kind=FailureKind.CONVERSION_FAILED,
+            exception_type=exception_type_name(error),
+        )
+    else:
+        start_parent_watchdog()
+        result = run(arguments, network_guard.install())
     with result_stream:
         result_stream.write(encode_result(result) + "\n")
         result_stream.flush()

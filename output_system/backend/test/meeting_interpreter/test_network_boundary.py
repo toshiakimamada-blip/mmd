@@ -61,6 +61,9 @@ NETWORK_MODULES = (
     # AI モデルの配布元から自動で入手する部品。入手は自前の入手の部品だけで行う。
     "huggingface_hub",
     "hf_xet",
+    # C のライブラリを直接呼べる部品。socket や connect を、Python の部品を通さずに呼べてしまう。
+    "ctypes",
+    "cffi",
 )
 
 # 呼び出すだけで外へ接続できる関数の名前。部品を取り込まなくても（asyncio などから）呼べるもの。
@@ -115,6 +118,10 @@ NETWORK_ALLOWED: dict[str, frozenset[str] | None] = {
     # socket の関数を拒むものに差し替えるために socket を取り込む。
     # 接続を作る呼び出しは、ここでも違反になる。
     "models/conversion/network_guard.py": frozenset({"socket"}),
+    # 変換プロセスのネットワークを、OS の仕組み（seccomp）で断つ。
+    # prctl を呼ぶために ctypes を取り込む。
+    # 通信はしない（ソケットを作る呼び出しを、カーネルが拒むようにするためのもの）。
+    "models/conversion/sandbox.py": frozenset({"ctypes"}),
 }
 
 # プロセスの起動を行ってよいモジュール。
@@ -397,8 +404,8 @@ class TestSourceTree:
         【テスト対象】アプリのソースコード全体
         【テスト内容】通信の部品を取り込んでいるモジュールを、すべて集める
         【期待結果】入手の部品（models/download.py）と、同じコンテナの中への死活の確認
-                    （healthcheck.py）と、変換プロセスの中で通信を拒む仕組み
-                    （models/conversion/network_guard.py）だけであること
+                    （healthcheck.py）と、変換プロセスの通信を拒む 2 つの仕組み
+                    （models/conversion/network_guard.py・sandbox.py）だけであること
         """
         importing = {
             path
@@ -413,6 +420,7 @@ class TestSourceTree:
             "models/download.py",
             "healthcheck.py",
             "models/conversion/network_guard.py",
+            "models/conversion/sandbox.py",
         }
 
     def test_should_keep_the_health_check_on_the_loopback_address(self):

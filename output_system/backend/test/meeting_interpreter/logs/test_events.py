@@ -70,6 +70,33 @@ class TestProcessingLog:
             "char_count": 64,
         }
 
+    def test_should_write_the_peak_memory_of_a_process_when_given(self, capsys):
+        """
+        【テスト対象】log_processing（プロセスのメモリの最大値）
+        【テスト内容】翻訳モデルの変換が済んだ時点の処理ログに、変換プロセスのメモリの最大値（MB）を渡す
+        【期待結果】peak_memory_mb として出ること。渡さないときは、項目ごと出ない
+                    （基本設計書が、プロセスごとのメモリの使用量を処理ログへ記録すると定めている）
+        """
+        log_processing("model_conversion_finished", duration_ms=9000, peak_memory_mb=512.25)
+        log_processing("app_started")
+
+        first, second = read_lines(capsys)
+        assert first["peak_memory_mb"] == 512.25
+        assert "peak_memory_mb" not in second
+
+    @pytest.mark.parametrize("bad", [-1, float("nan"), float("inf"), True, "512", [1]])
+    def test_should_drop_an_invalid_peak_memory(self, capsys, bad):
+        """
+        【テスト対象】log_processing（メモリの最大値の検証）
+        【テスト内容】負の数・NaN・無限大・真偽値・文字列・リストを渡す
+        【期待結果】出力されず、捨てた数に数えられること
+        """
+        log_processing("model_conversion_finished", peak_memory_mb=bad)
+
+        (entry,) = read_lines(capsys)
+        assert "peak_memory_mb" not in entry
+        assert entry["dropped_field_count"] == 1
+
     def test_should_always_include_the_required_items_as_null_when_not_given(self, capsys):
         """
         【テスト対象】log_processing（項目を渡さないとき）

@@ -7,6 +7,7 @@
 """
 
 import errno
+import os
 import socket
 import threading
 from collections.abc import Iterator
@@ -28,6 +29,26 @@ def guard() -> Iterator[NetworkGuard]:
         yield installed
     finally:
         installed.uninstall()
+
+
+@pytest.fixture
+def inet_client() -> Iterator[socket.socket]:
+    """IPv4 のソケット。仕組みを入れる前に作る（入れたあとは、IPv4 のソケットを作れない）。"""
+    client = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    try:
+        yield client
+    finally:
+        client.close()
+
+
+@pytest.fixture
+def udp_sender() -> Iterator[socket.socket]:
+    """UDP のソケット。仕組みを入れる前に作る。"""
+    sender = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    try:
+        yield sender
+    finally:
+        sender.close()
 
 
 @pytest.fixture
@@ -56,7 +77,7 @@ def _nothing_arrived(server: socket.socket) -> bool:
 class TestBlockedCommunication:
     """外への接続と名前の解決は、拒まれ、数えられる。"""
 
-    def test_should_block_and_count_a_tcp_connection(self, guard, listener):
+    def test_should_block_and_count_a_tcp_connection(self, listener, guard):
         """
         【テスト対象】network_guard（TCP の接続）
         【テスト内容】手元で待ち受けるソケットへ、socket.create_connection で接続しようとする
@@ -71,53 +92,78 @@ class TestBlockedCommunication:
         assert guard.attempts >= 1
         assert _nothing_arrived(listener)
 
-    def test_should_block_connect_on_an_inet_socket(self, guard, listener):
+    def test_should_block_connect_on_an_inet_socket(self, listener, inet_client, guard):
         """
         【テスト対象】network_guard（ソケットの connect）
         【テスト内容】IPv4 のソケットで、直接 connect する
         【期待結果】ExternalCommunicationBlocked になること。OSError の一種で、
                     ネットワークに届かない（ENETUNREACH）として、部品が失敗として扱える
         """
-        client = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         self_error: OSError | None = None
         try:
-            client.connect(("127.0.0.1", listener.getsockname()[1]))
+            inet_client.connect(("127.0.0.1", listener.getsockname()[1]))
         except OSError as error:
             self_error = error
-        finally:
-            client.close()
 
         assert isinstance(self_error, ExternalCommunicationBlocked)
         assert self_error.errno == errno.ENETUNREACH
         assert guard.attempts == 1
         assert _nothing_arrived(listener)
 
-    def test_should_return_an_error_number_from_connect_ex(self, guard, listener):
+    def test_should_return_an_error_number_from_connect_ex(self, listener, inet_client, guard):
         """
         【テスト対象】network_guard（ソケットの connect_ex）
         【テスト内容】connect_ex で接続しようとする
         【期待結果】例外にならず、エラー番号 ENETUNREACH を返すこと（connect_ex の決まり）。
                     試みは数えられる
         """
-        client = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        try:
-            code = client.connect_ex(("127.0.0.1", listener.getsockname()[1]))
-        finally:
-            client.close()
+        code = inet_client.connect_ex(("127.0.0.1", listener.getsockname()[1]))
 
         assert code == errno.ENETUNREACH
         assert guard.attempts == 1
         assert _nothing_arrived(listener)
 
-    def test_should_block_a_datagram_sent_without_connecting(self, guard):
+    def test_should_block_a_datagram_sent_without_connecting(self, udp_sender, guard):
         """
         【テスト対象】network_guard（UDP の sendto）
         【テスト内容】接続せずに、UDP のソケットで sendto する
         【期待結果】ExternalCommunicationBlocked になり、試みが数えられること
         """
-        with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as sender:
-            with pytest.raises(ExternalCommunicationBlocked):
-                sender.sendto(b"x", ("127.0.0.1", 9))
+        with pytest.raises(ExternalCommunicationBlocked):
+            udp_sender.sendto(b"x", ("127.0.0.1", 9))
+
+        assert guard.attempts == 1
+
+    @pytest.mark.parametrize(
+        ("family", "kind"),
+        [
+            (socket.AF_INET, socket.SOCK_STREAM),
+            (socket.AF_INET6, socket.SOCK_STREAM),
+            (socket.AF_INET, socket.SOCK_DGRAM),
+        ],
+        ids=["tcp4", "tcp6", "udp4"],
+    )
+    def test_should_block_creating_a_socket_that_can_leave_the_computer(self, guard, family, kind):
+        """
+        【テスト対象】network_guard（ソケットを作ること）
+        【テスト内容】IPv4・IPv6 のソケットを作ろうとする
+        【期待結果】ExternalCommunicationBlocked になり、試みが数えられること
+                    （接続の前に止める。作るだけでも、外へ出るための準備のため）
+        """
+        with pytest.raises(ExternalCommunicationBlocked):
+            socket.socket(family, kind)
+
+        assert guard.attempts == 1
+
+    def test_should_block_wrapping_an_existing_inet_file_descriptor(self, inet_client, guard):
+        """
+        【テスト対象】network_guard（既存のファイル記述子からのソケット）
+        【テスト内容】IPv4 のソケットのファイル記述子を、fileno 指定で新しいソケットとして包む
+        【期待結果】ExternalCommunicationBlocked になり、試みが数えられること
+                    （family を指定せずに作る形でも、IPv4 のソケットは通さない）
+        """
+        with pytest.raises(ExternalCommunicationBlocked):
+            socket.socket(fileno=os.dup(inet_client.fileno()))
 
         assert guard.attempts == 1
 
@@ -144,7 +190,7 @@ class TestBlockedCommunication:
 
         assert guard.attempts == 1
 
-    def test_should_block_an_http_request_made_by_the_standard_library(self, guard, listener):
+    def test_should_block_an_http_request_made_by_the_standard_library(self, listener, guard):
         """
         【テスト対象】network_guard（標準ライブラリの HTTP クライアント）
         【テスト内容】urllib で、手元の待ち受けへ HTTP の要求を送る

@@ -131,6 +131,9 @@ PROCESSING_LOG: Final = LogKind(
         FieldSpec("duration_ms", non_negative_number, always=True),
         FieldSpec("item_count", non_negative_int, always=True),
         FieldSpec("char_count", non_negative_int, always=True),
+        # プロセスのメモリの最大値（MB）。翻訳モデルの変換が済んだ時点などで出す。
+        # 必ず含める項目ではない（出す契機のときだけ付く）。
+        FieldSpec("peak_memory_mb", non_negative_number),
     ),
 )
 

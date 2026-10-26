@@ -96,6 +96,7 @@ def log_processing(
     duration_ms: float | None = None,
     item_count: int | None = None,
     char_count: int | None = None,
+    peak_memory_mb: float | None = None,
     **not_allowed: object,
 ) -> None:
     """処理ログを出す（情報のレベル）。
@@ -107,6 +108,7 @@ def log_processing(
         duration_ms: かかった時間（ミリ秒）。
         item_count: 件数。
         char_count: 文字数。文字数だけを渡し、文字そのものは渡さない。
+        peak_memory_mb: プロセスのメモリの最大値（MB）。無ければ省略する（項目ごと出ない）。
         **not_allowed: 許可リストに無い項目。渡しても出力されない（捨てる）。
             本文やタイトルなどを渡す誤りが、ログに現れないようにする仕組みの受け口。
     """
@@ -121,6 +123,7 @@ def log_processing(
             "duration_ms": duration_ms,
             "item_count": item_count,
             "char_count": char_count,
+            "peak_memory_mb": peak_memory_mb,
         },
     )
 
