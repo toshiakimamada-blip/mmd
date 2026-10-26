@@ -5,6 +5,7 @@
 本物の変換プロセスを通す確認も 1 つ含める。
 """
 
+import os
 import stat
 import sys
 import threading
@@ -42,6 +43,25 @@ def _job(tmp_path: Path, **overrides: object) -> ConversionJob:
     }
     values.update(overrides)
     return ConversionJob(**values)  # type: ignore[arg-type]
+
+
+def _processes_mentioning(text: str) -> list[int]:
+    """コマンドラインに text を含む、いま動いているプロセスの番号を返す（このテスト自身は除く）。
+
+    変換プロセスは、出力のフォルダーをコマンドラインで受け取る。一時のフォルダーは
+    テストごとに一意のため、その名前で、自分が起動した変換プロセスだけを探せる。
+    """
+    found: list[int] = []
+    for entry in Path("/proc").iterdir():
+        if not entry.name.isdigit() or int(entry.name) == os.getpid():
+            continue
+        try:
+            command = (entry / "cmdline").read_bytes().decode("utf-8", errors="replace")
+        except OSError:
+            continue  # 探している間に終わったプロセス
+        if text in command:
+            found.append(int(entry.name))
+    return found
 
 
 def _ok_line(**overrides: object) -> str:
@@ -292,3 +312,52 @@ class TestWithTheRealWorker:
         assert (job.output_dir / "model.bin").is_file()
         assert result.peak_rss_bytes and result.peak_rss_bytes > 0
         assert "ctranslate2" in result.versions
+
+    def test_should_leave_no_process_after_a_successful_conversion(
+        self, tiny_translation_model, tmp_path
+    ):
+        """
+        【テスト対象】run_conversion_process（変換のあとのプロセス。受入条件 4）
+        【テスト内容】本物の変換プロセスで変換し、戻った直後に、プロセスの有無を調べる
+        【期待結果】この変換のために起動したプロセスが、1 つも残っていないこと
+                    （止まると、変換で使ったメモリが戻る）
+        """
+        job = _job(tmp_path, source_dir=tiny_translation_model)
+
+        result = run_conversion_process(Path(sys.executable), job)
+
+        assert result.ok is True, result
+        assert _processes_mentioning(str(job.output_dir)) == []
+
+    def test_should_leave_no_process_after_a_failed_conversion(self, tmp_path):
+        """
+        【テスト対象】run_conversion_process（失敗のあとのプロセス。受入条件 4）
+        【テスト内容】変換前のフォルダーが無い（変換に失敗する）状態で、本物の変換プロセスを動かし、
+                      戻った直後に、プロセスの有無を調べる
+        【期待結果】失敗の結果が返り、この変換のために起動したプロセスが、1 つも残っていないこと
+        """
+        job = _job(tmp_path, source_dir=tmp_path / "does-not-exist")
+
+        result = run_conversion_process(Path(sys.executable), job)
+
+        assert result.ok is False
+        assert result.failure_kind is FailureKind.CONVERSION_FAILED
+        assert _processes_mentioning(str(job.output_dir)) == []
+
+    def test_should_find_a_running_process_by_its_command_line(self, tmp_path):
+        """
+        【テスト対象】_processes_mentioning（プロセスの有無の確認の道具）
+        【テスト内容】印をコマンドラインに持つプロセスを動かしている間と、止めたあとに探す
+        【期待結果】動いている間は見つかり、止めたあとは見つからないこと
+                    （上のテストが、見つけられない道具で通ってしまうのを防ぐ）
+        """
+        import subprocess
+
+        mark = str(tmp_path / "mark-for-process-search")
+        process = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(30)", mark])
+        try:
+            assert _processes_mentioning(mark) == [process.pid]
+        finally:
+            process.kill()
+            process.wait()
+        assert _processes_mentioning(mark) == []
