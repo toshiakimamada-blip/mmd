@@ -113,11 +113,12 @@ print(target.decode(result[0].hypotheses[0]))                        # これは
 |---|---|---|
 | 環境変数 | `HF_HUB_OFFLINE`・`TRANSFORMERS_OFFLINE`・`HF_DATASETS_OFFLINE`・`HF_HUB_DISABLE_TELEMETRY`・`DO_NOT_TRACK`・`LLAMA_ARG_OFFLINE` を、起動の入口（`child_process.py`）が必ず付ける | 従う部品の自動入手と利用状況の送信 |
 | Python の中の見張り | `socket.socket` の作成・接続・送信と、名前の解決を拒み、試みを数える（`network_guard.py`）。試みがあれば、変換が済んでいても失敗にする | Python の `socket` を使う通信 |
-| OS の仕組み（seccomp） | IPv4 / IPv6 などのソケットを作る呼び出しを、カーネルが拒む（`sandbox.py`）。管理者の権限は要らず、起動した子のプロセスにも効き、外せない | C や Rust の拡張が、Python の `socket` を通さずに行う通信 |
+| OS の仕組み（seccomp） | IPv4 / IPv6 などのソケットを作る呼び出しを、カーネルが拒む（`sandbox.py`）。32 ビット互換（`int 0x80`）と x32 の入口は、見分けられないためすべて拒む。管理者の権限は要らず、起動した子のプロセスにも効き、外せない | C や Rust の拡張が、Python の `socket` を通さずに行う通信 |
 
-- OS の仕組みを入れられない環境（知らない機械、seccomp を使えない環境）では、通信を断てないまま第三者の部品を動かさず、変換を失敗にします。
+- 規則を入れた直後に、実際に IPv4 のソケットを作ろうとして、拒まれることを確かめます（通常の呼び出しと、x32 の番号の呼び出し）。
+- OS の仕組みを入れられない環境（知らない機械、seccomp を使えない環境）と、入れても効かない環境（エミュレーションなど）では、通信を断てないまま第三者の部品を動かさず、変換を失敗にします。
 - 入手の部品（`models/download.py`）が、転送先として認めるホストは、配布元の公式のホスト（`models/hosts.py` の `TRANSFER_HOSTS`）だけです。それ以外のホストへの転送と、HTTP への転送は拒みます（自動テスト `test_model_download.py`）。
-- 確かめる自動テスト: `test_network_guard.py`（見張り）、`test_sandbox.py`（OS の仕組み。実際に子のプロセスで、ソケットを作れないことを確かめる）、`test_conversion_worker.py`（変換の間に通信の試みがあると失敗にする）、`test_network_boundary.py`（外向きの通信を入手の部品だけに限る）。
+- 確かめる自動テスト: `test_network_guard.py`（見張り）、`test_sandbox.py`（OS の仕組み。実際に子のプロセスで、通常の呼び出し・x32 の番号・32 ビット互換の入口のどれでも、ソケットを作れないことを確かめる）、`test_conversion_worker.py`（変換の間に通信の試みがあると失敗にする）、`test_network_boundary.py`（外向きの通信を入手の部品だけに限る）。
 
 ## 測定結果（2026-10-26）
 
