@@ -121,6 +121,24 @@ class TestGetStatus:
         assert body["failure_kind"] == "certificate_invalid"
         assert body["error_code"] == "MODEL_CERTIFICATE_INVALID"
 
+    def test_should_return_a_conversion_failure_as_a_download_failure(self, settings):
+        """
+        【テスト対象】GET /api/models/status（翻訳モデルの変換の失敗）
+        【テスト内容】翻訳モデルを変換できない失敗の状態で取得する
+        【期待結果】入手失敗として、原因の種類（conversion_failed）とエラーコード
+                    （MODEL_CONVERSION_FAILED）が返ること（機能設計書 F-16）
+        """
+        snapshot = ModelStatusSnapshot(ModelStatus.FAILED, failure=FailureKind.CONVERSION_FAILED)
+
+        with _client(settings, FakeManager(snapshot)) as client:
+            response = client.get("/api/models/status")
+
+        assert response.status_code == 200
+        body = response.json()
+        assert body["status"] == "failed"
+        assert body["failure_kind"] == "conversion_failed"
+        assert body["error_code"] == "MODEL_CONVERSION_FAILED"
+
     @pytest.mark.parametrize("method", ["post", "put", "patch", "delete"])
     def test_should_not_accept_other_methods_on_the_status_route(self, settings, method):
         """

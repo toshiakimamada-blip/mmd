@@ -18,8 +18,9 @@ AI モデルの定義も、アプリに同梱するファイル（config/models.
 """
 
 import os
+import sys
 from collections.abc import Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Final, Literal, cast
 
@@ -35,6 +36,7 @@ ENV_MODELS_DIR: Final = "MMD_MODELS_DIR"
 ENV_STATIC_DIR: Final = "MMD_STATIC_DIR"
 ENV_CONFIG_DIR: Final = "MMD_CONFIG_DIR"
 ENV_LOG_LEVEL: Final = "MMD_LOG_LEVEL"
+ENV_CONVERSION_PYTHON: Final = "MMD_CONVERSION_PYTHON"
 
 DEFAULT_PORT: Final = 3001
 DEFAULT_STATIC_DIR: Final = Path("/app/static")
@@ -69,6 +71,10 @@ class Settings:
     tuning: Tuning
     # AI モデルの定義（同梱の models.toml）。入手と確認のとおりになる。
     model_catalog: ModelCatalog
+    # 翻訳モデルの変換プロセスを動かす Python（ENV_CONVERSION_PYTHON）。変換の部品（PyTorch など）を
+    # 入れた環境のもの。未設定のときは、アプリサーバーを動かしている Python（開発環境では、
+    # 変換の部品が同じ環境に入っている）。イメージでは、別の環境の Python を指す。
+    conversion_python: Path = field(default_factory=lambda: Path(sys.executable))
 
 
 def _read(environ: Mapping[str, str], name: str) -> str | None:
@@ -129,6 +135,23 @@ def _require_dir(environ: Mapping[str, str], name: str, purpose: str, problems: 
     return Path(value)
 
 
+def _parse_conversion_python(value: str | None, problems: list[str]) -> Path:
+    """変換に使う Python を読む。指定があれば、実行できるファイルであることを確かめる。
+
+    起動の時点で確かめるのは、変換の直前に初めて気づく（翻訳モデルが使えないまま、
+    準備が止まる）のを避けるため。
+    """
+    if value is None:
+        return Path(sys.executable)
+    path = Path(value)
+    if not path.is_file() or not os.access(path, os.X_OK):
+        problems.append(
+            f"{ENV_CONVERSION_PYTHON} は、実行できるファイル（変換の部品を入れた環境の Python）を"
+            f"指定してください: {value!r}"
+        )
+    return path
+
+
 def load_port(environ: Mapping[str, str] | None = None) -> int:
     """ポートだけを読む。死活の確認が使う。
 
@@ -170,6 +193,7 @@ def load_settings(environ: Mapping[str, str] | None = None) -> Settings:
     config_value = _read(source, ENV_CONFIG_DIR)
     config_dir = Path(config_value) if config_value else DEFAULT_CONFIG_DIR
     log_level = _parse_log_level(_read(source, ENV_LOG_LEVEL), problems)
+    conversion_python = _parse_conversion_python(_read(source, ENV_CONVERSION_PYTHON), problems)
 
     tuning = load_tuning(config_dir / TUNING_FILE_NAME, source, problems)
     model_catalog = load_model_catalog(config_dir / MODELS_FILE_NAME, problems)
@@ -189,4 +213,5 @@ def load_settings(environ: Mapping[str, str] | None = None) -> Settings:
         config_dir=config_dir,
         tuning=tuning,
         model_catalog=model_catalog,
+        conversion_python=conversion_python,
     )

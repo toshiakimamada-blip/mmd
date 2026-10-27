@@ -3,6 +3,7 @@
 import dataclasses
 import re
 import shutil
+import sys
 from pathlib import Path
 
 import pytest
@@ -293,3 +294,62 @@ class TestLoadPort:
         """
         with pytest.raises(ConfigError, match="MMD_PORT"):
             load_port({"MMD_PORT": "70000"})
+
+
+class TestConversionPython:
+    """翻訳モデルの変換に使う Python（MMD_CONVERSION_PYTHON）。"""
+
+    def test_should_default_to_the_python_running_the_server(self):
+        """
+        【テスト対象】load_settings（MMD_CONVERSION_PYTHON が未設定）
+        【テスト内容】変換用の Python を指定せずに読み込む
+        【期待結果】アプリサーバーを動かしている Python になること
+                    （開発環境では、変換の部品が同じ環境に入っている）
+        """
+        settings = load_settings(_env())
+
+        assert settings.conversion_python == Path(sys.executable)
+
+    def test_should_read_the_python_from_the_environment(self, tmp_path):
+        """
+        【テスト対象】load_settings（MMD_CONVERSION_PYTHON）
+        【テスト内容】実行できるファイルを指定して読み込む
+        【期待結果】指定したパスが設定に入ること。
+                    イメージでは、変換の部品を入れた別の環境の Python を指す
+        """
+        python = tmp_path / "python"
+        python.write_text("#!/bin/sh\n")
+        python.chmod(0o755)
+
+        settings = load_settings(_env(MMD_CONVERSION_PYTHON=str(python)))
+
+        assert settings.conversion_python == python
+
+    @pytest.mark.parametrize("kind", ["missing", "directory", "not_executable"])
+    def test_should_stop_the_startup_when_the_python_cannot_run(self, tmp_path, kind):
+        """
+        【テスト対象】load_settings（MMD_CONVERSION_PYTHON の検証）
+        【テスト内容】存在しないパス・フォルダー・実行できないファイルを指定して読み込む
+        【期待結果】ConfigError になり、環境変数の名前が文面に出ること
+                    （変換の直前ではなく、起動の時点で、設定の誤りに気づく）
+        入力例: 存在しないパス、フォルダー、実行権限の無いファイル
+        """
+        target = tmp_path / "python"
+        if kind == "directory":
+            target.mkdir()
+        elif kind == "not_executable":
+            target.write_text("x")
+            target.chmod(0o644)
+
+        with pytest.raises(ConfigError, match="MMD_CONVERSION_PYTHON"):
+            load_settings(_env(MMD_CONVERSION_PYTHON=str(target)))
+
+    def test_should_treat_a_blank_value_as_unset(self):
+        """
+        【テスト対象】load_settings（MMD_CONVERSION_PYTHON が空）
+        【テスト内容】空白だけの値を指定して読み込む
+        【期待結果】未設定として扱い、アプリサーバーを動かしている Python になること
+        """
+        settings = load_settings(_env(MMD_CONVERSION_PYTHON="  "))
+
+        assert settings.conversion_python == Path(sys.executable)

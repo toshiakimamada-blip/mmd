@@ -8,8 +8,8 @@
 呼び出し側が、ほかの設定の誤りとまとめて起動を止められるようにする（tuning.py と同じ作り）。
 
 検証する内容
-- 配布元は HTTPS の URL。版は 40 桁のコミット
-  （ブランチ名やタグは、指す先が動いて「最新」を取ってしまうため認めない）
+- 配布元は HTTPS の URL で、ホストは許した配布元（hosts.py の SOURCE_HOSTS）だけ。
+  版は 40 桁のコミット（ブランチ名やタグは、指す先が動いて「最新」を取ってしまうため認めない）
 - SHA-256 は 64 桁の小文字の 16 進数。ファイル名はモデルのフォルダーの直下の 1 つの名前
 - 役割（文字起こし・翻訳・文章生成）は、1 つずつそろっている
 - 非商用に限るライセンス名を認めない（要件「配布形態とライセンス」）
@@ -23,6 +23,9 @@ from enum import StrEnum
 from pathlib import Path
 from typing import Any, Final
 from urllib.parse import urlsplit
+
+from .conversion.layout import CONVERSION_SOURCE_FILES, RESERVED_NAMES
+from .hosts import SOURCE_HOSTS, host_matches
 
 # AI モデルの定義のファイルの名前。置き場は MMD_CONFIG_DIR。
 MODELS_FILE_NAME: Final = "models.toml"
@@ -119,6 +122,18 @@ class ModelCatalog:
     def total_bytes(self) -> int:
         """すべてのファイルの大きさの合計（バイト）。"""
         return sum(model.total_bytes for model in self.models)
+
+    @property
+    def translation_model(self) -> ModelDefinition:
+        """翻訳モデルの定義（変換の対象）。役割ごとに 1 つ（読み込みで検証済み）。
+
+        Raises:
+            LookupError: 翻訳モデルが無いとき。読み込みを通った定義では起きない。
+        """
+        for model in self.models:
+            if model.role is ModelRole.TRANSLATION:
+                return model
+        raise LookupError("翻訳モデルの定義がありません")
 
 
 def load_model_catalog(path: Path, problems: list[str]) -> ModelCatalog | None:
@@ -302,6 +317,9 @@ def _repository_url_problem(value: object) -> str | None:
         return "https:// で始まる URL で書いてください"
     if not host:
         return "ホスト名が必要です"
+    if not host_matches(host, SOURCE_HOSTS):
+        # 通信の相手は AI モデルの配布元だけ（非機能要件設計書の外部への送信の防止）。
+        return f"配布元のホストにしてください（許すのは {'・'.join(SOURCE_HOSTS)} だけです）"
     if parts.username is not None or parts.password is not None:
         return "認証情報を含められません"
     if parts.query or parts.fragment:
@@ -395,6 +413,12 @@ def _parse_file_name(raw: Mapping[str, Any], label: str, problems: list[str]) ->
         problems,
         "モデルのフォルダー直下の 1 つの名前（英数字と . _ -）",
     )
+    if name is not None and name in RESERVED_NAMES:
+        problems.append(
+            f"{MODELS_FILE_NAME} の {label} の name は {name!r} にできません"
+            "（翻訳モデルの変換後のファイル・作業用のフォルダー・控えの名前と重なるため）"
+        )
+        return None
     if name is not None and name.endswith(PARTIAL_SUFFIX):
         problems.append(
             f"{MODELS_FILE_NAME} の {label} の name は {PARTIAL_SUFFIX} で終われません"
@@ -429,6 +453,8 @@ def _check_catalog(
     counts: dict[ModelRole, int] = {role: 0 for role in ModelRole}
     for model in models:
         counts[model.role] += 1
+        if model.role is ModelRole.TRANSLATION:
+            _check_conversion_files(model, problems)
     for role, count in counts.items():
         if count == 0 and not _has_unreadable_model(raw_models, models):
             problems.append(f"{MODELS_FILE_NAME} に、役割 {role.value} の AI モデルがありません")
@@ -437,6 +463,19 @@ def _check_catalog(
                 f"{MODELS_FILE_NAME} で、役割 {role.value} の AI モデルが {count} 個重なっています"
                 "（役割ごとに 1 つです）"
             )
+
+
+def _check_conversion_files(model: ModelDefinition, problems: list[str]) -> None:
+    """翻訳モデルの定義に、変換に要るファイルがそろっているかを調べる。
+
+    足りないと、変換の段（準備の最後）で初めて失敗する。起動の時点で止めて、気づけるようにする。
+    """
+    missing = sorted(CONVERSION_SOURCE_FILES - {file.name for file in model.files})
+    if missing:
+        problems.append(
+            f"{MODELS_FILE_NAME} の models の {model.name} に、翻訳モデルの変換に要るファイルが"
+            f"ありません: {'・'.join(missing)}"
+        )
 
 
 def _has_unreadable_model(raw_models: list[object], models: list[ModelDefinition]) -> bool:

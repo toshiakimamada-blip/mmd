@@ -29,6 +29,7 @@ from .errors import (
 from .frontend import INDEX_FILE, FrontendFiles
 from .logs import STARTUP_LOGGER
 from .logs.asgi import TraceIdMiddleware
+from .models.conversion.service import TranslationConverter
 from .models.download import HttpsDownloader
 from .models.fetch import ModelFetcher
 from .models.manager import ModelManager
@@ -100,12 +101,18 @@ def build_model_manager(settings: Settings) -> ModelManager:
     """本番のモデル管理部を組み立てる（開始はしない）。
 
     外向きの通信を行う部品（HttpsDownloader）を、ここでモデル管理部へ渡す。通信を行うのは、
-    アプリでこの 1 つだけ。翻訳モデルの変換は、変換を作る作業で接続する。
+    アプリでこの 1 つだけ。翻訳モデルの変換（別のプロセスで動き、外へ通信しない）も接続する。
     通知の送り先は、通知の仕組みを作る作業で渡す（いまは何もしない発行先）。
     """
     store = ModelStore(settings.models_dir)
     fetcher = ModelFetcher(store, HttpsDownloader())
-    return ModelManager(settings.model_catalog, store, fetcher)
+    conversion = TranslationConverter(
+        store,
+        settings.model_catalog.translation_model,
+        python=settings.conversion_python,
+        quantization=settings.tuning.translation_quantization,
+    )
+    return ModelManager(settings.model_catalog, store, fetcher, conversion=conversion)
 
 
 @asynccontextmanager

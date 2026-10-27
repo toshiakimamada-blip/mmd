@@ -95,6 +95,10 @@ export const ERROR_WORDINGS: Readonly<Record<string, ErrorWording>> = Object.fre
     message: 'ディスクの空きが足りないため、AI モデルを入手できませんでした。',
     action: `ディスクの空きを増やしてから、「入手をやり直す」を押してください。${REPORT_IF_NOT_FIXED}`,
   },
+  MODEL_CONVERSION_FAILED: {
+    message: '翻訳モデルを変換できなかったため、AI モデルを使えるようにできませんでした。',
+    action: `「入手をやり直す」を押してください。入手したファイルは捨てずに、変換だけをやり直します。${REPORT_IF_NOT_FIXED}`,
+  },
   MODEL_DOWNLOAD_FAILED: {
     message: 'AI モデルの入手に失敗しました。',
     action: `「入手をやり直す」を押してください。${REPORT_IF_NOT_FIXED}`,

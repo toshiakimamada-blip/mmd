@@ -1,8 +1,8 @@
 """AI モデルの入手に失敗した原因の種類。
 
-機能設計書 F-16 が定める原因の種類のうち、入手と確認にあたる 5 つ（ネットワークにつながらない・
-証明書を確かめられない・配布元が応答しない・配布元のファイルと一致しない・ディスクの空きが足りない）と、
-分類できなかった失敗を持つ。「翻訳モデルを変換できない」は、翻訳モデルの変換を作る作業で足す。
+機能設計書 F-16 が定める原因の種類の 6 つ（ネットワークにつながらない・証明書を確かめられない・
+配布元が応答しない・配布元のファイルと一致しない・ディスクの空きが足りない・
+翻訳モデルを変換できない）と、分類できなかった失敗を持つ。
 
 原因の種類は、画面へ返す準備状況に入る。種類ごとにエラーコード（MODEL_*）を持ち、
 画面は、エラーコードごとの文言の一覧から表示する文を引く。
@@ -23,8 +23,10 @@ class FailureKind(StrEnum):
     SOURCE_UNRESPONSIVE = "source_unresponsive"
     # 入手したファイルが、定義の SHA-256（配布元のもの）と一致しない。
     HASH_MISMATCH = "hash_mismatch"
-    # ディスクの空きが足りない。
+    # ディスクの空きが足りない。入手の前と、書き込み中のほか、翻訳モデルの変換でも起きる。
     DISK_INSUFFICIENT = "disk_insufficient"
+    # 翻訳モデルを、実行基盤の形式へ変換できない（変換プロセスが失敗した。時間切れを含む）。
+    CONVERSION_FAILED = "conversion_failed"
     # 上のどれにも分類できない。想定外の失敗で、原因はログの発生場所から調べる。
     UNKNOWN = "unknown"
 
@@ -40,6 +42,7 @@ _ERROR_CODES: dict[FailureKind, str] = {
     FailureKind.SOURCE_UNRESPONSIVE: "MODEL_SOURCE_UNRESPONSIVE",
     FailureKind.HASH_MISMATCH: "MODEL_HASH_MISMATCH",
     FailureKind.DISK_INSUFFICIENT: "MODEL_DISK_INSUFFICIENT",
+    FailureKind.CONVERSION_FAILED: "MODEL_CONVERSION_FAILED",
     FailureKind.UNKNOWN: "MODEL_DOWNLOAD_FAILED",
 }
 
@@ -51,8 +54,15 @@ class ModelFailure(Exception):
     （ログにも画面にも、種類とエラーコードだけを出す）。
     """
 
-    def __init__(self, kind: FailureKind) -> None:
+    def __init__(self, kind: FailureKind, *, exception_type: str | None = None) -> None:
+        """
+        Args:
+            kind: 失敗の原因の種類。
+            exception_type: 失敗のもとになった例外の種類（クラス名）。分かれば、エラーログに残す。
+                変換プロセスの中の失敗が、この形で届く。文面は渡さない。
+        """
         self.kind = kind
+        self.exception_type = exception_type
         super().__init__(kind.value)
 
 
@@ -72,7 +82,8 @@ def failure_from_os_error(error: OSError) -> ModelFailure:
 
 
 class DownloadCancelled(Exception):
-    """入手の中止。アプリの停止などで、入手の途中で止めたことを表す。
+    """入手と変換の中止。アプリの停止などで、途中で止めたことを表す。
 
-    失敗ではない。それまでに受け取った分は一時名のファイルに残し、次の起動で続きから入手する。
+    失敗ではない。入手では、それまでに受け取った分を一時名のファイルに残し、次の起動で続きから入手する。
+    変換では、変換プロセスを止めて、途中のファイルを捨て、次の起動で入手済みのファイルから変換し直す。
     """

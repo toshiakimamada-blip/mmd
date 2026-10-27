@@ -30,7 +30,7 @@ def _model(content: bytes = _CONTENT, name: str = "demo-model") -> ModelDefiniti
     return ModelDefinition(
         name=name,
         role=ModelRole.TRANSCRIPTION,
-        repository_url="https://example.test/org/demo",
+        repository_url="https://huggingface.co/org/demo",
         revision=_REVISION,
         license="MIT",
         license_note="",
@@ -527,3 +527,13 @@ class TestFailureKinds:
         assert all(code.startswith("MODEL_") for code in codes)
         assert len(set(codes)) == len(codes)
         assert FailureKind.HASH_MISMATCH.error_code == "MODEL_HASH_MISMATCH"
+
+    def test_should_have_a_kind_for_a_translation_model_that_cannot_be_converted(self):
+        """
+        【テスト対象】FailureKind.CONVERSION_FAILED
+        【テスト内容】翻訳モデルの変換の失敗の種類を調べる
+        【期待結果】値が conversion_failed、エラーコードが MODEL_CONVERSION_FAILED であること
+                    （機能設計書 F-16 の原因の種類「翻訳モデルを変換できない」）
+        """
+        assert FailureKind.CONVERSION_FAILED.value == "conversion_failed"
+        assert FailureKind.CONVERSION_FAILED.error_code == "MODEL_CONVERSION_FAILED"

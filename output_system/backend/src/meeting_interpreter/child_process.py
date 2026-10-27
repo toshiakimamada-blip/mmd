@@ -13,13 +13,23 @@ AI の実行基盤（Hugging Face の部品、llama.cpp など）は、次の 2 
   0 や空を指していても、上書きされない。
 - アプリサーバー自身の環境変数にも、起動のときに反映する（apply_offline_environment）。
   このプロセスが起動する子のプロセス（multiprocessing を含む）は、環境変数を引き継ぐ。
+
+終わりまで見届ける入口（run_child_process）
+- 変換プロセスのように、始めてから終わるまでを 1 回で扱うプロセスは、run_child_process で動かす。
+  標準出力と標準エラーを上限つきで読み（子の出力の量で、アプリサーバーのメモリを使い切らない）、
+  中止の合図と時間切れで、プロセスのグループごと止める（孫のプロセスを残さない）。
 """
 
 import os
+import signal
 import subprocess
+import threading
+import time
 from collections.abc import Mapping, MutableMapping, Sequence
+from dataclasses import dataclass
+from pathlib import Path
 from types import MappingProxyType
-from typing import Any, Final
+from typing import Any, BinaryIO, Final
 
 # 止める環境変数。値はすべて 1（有効）。実行中に書き換えられないよう、読み取り専用にしている。
 #
@@ -94,3 +104,163 @@ def start_child_process(
     if popen_options.get("shell"):
         raise TypeError("シェルを通す起動はできません。コマンドと引数を分けて渡してください")
     return subprocess.Popen(args, env=child_environment(extra=env_extra), **popen_options)
+
+
+# 子のプロセスの終了を見守る間隔（秒）。中止の合図と時間切れは、この間隔で確かめる。
+_POLL_INTERVAL_SECONDS: Final = 0.1
+
+# 標準出力と標準エラーの、既定の保持量（バイト）。
+# 標準出力は結果の 1 行、標準エラーは失敗の手がかり。
+DEFAULT_STDOUT_LIMIT: Final = 64 * 1024
+DEFAULT_STDERR_LIMIT: Final = 16 * 1024
+
+# 終了の合図（SIGTERM）のあと、強制終了（SIGKILL）までに待つ秒数。
+DEFAULT_TERMINATE_GRACE_SECONDS: Final = 5.0
+
+
+@dataclass(frozen=True, slots=True)
+class ChildOutcome:
+    """子のプロセスの結果。"""
+
+    # 終了コード。信号で終わったときは負の値。中止と時間切れで止めたときは、止めたあとの値。
+    returncode: int
+    # 標準出力の先頭（上限まで）。
+    stdout: bytes
+    # 標準エラーの末尾（上限まで）。失敗の原因は、出力の末尾に出ることが多い。
+    stderr_tail: bytes
+    # 中止の合図で止めたか。
+    cancelled: bool
+    # 時間切れで止めたか。
+    timed_out: bool
+
+
+class _Capture(threading.Thread):
+    """パイプを最後まで読み続け、決めた量だけを残す。
+
+    読み続けないと、子が出力を書き込めずに止まる。残す量には上限を置き、読み捨てる分は捨てる。
+    """
+
+    def __init__(self, stream: BinaryIO, limit: int, *, keep_tail: bool) -> None:
+        super().__init__(daemon=True)
+        self._stream = stream
+        self._limit = limit
+        self._keep_tail = keep_tail
+        self._buffer = bytearray()
+
+    def run(self) -> None:
+        reader = getattr(self._stream, "read1", self._stream.read)
+        try:
+            while chunk := reader(65536):
+                self._buffer.extend(chunk)
+                if self._keep_tail:
+                    # 末尾だけを残す。上限の 2 倍を超えたときにまとめて削る（毎回削らない）。
+                    if len(self._buffer) > self._limit * 2:
+                        del self._buffer[: len(self._buffer) - self._limit]
+                elif len(self._buffer) > self._limit:
+                    del self._buffer[self._limit :]
+        except (OSError, ValueError):
+            pass  # パイプが閉じられた。ここまでに読んだ分を残す。
+
+    @property
+    def captured(self) -> bytes:
+        """残した内容。末尾を残す場合は、上限の大きさに切りそろえる。"""
+        data = bytes(self._buffer)
+        return data[-self._limit :] if self._keep_tail else data[: self._limit]
+
+
+def _signal_group(pid: int, signal_number: int) -> None:
+    """プロセスのグループにシグナルを送る。すでに無ければ何もしない。"""
+    try:
+        os.killpg(pid, signal_number)
+    except (ProcessLookupError, PermissionError):
+        pass
+
+
+def _stop(process: "subprocess.Popen[bytes]", grace_seconds: float) -> None:
+    """プロセスのグループを止める。先に終了の合図、猶予のあとに強制終了。"""
+    _signal_group(process.pid, signal.SIGTERM)
+    try:
+        process.wait(timeout=grace_seconds)
+    except subprocess.TimeoutExpired:
+        pass
+    # 強制終了は、猶予の中で終わっていても送る（孫のプロセスが残らないように）。
+    _signal_group(process.pid, signal.SIGKILL)
+    process.wait()
+
+
+def run_child_process(
+    args: Sequence[str],
+    *,
+    env_extra: Mapping[str, str] | None = None,
+    cwd: Path | str | None = None,
+    cancel: threading.Event | None = None,
+    timeout: float | None = None,
+    stdout_limit: int = DEFAULT_STDOUT_LIMIT,
+    stderr_limit: int = DEFAULT_STDERR_LIMIT,
+    terminate_grace_seconds: float = DEFAULT_TERMINATE_GRACE_SECONDS,
+) -> ChildOutcome:
+    """子のプロセスを起動し、終わるまで見届ける。止める環境変数が必ず付く。
+
+    プロセスは新しいセッション（プロセスのグループ）で動かす。中止・時間切れ・正常な終了のどれでも、
+    終わったあとにグループ全体へ強制終了を送り、孫のプロセスを残さない。
+    呼び出し元のスレッドを、終わるまで止める。イベントループの上では呼ばず、別のスレッドで動かす。
+
+    Args:
+        args: 起動するコマンドと引数。シェルを通さない。
+        env_extra: 追加の環境変数。止める環境変数は、これで外せない。
+        cwd: 子の作業フォルダー。
+        cancel: 中止の合図。立つと、プロセスを止めて戻る。
+        timeout: 時間切れの秒数。超えると、プロセスを止めて戻る。None なら待ち続ける。
+        stdout_limit: 標準出力の先頭を残す量（バイト）。
+        stderr_limit: 標準エラーの末尾を残す量（バイト）。
+        terminate_grace_seconds: 終了の合図のあと、強制終了までに待つ秒数。
+
+    Returns:
+        子の結果。終了コードの解釈は、呼び出し側が行う。
+    """
+    process = start_child_process(
+        args,
+        env_extra=env_extra,
+        cwd=cwd,
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        start_new_session=True,
+    )
+    assert process.stdout is not None and process.stderr is not None
+    out_capture = _Capture(process.stdout, stdout_limit, keep_tail=False)
+    err_capture = _Capture(process.stderr, stderr_limit, keep_tail=True)
+    out_capture.start()
+    err_capture.start()
+
+    deadline = None if timeout is None else time.monotonic() + timeout
+    cancelled = timed_out = False
+    try:
+        while True:
+            try:
+                process.wait(timeout=_POLL_INTERVAL_SECONDS)
+                break
+            except subprocess.TimeoutExpired:
+                pass
+            if cancel is not None and cancel.is_set():
+                cancelled = True
+                break
+            if deadline is not None and time.monotonic() >= deadline:
+                timed_out = True
+                break
+    finally:
+        # 例外で抜けるときも、プロセスを残さない。
+        _stop(process, terminate_grace_seconds if (cancelled or timed_out) else 0.0)
+        out_capture.join(timeout=5)
+        err_capture.join(timeout=5)
+        process.stdout.close()
+        process.stderr.close()
+
+    assert process.returncode is not None
+    return ChildOutcome(
+        returncode=process.returncode,
+        stdout=out_capture.captured,
+        stderr_tail=err_capture.captured,
+        cancelled=cancelled,
+        timed_out=timed_out,
+    )

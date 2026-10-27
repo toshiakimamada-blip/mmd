@@ -344,7 +344,10 @@ class TestWithHttpsDistribution:
         catalog = self._serve(distribution)
         store = ModelStore(tmp_path / "models")
         downloader = HttpsDownloader(
-            ssl_context=distribution.trusting_context(), timeout=2.0, use_environment_proxy=False
+            ssl_context=distribution.trusting_context(),
+            timeout=2.0,
+            use_environment_proxy=False,
+            allowed_hosts=distribution.allowed_hosts,
         )
         fetcher = ModelFetcher(store, downloader)
 
@@ -366,7 +369,10 @@ class TestWithHttpsDistribution:
         distribution.behaviors[llm_path] = Behavior(cut_after=2500, once=True)
         store = ModelStore(tmp_path / "models")
         downloader = HttpsDownloader(
-            ssl_context=distribution.trusting_context(), timeout=2.0, use_environment_proxy=False
+            ssl_context=distribution.trusting_context(),
+            timeout=2.0,
+            use_environment_proxy=False,
+            allowed_hosts=distribution.allowed_hosts,
         )
         fetcher = ModelFetcher(store, downloader)
 
@@ -394,7 +400,10 @@ class TestWithHttpsDistribution:
         distribution.files[f"/org/asr/resolve/{_REVISION}/model.bin"] = b"Z" * 3000
         store = ModelStore(tmp_path / "models")
         downloader = HttpsDownloader(
-            ssl_context=distribution.trusting_context(), timeout=2.0, use_environment_proxy=False
+            ssl_context=distribution.trusting_context(),
+            timeout=2.0,
+            use_environment_proxy=False,
+            allowed_hosts=distribution.allowed_hosts,
         )
         fetcher = ModelFetcher(store, downloader)
 

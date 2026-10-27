@@ -72,12 +72,13 @@ describe('ERROR_WORDINGS for AI model download', () => {
     'MODEL_SOURCE_UNRESPONSIVE',
     'MODEL_HASH_MISMATCH',
     'MODEL_DISK_INSUFFICIENT',
+    'MODEL_CONVERSION_FAILED',
     'MODEL_DOWNLOAD_FAILED',
   ];
 
   /**
    * 【テスト対象】ERROR_WORDINGS（AI モデルの入手の失敗の原因）
-   * 【テスト内容】AI モデルの入手に失敗した原因のコード 6 つ（5 つの原因 + 分類できない失敗）を調べる
+   * 【テスト内容】AI モデルの入手に失敗した原因のコード 7 つ（6 つの原因 + 分類できない失敗）を調べる
    * 【期待結果】どれも一覧にあり、「何が起きたか」が AI モデルの入手に触れていること。
    *            コードごとに文言が異なる（原因を取り違えて案内しない）
    */
@@ -109,6 +110,21 @@ describe('ERROR_WORDINGS for AI model download', () => {
     ]) {
       expect(ERROR_WORDINGS[code].action, code).toContain('入手をやり直す');
     }
+  });
+
+  /**
+   * 【テスト対象】ERROR_WORDINGS（翻訳モデルを変換できない）
+   * 【テスト内容】変換の失敗の案内を調べる
+   * 【期待結果】翻訳モデルの変換に触れていること。次に行う操作は「入手をやり直す」を押すことで、
+   *            入手済みのファイルから変換だけをやり直すことが書かれていること
+   */
+  it('should tell the user that a retry converts again from the downloaded files', () => {
+    const wording = ERROR_WORDINGS.MODEL_CONVERSION_FAILED;
+
+    expect(wording.message).toContain('翻訳モデル');
+    expect(wording.message).toContain('変換');
+    expect(wording.action).toContain('入手をやり直す');
+    expect(wording.action).toContain('変換だけ');
   });
 
   /**

@@ -15,6 +15,7 @@ import pytest
 from distribution_server import Behavior, DistributionServer
 from meeting_interpreter.models.download import HttpsDownloader
 from meeting_interpreter.models.failure import DownloadCancelled, FailureKind, ModelFailure
+from meeting_interpreter.models.hosts import TRANSFER_HOSTS
 
 # 擬似の配布元に置く、テスト用のファイルの内容。複数回の読み取りに分かれる大きさにする。
 _CONTENT = bytes(range(256)) * 400  # 102,400 バイト
@@ -29,6 +30,8 @@ def downloader(distribution: DistributionServer) -> HttpsDownloader:
         timeout=2.0,
         chunk_size=4096,
         use_environment_proxy=False,
+        # 名前の解決や証明書の名前の食い違いを確かめるテストが使う、架空のホストも許す。
+        allowed_hosts=(*distribution.allowed_hosts, "models.test", "models.invalid"),
     )
 
 
@@ -364,6 +367,7 @@ class TestFailureClassification:
             ssl_context=distribution.trusting_context(),
             timeout=0.3,
             use_environment_proxy=False,
+            allowed_hosts=distribution.allowed_hosts,
         )
 
         with pytest.raises(ModelFailure) as caught:
@@ -381,7 +385,9 @@ class TestFailureClassification:
                     確認を無効にして続けない
         """
         distribution.files[_PATH] = _CONTENT
-        strict = HttpsDownloader(timeout=2.0, use_environment_proxy=False)
+        strict = HttpsDownloader(
+            timeout=2.0, use_environment_proxy=False, allowed_hosts=distribution.allowed_hosts
+        )
         partial = tmp_path / "m.part"
 
         with pytest.raises(ModelFailure) as caught:
@@ -410,7 +416,10 @@ class TestFailureClassification:
 
         monkeypatch.setattr(socket, "getaddrinfo", resolve)
         downloader = HttpsDownloader(
-            ssl_context=distribution.trusting_context(), timeout=2.0, use_environment_proxy=False
+            ssl_context=distribution.trusting_context(),
+            timeout=2.0,
+            use_environment_proxy=False,
+            allowed_hosts=("models.test",),
         )
 
         with pytest.raises(ModelFailure) as caught:
@@ -545,6 +554,111 @@ class TestRedirect:
         assert caught.value.kind is FailureKind.SOURCE_UNRESPONSIVE
 
 
+class TestHostRestriction:
+    """通信の相手を、配布元のホストに限る（非機能要件設計書の外部への送信の防止）。"""
+
+    def _downloader(
+        self, distribution: DistributionServer, allowed_hosts: tuple[str, ...]
+    ) -> HttpsDownloader:
+        """擬似の配布元の証明書を信頼し、許すホストを指定した入手の部品。"""
+        return HttpsDownloader(
+            ssl_context=distribution.trusting_context(),
+            timeout=2.0,
+            chunk_size=4096,
+            use_environment_proxy=False,
+            allowed_hosts=allowed_hosts,
+        )
+
+    def test_should_refuse_a_redirect_to_a_host_outside_the_allowed_list(
+        self, distribution, tmp_path
+    ):
+        """
+        【テスト対象】HttpsDownloader.download（許していないホストへの転送）
+        【テスト内容】入手先が、別のホスト（localhost）へ転送する。許すのは 127.0.0.1 だけにする
+        【期待結果】転送に従わず、配布元が応答しない失敗になること。
+                    転送先へ要求は届かず、一時名のファイルも作られない
+        """
+        distribution.files["/cdn/blob"] = _CONTENT
+        distribution.behaviors[_PATH] = Behavior(
+            redirect_to=f"https://localhost:{distribution.port}/cdn/blob"
+        )
+        downloader = self._downloader(distribution, ("127.0.0.1",))
+        partial = tmp_path / "model.bin.part"
+
+        with pytest.raises(ModelFailure) as caught:
+            _download(downloader, distribution, partial)
+
+        assert caught.value.kind is FailureKind.SOURCE_UNRESPONSIVE
+        assert [r.path for r in distribution.requests] == [_PATH]
+        assert not partial.exists()
+
+    def test_should_follow_a_redirect_to_an_allowed_host(self, distribution, tmp_path):
+        """
+        【テスト対象】HttpsDownloader.download（許したホストへの転送）
+        【テスト内容】同じ転送を、localhost も許した入手の部品で入手する
+        【期待結果】転送に従い、全体が正しい内容で入手できること（制限が、転送そのものを止めない）
+        """
+        distribution.files["/cdn/blob"] = _CONTENT
+        distribution.behaviors[_PATH] = Behavior(
+            redirect_to=f"https://localhost:{distribution.port}/cdn/blob"
+        )
+        downloader = self._downloader(distribution, ("127.0.0.1", "localhost"))
+
+        _download(downloader, distribution, tmp_path / "model.bin.part")
+
+        assert (tmp_path / "model.bin.part").read_bytes() == _CONTENT
+
+    def test_should_refuse_a_redirect_that_only_looks_like_an_allowed_host(
+        self, distribution, tmp_path
+    ):
+        """
+        【テスト対象】HttpsDownloader.download（許したホストに似せた転送先）
+        【テスト内容】転送先の URL が、認証情報の書き方（https://127.0.0.1@localhost:...）で、
+                      許したホストの名前を先頭に置く。実際の宛先は localhost
+        【期待結果】宛先（localhost）で判定され、転送に従わないこと
+        """
+        distribution.files["/cdn/blob"] = _CONTENT
+        distribution.behaviors[_PATH] = Behavior(
+            redirect_to=f"https://127.0.0.1@localhost:{distribution.port}/cdn/blob"
+        )
+        downloader = self._downloader(distribution, ("127.0.0.1",))
+
+        with pytest.raises(ModelFailure) as caught:
+            _download(downloader, distribution, tmp_path / "model.bin.part")
+
+        assert caught.value.kind is FailureKind.SOURCE_UNRESPONSIVE
+        assert [r.path for r in distribution.requests] == [_PATH]
+
+    def test_should_refuse_a_start_url_outside_the_allowed_list(self, distribution, tmp_path):
+        """
+        【テスト対象】HttpsDownloader.download（許していないホストの入手先）
+        【テスト内容】許すのは 127.0.0.1 だけの入手の部品に、localhost の URL を渡す
+        【期待結果】ValueError になり、通信も書き込みも起きないこと
+                    （定義の検証をすり抜けた入手先でも、外へ出さない）
+        """
+        distribution.files[_PATH] = _CONTENT
+        downloader = self._downloader(distribution, ("127.0.0.1",))
+        partial = tmp_path / "model.bin.part"
+
+        with pytest.raises(ValueError):
+            downloader.download(
+                f"https://localhost:{distribution.port}{_PATH}",
+                partial,
+                expected_size=len(_CONTENT),
+            )
+
+        assert distribution.requests == []
+        assert not partial.exists()
+
+    def test_should_allow_only_the_distribution_hosts_by_default(self):
+        """
+        【テスト対象】HttpsDownloader（既定の許すホスト）
+        【テスト内容】許すホストを指定せずに作った入手の部品の設定を読む
+        【期待結果】配布元と CDN のホスト（hosts.py の TRANSFER_HOSTS）だけであること
+        """
+        assert HttpsDownloader(use_environment_proxy=False).allowed_hosts == TRANSFER_HOSTS
+
+
 class TestUrlAndCancel:
     """入手先の URL の制限と、中止。"""
 
@@ -607,7 +721,9 @@ class TestCertificates:
         distribution.files[_PATH] = _CONTENT
         monkeypatch.setenv("SSL_CERT_FILE", str(distribution.cert_file))
         monkeypatch.delenv("SSL_CERT_DIR", raising=False)
-        downloader = HttpsDownloader(timeout=2.0, use_environment_proxy=False)
+        downloader = HttpsDownloader(
+            timeout=2.0, use_environment_proxy=False, allowed_hosts=distribution.allowed_hosts
+        )
 
         _download(downloader, distribution, tmp_path / "m.part")
 
@@ -636,7 +752,10 @@ class TestCertificates:
         distribution.files[_PATH] = _CONTENT
         monkeypatch.setenv("https_proxy", "http://127.0.0.1:9")
         downloader = HttpsDownloader(
-            ssl_context=distribution.trusting_context(), timeout=2.0, use_environment_proxy=False
+            ssl_context=distribution.trusting_context(),
+            timeout=2.0,
+            use_environment_proxy=False,
+            allowed_hosts=distribution.allowed_hosts,
         )
 
         _download(downloader, distribution, tmp_path / "m.part")

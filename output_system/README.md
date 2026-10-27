@@ -10,7 +10,7 @@
 | `frontend/` | 画面。TypeScript と React を Vite でビルドします。ロックファイルは `package-lock.json` です |
 | `config/` | アプリに同梱する設定ファイル。調整値（`tuning.toml`）と、AI モデルの定義（`models.toml`。翻訳モデルの代わりの候補は `translation_alternatives.md`） |
 | `tools/` | 補助の道具。画面の依存を足すときに、固定した Node.js で実行する `with-pinned-node.sh` など |
-| `docs/` | 実装に付ける文書。エラーの扱いと、エラーコードの一覧は `docs/errors.md`。お知らせ帯とエラー表示の部品の使い方は `docs/notices.md` |
+| `docs/` | 実装に付ける文書。エラーの扱いと、エラーコードの一覧は `docs/errors.md`。お知らせ帯とエラー表示の部品の使い方は `docs/notices.md`。AI モデルの入手と、翻訳モデルの変換（確かめた結果、部品、測定値）は `docs/models.md` |
 
 テストは、各フォルダの `src/` と同じ階層の `test/` に置き、`src/` と同じ構造にします。起動したコンテナを相手にするテストだけは、`backend/test/container/` に置きます。ブラウザーで手動で確かめるための確認用のサーバーは、`backend/test/browser/` に置きます（pytest は集めません）。
 
@@ -69,6 +69,7 @@ Starlette の `TestClient` は uvicorn を通らないため、部品が無く�
 | `MMD_MODELS_DIR` | AI モデルを置く場所 | はい | なし（コンテナのイメージは `/var/lib/mmd/models` を渡します） |
 | `MMD_STATIC_DIR` | ビルドした画面のファイルの場所 | いいえ | `/app/static` |
 | `MMD_CONFIG_DIR` | アプリに同梱する設定ファイル（`tuning.toml`、`models.toml`）の場所 | いいえ | `/app/config` |
+| `MMD_CONVERSION_PYTHON` | 翻訳モデルの変換プロセスを動かす Python（変換の部品を入れた環境のもの）。実行できるファイルであること | いいえ | アプリサーバーを動かしている Python（コンテナのイメージは `/opt/conversion-venv/bin/python` を渡します） |
 | `MMD_LOG_LEVEL` | ログのレベルの下限。`info`・`warning`・`error` のいずれか（大文字小文字は問いません） | いいえ | `info` |
 
 - 空（または空白だけ）の環境変数は、未設定として扱います。
@@ -125,7 +126,7 @@ Starlette の `TestClient` は uvicorn を通らないため、部品が無く�
 1. **確認**: 同梱の定義（`config/models.toml`）の全ファイルについて、モデル置き場のファイルが定義の SHA-256 と一致するかを確かめます。一致しないファイルは捨てます。一致を確認できたファイルは入手し直しません。
 2. **ディスクの空きの確認**: 入手するファイルがあれば、先に空きを確かめます。必要な量は「入手する分 + 予備 2GiB」です（`fetch.py` の `DISK_RESERVE_BYTES`。非機能要件設計書の「約 5GB」は仮置きの見込みで、入手するファイルの大きさが決まったため、この式にしました）。足りなければ、入手を始めずに失敗にします。
 3. **入手**: 一時名（`<ファイル名>.part`）で入手し、定義の SHA-256 と一致してから、正しい名前へ移します。途中で止まったときは、次の起動で、一時名のファイルの続きから入手します（Range 要求）。
-4. **変換**: 翻訳モデルの変換は、まだ接続していません。接続するまでは、変換前のファイルが一致していても準備完了にならず、準備状況は変換中で止まります（取得の `conversion_implemented` が `false`）。
+4. **変換**: 翻訳モデルを、実行基盤（CTranslate2）の形式へ変換します（`backend/src/meeting_interpreter/models/conversion/`）。変換後のファイルが、変換後のハッシュ値の控えと一致していれば、変換も入手もしません。変換後のファイルが無い・控えが無い・一致しないときは、入手済みのファイルから変換し直します（入手はやり直しません）。変換の間、準備状況は「変換中」（進み具合は出ません）で、3 つの AI モデルがそろって変換が済むと「準備完了」になります。変換に失敗すると、途中のファイルを捨てて入手失敗（原因: 翻訳モデルを変換できない）になり、入手のやり直しで、変換だけをやり直します。
 
 モデル置き場（名前付きボリューム `MMD_MODELS_DIR`）の配置は `<モデル名>/<固定した版>/<ファイル名>` です。版を上げても、古い版のファイルを上書きしません。
 
@@ -148,6 +149,7 @@ Starlette の `TestClient` は uvicorn を通らないため、部品が無く�
 - この決まりは、自動テスト `backend/test/meeting_interpreter/test_network_boundary.py` が守ります。ソースコード全体を構文木で調べる**依存の向きの検査**（違反するとテストが失敗します）と、ソケットの接続を監視する**実行時の検査**（入手の部品以外のアプリのコードが接続すると失敗します。準備完了のあと、接続も名前の解決も起きないことを確かめます）です。
 - 新しい処理が通信を必要とするときは、`download.py` に足します。ほかのモジュールは、通信しない形の入口（`fetch.py` の `FileDownloader`）を介して使います。
 - AI の実行基盤の自動入手と利用状況の送信は使いません。入手は、標準ライブラリの HTTPS クライアントで自前に行います。
+- 通信の相手は、許したホストだけです。入手先（`config/models.toml` の `repository_url`）は `huggingface.co` に限り、入手の要求と転送先は `huggingface.co` と `*.hf.co`（ファイルの実体の置き場。CDN）に限ります。許可リストは、設定ファイルではなく、`backend/src/meeting_interpreter/models/hosts.py` の定数です（許可を広げる変更が、コードの変更として見えるように）。転送先が許したホストでないときは、転送に従わず、入手失敗（原因の種類は「配布元が応答しない」）にします。CDN のホスト名が変わって入手できなくなったときは、`hosts.py` の `TRANSFER_HOSTS` を、確かめたうえで直します。
 
 ### ワーカーと変換プロセスの起動
 
@@ -201,7 +203,7 @@ HTTPS の証明書は、必ず確かめます（確認を無効にする設定�
 ```bash
 MMD_STATIC_DIR=../frontend/dist MMD_CONFIG_DIR=../config \
 MMD_RECORDS_DIR=/tmp/mmd/records MMD_MODELS_DIR=/tmp/mmd/models \
-PYTHONPATH=src uv run --no-dev python -m meeting_interpreter
+PYTHONPATH=src uv run --no-default-groups python -m meeting_interpreter
 ```
 
 ## 必要な道具
@@ -243,7 +245,8 @@ npm run check:dist        # ビルドした dist/ だけを、外部の URL へ�
 
 依存の版は、ロックファイルで固定します。追加と更新は、次のとおり行います。
 
-- Python: `backend/` で `uv add <パッケージ>` を実行し、`uv.lock` も一緒にコミットします
+- Python: `backend/` で `uv add <パッケージ>` を実行し、`uv.lock` も一緒にコミットします。`uv.lock` の形式の版（`revision`）は、書いた uv の版で決まります。Dockerfile の `UV_VERSION` より新しい uv で書くと、`revision` が上がります。ロックし直すときは、`uvx --from uv==<UV_VERSION の値> uv lock` のように、同じ版の uv を使います
+- Python の依存グループ: `dev`（テスト用）と `conversion`（翻訳モデルの変換の部品。PyTorch など）は、開発環境（`uv sync`）には入りますが、イメージのアプリサーバーの環境には入れません（`--no-default-groups`）。変換の部品は、イメージの別の環境に入れます（[docs/models.md](docs/models.md)）
 - 画面: `frontend/` で `../tools/with-pinned-node.sh npm install <パッケージ>` を実行し、`package-lock.json` も一緒にコミットします。素の `npm install` は、npm が 11.10 未満だと止まります（下の「公開から 7 日未満の版を使わない設定」を参照）
 - 依存は公式の配布元（PyPI と npm）から入手します。既知の脆弱性がある版は選びません
 

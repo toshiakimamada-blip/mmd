@@ -12,6 +12,7 @@ import pytest
 
 from conftest import REPO_CONFIG_DIR
 from meeting_interpreter.config_error import ConfigError
+from meeting_interpreter.models.conversion.layout import CONVERSION_SOURCE_FILES
 from meeting_interpreter.models.definition import (
     MODELS_FILE_NAME,
     ModelCatalog,
@@ -23,6 +24,11 @@ _SHA256 = "a" * 64
 _REVISION = "b" * 40
 
 
+def _file(name: str) -> dict[str, object]:
+    """テスト用の、検証を通るファイル 1 つ分の定義（辞書）を作る。"""
+    return {"name": name, "size_bytes": 10, "sha256": _SHA256}
+
+
 def _model(role: str, name: str, **overrides: object) -> dict[str, object]:
     """テスト用の、検証を通る AI モデル 1 つ分の定義（辞書）を作る。
 
@@ -31,7 +37,7 @@ def _model(role: str, name: str, **overrides: object) -> dict[str, object]:
     model: dict[str, object] = {
         "name": name,
         "role": role,
-        "repository_url": f"https://example.test/org/{name}",
+        "repository_url": f"https://huggingface.co/org/{name}",
         "revision": _REVISION,
         "license": "MIT",
         "files": [{"name": "model.bin", "size_bytes": 10, "sha256": _SHA256}],
@@ -44,7 +50,13 @@ def _valid_models() -> list[dict[str, object]]:
     """3 つの役割（文字起こし・翻訳・文章生成）を 1 つずつ持つ、検証を通る定義を作る。"""
     return [
         _model("transcription", "asr-model"),
-        _model("translation", "mt-model", license="CC BY-SA 4.0"),
+        _model(
+            "translation",
+            "mt-model",
+            license="CC BY-SA 4.0",
+            # 翻訳モデルは、変換に要る 5 つのファイルを持つ（持たない定義は、読み込みで断る）。
+            files=[_file(name) for name in sorted(CONVERSION_SOURCE_FILES)],
+        ),
         _model("generation", "llm-model", license="Apache 2.0"),
     ]
 
@@ -179,17 +191,18 @@ class TestModelCatalogValues:
 
         url = model.file_url(model.files[0])
 
-        assert url == f"https://example.test/org/asr-model/resolve/{_REVISION}/model.bin"
+        assert url == f"https://huggingface.co/org/asr-model/resolve/{_REVISION}/model.bin"
 
     def test_should_sum_the_sizes_of_all_files(self, tmp_path):
         """
         【テスト対象】ModelCatalog.total_bytes
-        【テスト内容】3 つのモデルがそれぞれ 10 バイトのファイルを 1 つずつ持つ定義を読む
-        【期待結果】全体の大きさが 30 バイトになること
+        【テスト内容】文字起こしと文章生成が 10 バイトのファイルを 1 つずつ、翻訳が 5 つ持つ
+                      定義を読む
+        【期待結果】全体の大きさが 70 バイトになること
         """
         catalog = _load(tmp_path, _render(_valid_models()))
 
-        assert catalog.total_bytes == 30
+        assert catalog.total_bytes == 70
 
 
 class TestModelCatalogValidation:
@@ -265,14 +278,14 @@ class TestModelCatalogValidation:
     @pytest.mark.parametrize(
         "url",
         [
-            "http://example.test/org/model",
-            "ftp://example.test/org/model",
-            "https://user:pass@example.test/org/model",
-            "https://example.test/org/model?download=1",
-            "https://example.test/org/model#top",
-            "https://example.test/org/model/",
+            "http://huggingface.co/org/model",
+            "ftp://huggingface.co/org/model",
+            "https://user:pass@huggingface.co/org/model",
+            "https://huggingface.co/org/model?download=1",
+            "https://huggingface.co/org/model#top",
+            "https://huggingface.co/org/model/",
             "https:///org/model",
-            "example.test/org/model",
+            "huggingface.co/org/model",
         ],
         ids=[
             "http",
@@ -298,6 +311,49 @@ class TestModelCatalogValidation:
         message = _problems(tmp_path, _render(models))
 
         assert "repository_url" in message
+
+    @pytest.mark.parametrize(
+        "url",
+        [
+            "https://example.test/org/model",
+            "https://evil.example/org/model",
+            "https://huggingface.co.evil.example/org/model",
+            "https://www.huggingface.co/org/model",
+            "https://cdn.hf.co/org/model",
+            "https://127.0.0.1/org/model",
+        ],
+        ids=["other-host", "evil-host", "suffix-trick", "subdomain", "cdn-host", "numeric-host"],
+    )
+    def test_should_reject_a_repository_host_outside_the_distribution_source(self, tmp_path, url):
+        """
+        【テスト対象】load_model_catalog（配布元のホスト）
+        【テスト内容】huggingface.co 以外のホスト（似せた名前、サブドメイン、CDN のホスト、
+                      数値の宛先）の URL を読む
+        【期待結果】誤りになること。通信の相手は AI モデルの配布元だけにする
+                    （非機能要件設計書の外部への送信の防止）。CDN のホストは、転送先としてだけ許す
+        """
+        models = _valid_models()
+        models[0]["repository_url"] = url
+
+        message = _problems(tmp_path, _render(models))
+
+        assert "repository_url" in message
+        assert "huggingface.co" in message
+
+    @pytest.mark.parametrize("name", ["converted", "converted.tmp", "converted.receipt.json"])
+    def test_should_reject_a_file_name_used_for_the_converted_model(self, tmp_path, name):
+        """
+        【テスト対象】load_model_catalog（変換のために使う名前）
+        【テスト内容】変換後のフォルダー・作業用のフォルダー・控えと同じ名前のファイルを定義する
+        【期待結果】誤りになること。入手したファイルと、変換の結果が、同じ名前で混ざらない
+        """
+        models = _valid_models()
+        models[1]["files"] = [{"name": name, "size_bytes": 10, "sha256": _SHA256}]
+
+        message = _problems(tmp_path, _render(models))
+
+        assert name in message
+        assert "変換" in message
 
     @pytest.mark.parametrize(
         "name",
@@ -407,6 +463,49 @@ class TestModelCatalogValidation:
         message = _problems(tmp_path, _render(models))
 
         assert "generation" in message
+
+    @pytest.mark.parametrize("missing", sorted(CONVERSION_SOURCE_FILES))
+    def test_should_reject_a_translation_model_without_a_file_needed_for_conversion(
+        self, tmp_path, missing
+    ):
+        """
+        【テスト対象】load_model_catalog（翻訳モデルの変換に要るファイル）
+        【テスト内容】翻訳モデルの定義から、変換に要る 5 つのファイルのうち 1 つを外して読む
+        【期待結果】足りないファイルの名前を含む誤りになること（変換の段で初めて気づくのを避ける）
+        入力例: pytorch_model.bin・config.json・vocab.json・source.spm・target.spm のそれぞれ
+        """
+        models = _valid_models()
+        models[1]["files"] = [_file(n) for n in sorted(CONVERSION_SOURCE_FILES) if n != missing]
+
+        message = _problems(tmp_path, _render(models))
+
+        assert missing in message
+        assert "変換" in message
+
+    def test_should_return_the_translation_model_from_the_catalog(self, tmp_path):
+        """
+        【テスト対象】ModelCatalog.translation_model
+        【テスト内容】3 つの役割を持つ定義から、翻訳モデルを引く
+        【期待結果】役割が翻訳の定義が返ること
+        """
+        catalog = _load(tmp_path, _render(_valid_models()))
+
+        assert catalog.translation_model.name == "mt-model"
+        assert catalog.translation_model.role is ModelRole.TRANSLATION
+
+    def test_should_bundle_a_translation_model_that_has_every_file_needed_for_conversion(self):
+        """
+        【テスト対象】同梱の models.toml
+        【テスト内容】同梱の定義を読み、翻訳モデルのファイルを調べる
+        【期待結果】変換に要る 5 つのファイルを、すべて持つこと
+        """
+        problems: list[str] = []
+        catalog = load_model_catalog(REPO_CONFIG_DIR / MODELS_FILE_NAME, problems)
+
+        assert problems == []
+        assert catalog is not None
+        names = {file.name for file in catalog.translation_model.files}
+        assert CONVERSION_SOURCE_FILES <= names
 
     def test_should_reject_an_unknown_role(self, tmp_path):
         """

@@ -56,8 +56,25 @@ sha256 = "ff77588746d3a2595d32ab5b69ffd7b95ce2441ac57533cb66fc3eb575a115cf"
 # --- 翻訳: FuguMT 英語から日本語（変換前） -----------------------------------------------
 # 開発元（staka）が配布するのは、Marian-NMT の PyTorch 形式。実行基盤（CTranslate2）の形式への変換は、
 # 入手と確認のあとに行う（ADR-16）。変換前のファイルを、ここに書いた SHA-256 で確かめる。
-# ファイルの要否（文字の分割に使う source.spm・target.spm など）は、翻訳モデルの変換方式を決める作業で
-# 確かめる。それまでは、リポジトリのモデルのファイルをすべて書いておく（README と .gitattributes を除く）。
+# 開発元が実行基盤の形式を配布していないことは、2026-10-25 に確かめた（docs/models.md）。
+#
+# 書くファイルは、変換と翻訳に要る 5 つだけ。
+# - pytorch_model.bin: 重み。
+# - config.json: モデルの構造。
+# - vocab.json: トークンと番号の対応。
+# - source.spm・target.spm: 文字の分割（SentencePiece）。変換で要り、翻訳の実行時にも要る。
+# リポジトリにある generation_config.json・special_tokens_map.json・tokenizer_config.json は、
+# 入れても外しても変換の結果（model.bin・shared_vocabulary.json・config.json）が 1 バイトも変わらないことを
+# 確かめたため、書かない（確かめた手順は docs/models.md）。
+#
+# 重みの pytorch_model.bin は pickle 形式で、SHA-256 の一致は「固定した版と同じファイル」を示すだけで、
+# 安全性は示さない。そのため、変換プロセスは、安全な読み込み（torch.load の weights_only=True）だけで
+# 読む（コードで強制している。docs/models.md の「重みの読み込み」）。
+# 2026-10-25 に、この版のファイルを実行せずに調べ、pickle が取り込む名前が次の 3 つだけであることを
+# 確かめた。版を上げるときは、同じ点検を行う。
+# - collections.OrderedDict
+# - torch.HalfStorage
+# - torch._utils._rebuild_tensor_v2
 #
 # ライセンスの補足: CC BY-SA 4.0。ただし作者の README（https://github.com/s-taka/fugumt）に
 # 「本モデルは研究用を目的に公開しています。」の記載がある。業務で使えるかは、利用者が社内の
@@ -77,37 +94,22 @@ name = "pytorch_model.bin"
 size_bytes = 121192965
 sha256 = "8b2d3d3b7da2f66dfd46187646dd1ea48918e9a5406f0153c497478432425fe8"
 
-# 以下の 7 つは求めた値。
+# 以下の 4 つは求めた値。
 [[models.files]]
 name = "config.json"
 size_bytes = 1032
 sha256 = "5b4ff210716e782cc407508f1b68a29cd5563e807cbbd6f55985a625565958a5"
 
 [[models.files]]
-name = "generation_config.json"
-size_bytes = 289
-sha256 = "449c2099e7ef43fd1ebd71d6e7d62dcf6b66831b01eda640b6f579498b3a0570"
-
-[[models.files]]
 name = "source.spm"
 size_bytes = 768297
 sha256 = "92fcbf6449e47457866ec98891dab09ef625e57d9637fe3fdbbe44fc1a365b6d"
-
-[[models.files]]
-name = "special_tokens_map.json"
-size_bytes = 74
-sha256 = "5e4d1f5e759d74cb1c2fe1d165cfc62b5237aa904de759380cd6f43042eec723"
 
 # source.spm と target.spm は、中身が同じ（同じ SHA-256）。配布元がそのように公開している。
 [[models.files]]
 name = "target.spm"
 size_bytes = 768297
 sha256 = "92fcbf6449e47457866ec98891dab09ef625e57d9637fe3fdbbe44fc1a365b6d"
-
-[[models.files]]
-name = "tokenizer_config.json"
-size_bytes = 42
-sha256 = "3694dea2589d0672ce7c10986b3f9f8e6b06c62dcfc78d62b91d197f77eb93a0"
 
 [[models.files]]
 name = "vocab.json"

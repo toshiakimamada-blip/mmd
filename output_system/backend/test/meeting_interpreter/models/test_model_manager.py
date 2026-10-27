@@ -12,7 +12,7 @@ from pathlib import Path
 import pytest
 
 from meeting_interpreter.errors import BusinessAppError
-from meeting_interpreter.models.failure import FailureKind, ModelFailure
+from meeting_interpreter.models.failure import DownloadCancelled, FailureKind, ModelFailure
 from meeting_interpreter.models.fetch import ModelFetcher
 from meeting_interpreter.models.manager import (
     MODEL_STATUS_CHANGED,
@@ -472,6 +472,123 @@ class TestConversionHook:
         assert snapshot.status is ModelStatus.FAILED
         assert snapshot.failure is FailureKind.DISK_INSUFFICIENT
 
+    def test_should_not_download_again_when_retrying_after_a_conversion_failure(self, tmp_path):
+        """
+        【テスト対象】ModelManager.retry（変換の失敗のあとのやり直し）
+        【テスト内容】変換が失敗して入手失敗になったあと、変換が直った状態でやり直しを求める
+        【期待結果】入手の部品が追加で呼ばれず（入手済みのファイルから）、変換だけをやり直して
+                    準備完了になること。通知は 確認中 → 入手中 → 変換中 → 入手失敗 →
+                    確認中 → 変換中 → 準備完了 の順
+        """
+        conversion = FakeConversion(error=ModelFailure(FailureKind.CONVERSION_FAILED))
+        manager, notifier, downloader = _manager(tmp_path, conversion=conversion)
+
+        async def scenario() -> ModelStatusSnapshot:
+            manager.start()
+            await manager.wait()
+            assert manager.snapshot.status is ModelStatus.FAILED
+            assert manager.snapshot.failure is FailureKind.CONVERSION_FAILED
+            downloads = len(downloader.calls)
+            conversion.error = None
+            manager.retry()
+            await manager.wait()
+            assert len(downloader.calls) == downloads
+            return manager.snapshot
+
+        snapshot = asyncio.run(scenario())
+
+        assert snapshot.status is ModelStatus.READY
+        assert conversion.converted == 2
+        assert notifier.statuses == [
+            "checking",
+            "downloading",
+            "converting",
+            "failed",
+            "checking",
+            "converting",
+            "ready",
+        ]
+
+    def test_should_show_converting_without_progress(self, tmp_path):
+        """
+        【テスト対象】ModelManager（変換中の表示）
+        【テスト内容】変換が終わるのを止めた状態で、準備状況の本文を調べる
+        【期待結果】状況は converting で、進み具合は null（進み具合が分からない表示）であること
+        """
+        started = threading.Event()
+        release = threading.Event()
+
+        class SlowConversion(FakeConversion):
+            async def convert(self, cancel: threading.Event) -> None:
+                started.set()
+                await asyncio.to_thread(release.wait, 5)
+                await super().convert(cancel)
+
+        manager, _, _ = _manager(tmp_path, conversion=SlowConversion())
+
+        async def scenario() -> dict[str, object]:
+            manager.start()
+            await asyncio.to_thread(started.wait, 5)
+            payload = manager.snapshot.to_payload()
+            release.set()
+            await manager.wait()
+            return payload
+
+        payload = asyncio.run(scenario())
+
+        assert payload["status"] == "converting"
+        assert payload["progress"] is None
+        assert payload["failure_kind"] is None
+
+    def test_should_pass_the_cancel_signal_and_not_fail_when_stopped_during_conversion(
+        self, tmp_path
+    ):
+        """
+        【テスト対象】ModelManager.shutdown（変換中のアプリの停止）
+        【テスト内容】変換中にアプリを止める（変換は、中止の合図で DownloadCancelled を起こす）
+        【期待結果】入手失敗にならず（変換中のまま）、次の起動で変換し直せること。
+                    変換へ渡された合図は、管理部の中止の合図であること
+        """
+        started = threading.Event()
+        received: list[threading.Event] = []
+
+        class CancellableConversion(FakeConversion):
+            async def convert(self, cancel: threading.Event) -> None:
+                received.append(cancel)
+                started.set()
+                await asyncio.to_thread(cancel.wait, 5)
+                raise DownloadCancelled
+
+        manager, _, _ = _manager(tmp_path, conversion=CancellableConversion())
+
+        async def scenario() -> None:
+            manager.start()
+            await asyncio.to_thread(started.wait, 5)
+            await manager.shutdown()
+
+        asyncio.run(scenario())
+
+        assert len(received) == 1
+        assert received[0].is_set()
+        assert manager.snapshot.status is ModelStatus.CONVERTING
+
+    def test_should_log_the_exception_type_reported_by_the_conversion(self, tmp_path, capsys):
+        """
+        【テスト対象】ModelManager（変換の失敗のログ）
+        【テスト内容】例外の種類つきの変換の失敗を起こして、標準出力のログを調べる
+        【期待結果】エラーログに MODEL_CONVERSION_FAILED と例外の種類（文面ではない）が入ること
+        """
+        failure = ModelFailure(FailureKind.CONVERSION_FAILED, exception_type="UnpicklingError")
+        manager, _, _ = _manager(tmp_path, conversion=FakeConversion(error=failure))
+
+        _run(manager)
+
+        lines = [json.loads(line) for line in capsys.readouterr().out.splitlines() if line]
+        errors = [line for line in lines if line.get("log_type") == "error"]
+        assert [(e["error_code"], e.get("exception_type")) for e in errors] == [
+            ("MODEL_CONVERSION_FAILED", "UnpicklingError")
+        ]
+
     def test_should_fail_when_the_conversion_finishes_but_is_still_incomplete(self, tmp_path):
         """
         【テスト対象】ModelManager（変換が終わったのに済んでいない）
@@ -480,7 +597,7 @@ class TestConversionHook:
         """
 
         class NeverComplete(FakeConversion):
-            async def convert(self) -> None:
+            async def convert(self, cancel: threading.Event) -> None:
                 self.converted += 1
 
         manager, _, _ = _manager(tmp_path, conversion=NeverComplete())
