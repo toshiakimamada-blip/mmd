@@ -36,6 +36,10 @@ conversion = [
     # 文字の分割。変換元のトークナイザー（MarianTokenizer）が使う。
     "sentencepiece",
 ]
+interpreter = [
+    "faster-whisper>=1.2.1",
+    "sentencepiece>=0.2.2",
+]
 
 [tool.uv]
 # アプリとして動かすだけで、ライブラリとしては配布しない。
