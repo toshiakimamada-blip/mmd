@@ -98,4 +98,24 @@ def build_engines(start: Start) -> Engines:
 
         return build_fake_engines(start.fake or FakeEngineOptions())
 
-    raise NotImplementedError("本物のエンジンは、まだ組み込んでいません")
+    if start.models is None:
+        raise ValueError("本物のエンジンには、モデルの場所が要ります")
+
+    # 本物のエンジンは、AI の部品を取り込むため、使うときまで取り込まない。
+    from . import transcriber, translator
+    from .vad import SileroSpeechDetector
+
+    threads = start.settings.interpreter_cpu_threads
+    return Engines(
+        detector=SileroSpeechDetector(),
+        transcriber=transcriber.WhisperTranscriber(
+            start.models.transcription_dir,
+            cpu_threads=threads,
+            beam_size=start.settings.transcription_beam_size,
+        ),
+        translator=translator.CTranslate2Translator(
+            start.models.translation_dir,
+            cpu_threads=threads,
+            beam_size=start.settings.translation_beam_size,
+        ),
+    )

@@ -41,7 +41,7 @@ utterance_end_silence_seconds = 0.5
 transcription_beam_size = 1
 
 # 翻訳のビーム幅（候補の数）。小さい値で速さを優先する。
-translation_beam_size = 2
+translation_beam_size = 1
 
 # 処理を待つ音声の長さ（秒）がこの値を超えたら、警告のログを出す。
 # 音声は捨てずにメモリへ溜める（1 秒あたり 32KB）。
