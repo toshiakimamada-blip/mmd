@@ -246,7 +246,7 @@ npm run check:dist        # ビルドした dist/ だけを、外部の URL へ�
 依存の版は、ロックファイルで固定します。追加と更新は、次のとおり行います。
 
 - Python: `backend/` で `uv add <パッケージ>` を実行し、`uv.lock` も一緒にコミットします。`uv.lock` の形式の版（`revision`）は、書いた uv の版で決まります。Dockerfile の `UV_VERSION` より新しい uv で書くと、`revision` が上がります。ロックし直すときは、`uvx --from uv==<UV_VERSION の値> uv lock` のように、同じ版の uv を使います
-- Python の依存グループ: `dev`（テスト用）と `conversion`（翻訳モデルの変換の部品。PyTorch など）は、開発環境（`uv sync`）には入りますが、イメージのアプリサーバーの環境には入れません（`--no-default-groups`）。変換の部品は、イメージの別の環境に入れます（[docs/models.md](docs/models.md)）
+- Python の依存グループ: `dev`（テスト用）、`conversion`（翻訳モデルの変換の部品。PyTorch など）、`interpreter`（通訳ワーカーの部品。faster-whisper など）は、開発環境（`uv sync`）には入りますが、イメージのアプリサーバーの環境には入れません（`--no-default-groups`）。変換の部品は、イメージの別の環境に入れます（[docs/models.md](docs/models.md)）。通訳ワーカーの部品は、イメージにはまだ入れていません（[docs/interpreter.md](docs/interpreter.md)）
 - 画面: `frontend/` で `../tools/with-pinned-node.sh npm install <パッケージ>` を実行し、`package-lock.json` も一緒にコミットします。素の `npm install` は、npm が 11.10 未満だと止まります（下の「公開から 7 日未満の版を使わない設定」を参照）
 - 依存は公式の配布元（PyPI と npm）から入手します。既知の脆弱性がある版は選びません
 

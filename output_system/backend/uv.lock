@@ -337,7 +337,7 @@ wheels = [
 name = "meeting-interpreter-server"
 version = "0.1.0"
 source = { virtual = "." }
-default-groups = ["conversion", "dev"]
+default-groups = ["conversion", "dev", "interpreter"]
 dependencies = [
     { name = "fastapi" },
     { name = "uvicorn" },
