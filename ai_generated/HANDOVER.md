@@ -7,7 +7,8 @@
 - 実行基盤: Docker コンテナ 1 つ（土台 ubuntu:24.04）。名前付きボリューム 2 つ（記録・モデル）
 - クールダウン: uv は `exclude-newer = "7 days"`（`backend/pyproject.toml`）、npm は `min-release-age=7`（`frontend/.npmrc`）
 - AI モデルの入手: 依存を足さず、標準ライブラリの HTTPS クライアント（urllib）で自前に行う
-- 翻訳モデルの変換: 部品（PyTorch の CPU 版 wheel、transformers、CTranslate2、SentencePiece）は依存グループ `conversion`（`uv.lock` で固定）。開発環境の `uv sync` には入り、イメージではアプリサーバーの環境に入れず `/opt/conversion-venv` にだけ入れる（展開後 約 1.33GB）。faster-whisper と llama.cpp は、まだ入れていない
+- 通訳ワーカー: faster-whisper（Whisper small.en。Silero VAD の ONNX 形式が同梱。ONNX Runtime で動かす）、CTranslate2（FuguMT）、SentencePiece。依存グループ `interpreter`（`uv.lock` で固定。開発環境の `uv sync` の既定に入る）。PyTorch は使わない。**出荷するイメージには、まだ入れていない**（Dockerfile は `--no-default-groups`）
+- 翻訳モデルの変換: 部品（PyTorch の CPU 版 wheel、transformers、CTranslate2、SentencePiece）は依存グループ `conversion`（`uv.lock` で固定）。開発環境の `uv sync` には入り、イメージではアプリサーバーの環境に入れず `/opt/conversion-venv` にだけ入れる（展開後 約 1.33GB）。llama.cpp は、まだ入れていない
 
 ## ディレクトリ構成
 ```
@@ -28,10 +29,11 @@ output_system/
 │   │   ├── errors.py         # 画面へ返すエラーの共通の形（3 分類・9 領域・例外ハンドラー）
 │   │   ├── healthcheck.py    # HEALTHCHECK 用（外向きの通信の例外: 127.0.0.1 だけ）
 │   │   ├── child_process.py  # ワーカー・変換プロセスの起動の入口。自動入手と利用状況の送信を止める環境変数を必ず付ける
+│   │   ├── interpreter/      # 通訳ワーカー（会議の間だけ動く別のプロセス）。protocol.py（メッセージの型とフレーム）、client.py（親側の起動・送受信・停止）、entry.py/__main__.py（子の入口。通信を断つ備え）、worker.py（待ち行列と字幕の組み立て）、segmenter.py/vad.py（発話の区切り）、transcriber.py、translator.py、engines.py/fake.py（差し替え口と偽のエンジン）、locations.py、settings.py。使い方・測定値は docs/interpreter.md
 │   │   ├── models/           # モデル管理部。definition.py（定義の検証）、store.py（置き場・一致の確認）、download.py（唯一の外向きの通信）、hosts.py（通信を許すホスト）、fetch.py（確認→入手の流れ）、manager.py（準備状況）、failure.py（失敗の原因）
 │   │   │   └── conversion/   # 翻訳モデルの変換。アプリサーバー側: service.py（管理部への口）・process.py（起動と見届け）・receipt.py（控えと判定）・layout.py・protocol.py。変換プロセス側: worker.py・network_guard.py・sandbox.py・safe_torch.py
 │   │   └── api/{health,models}.py  # GET /api/health、GET /api/models/status、POST /api/models/retry
-│   └── test/                 # src と同じ構造。test/container/ は起動したコンテナを相手にする（MMD_CONTAINER_URL のときだけ動く）。test/browser/ はブラウザーで手動で確かめる確認用のサーバー（pytest は集めない）。test/distribution_server.py（擬似の配布元、HTTPS）と test/model_fakes.py（小さな定義・偽の入手の部品）は共通の道具
+│   └── test/                 # src と同じ構造。test/container/ は起動したコンテナを相手にする（MMD_CONTAINER_URL のときだけ動く）。test/browser/ はブラウザーで手動で確かめる確認用のサーバー（pytest は集めない）。test/distribution_server.py（擬似の配布元、HTTPS）と test/model_fakes.py（小さな定義・偽の入手の部品）と test/interpreter_audio.py（合成音声・音声ファイルの読み込み）は共通の道具。test/measure/measure_interpreter.py は、本物のモデルで字幕の遅れとメモリを測る道具（pytest は集めない）
 ├── frontend/
 │   ├── src/{routes.ts,router.tsx,components/AppFrame.tsx,screens/*,styles/{frame,notices}.css}
 │   ├── scripts/              # ビルドした dist/ に外部の URL への参照が無いかの検査（npm run build の最後に走る）
@@ -40,7 +42,7 @@ output_system/
 │   └── test/                 # src と同じ構造
 ├── tools/with-pinned-node.sh # Dockerfile と同じ版の Node.js で、渡されたコマンド（npm install など）を実行する
 ├── config/                   # tuning.toml（調整値の仮置き）、models.toml（3 つの AI モデルの定義）、translation_alternatives.md（翻訳モデルの代わりの候補）
-├── docs/                     # errors.md（エラーの扱い・コード一覧）、notices.md（画面の部品の使い方）
+├── docs/                     # errors.md（エラーの扱い・コード一覧）、notices.md（画面の部品の使い方）、models.md（入手・変換）、interpreter.md（通訳ワーカー・測定値）
 ```
 
 ## ビルド・起動方法
@@ -49,6 +51,7 @@ output_system/
 - テスト: `backend/` で `uv sync --locked && uv run pytest`、`frontend/` で `npm ci && npm test`。`npm ci` と `npm install` は Node 24 / npm 11.10 以上が要る。開発用コンテナ（Node 22 / npm 10）では `../tools/with-pinned-node.sh npm ci` のように付けて実行する
 - 出荷するコンテナの WebSocket の確認: `docker compose up -d --build` のあと、`backend/` で `MMD_CONTAINER_URL=http://toshiakimamada-blip-mmd-output-system:3001 uv run pytest test/container --no-cov`
 - ブラウザーでの WebSocket の確認（CSP のもとで接続できるか）: `backend/` で `uv run python test/browser/serve_websocket_check.py --port 3101 --app-hostname <開発用コンテナ名>` を起動し、`playwright-cli` で `http://localhost:3101/`・`http://127.0.0.1:3101/`・`http://<コンテナ名>:3101/` を開く。Edge は `--config` の `executablePath` で指す（README「ブラウザーでの WebSocket の確認」）
+- 本物のモデルを使う確認（通常の `pytest` では飛ばす）: コンテナのボリュームから `docker cp <コンテナ>:/var/lib/mmd/models/whisper-small-en` と `.../fugumt-en-ja` を `/tmp/mmd-models/` へ取り出し、`MMD_TEST_MODELS_DIR=/tmp/mmd-models MMD_TEST_SPEECH_FILE=<英語の音声> uv run pytest test/meeting_interpreter/interpreter/test_interpreter_real_models.py --no-cov`。測定は `uv run python test/measure/measure_interpreter.py --models-dir /tmp/mmd-models --speech <音声> --repeat 6`（引数は docs/interpreter.md）
 - 社内の証明書: 既定でリポジトリ直下の `ssl-certificates/` を登録する。フォルダーが無い環境は `SSL_CERTS_DIR=<空のフォルダー>` を付ける
 - AI モデルの入手: コンテナを起動すると、自動で始まる（初回は約 3.1GB、10MB/s 前後で約 5 分）。`curl http://toshiakimamada-blip-mmd-output-system:3001/api/models/status` で見る。2 回目以降の起動は、確認（約 5 秒）だけで入手しない。モデル置き場のボリューム `toshiakimamada-blip-mmd-models` を消すと入手し直しになる
 
@@ -87,6 +90,11 @@ output_system/
 - 翻訳モデルの定義は、変換に要る 5 ファイル（`CONVERSION_SOURCE_FILES`）を持つこと（起動時に検査）。ファイル名に `converted`・`converted.tmp`・`converted.receipt.json` は使えない
 - 失敗の原因は `FailureKind`（5 つ + 分類できない `unknown`）。エラーコードは `MODEL_*`。画面の文言は `frontend/src/errors/errorMessages.ts`。取得の応答は HTTP のエラーではなく準備状況の一部として返す。入手失敗でない状態のやり直しだけが業務エラー（409）
 - テスト: 本物の入手はしない。`test/distribution_server.py` が手元の HTTPS の擬似の配布元（openssl で自己署名の証明書をテストごとに作る）を立てる。`conftest.py` の自動の見張りが、手元以外への接続と名前の解決をテスト全体で失敗にする。他のテストのアプリは、開始しても何もしない `IdleModelManager` で組み立てる（アプリの起動が入手を始めるため）
+- 通訳ワーカーは、親が `python -P -s -m meeting_interpreter.interpreter --output-fd N` で起動する別のプロセス。入力は子の標準入力、出力は親が用意した別のパイプ（標準出力はログのために残す）。どちらも `[長さ 4 バイト][種類 1 バイト][本体]` の枠で運び、形に厳密に当てはまらない枠は `ProtocolError`。音声は 1 秒 32KB のため共有メモリは使わない。字幕の順番はワーカーが付けず、親が振る（データモデルの「字幕」）
+- 通訳ワーカーは、入口のスレッド（音声を区切って待ち行列へ入れるだけ）・処理のスレッド（文字起こし→翻訳）・知らせのスレッド（処理を待つ音声の長さを 1 秒ごとに親へ）に分ける。処理が遅くても音声を読み続け、捨てない。区切りの音声は、字幕を出した時点で参照を外す。待つ音声が `interpreter_backlog_warning_seconds`（300 秒）を超えたら警告のログを 1 回出す。終了処理（Finish）は待ち行列を空にしてから、停止（Stop）は待ち行列を捨てて、停止完了を返す。どちらも最後は `os._exit` で終える（AI の部品が終わらないスレッドを作っても止まるように）
+- 通訳ワーカーの外へ通信しない備えは変換プロセスと同じ 3 段（環境変数・`network_guard`・seccomp）。seccomp は numpy や AI の部品が作るスレッドより先に入れる（すでにあるスレッドには効かない）ため、`entry.py` は重い部品を入れたあとに取り込む。入れられないときは開始の失敗を返し、AI の部品を動かさない。数えた試みの回数は停止完了の `network_attempts` で親へ返す（0 でなければならない）
+- 文字起こしは、前の区切りの文章を次の条件に使わない。無音や雑音で Whisper が出す幻覚（「you」など）は、声が無い確からしさが 0.6 を超える区間を除いて防ぐ。翻訳は文を分けず、原文を 1 件ずつ訳す（2 文でも欠けなかった）。翻訳が失敗したか空なら、日本語訳を `None` にして字幕を出す。文字起こしの失敗は、その区切りを飛ばして回復できるエラーを返す
+- 声の検出は、faster-whisper に同梱の Silero VAD（ONNX）を使う（1 秒分の判定が約 2 ミリ秒）。文字起こしの所要時間は区切りの長さにほとんど依らない（0.5〜5 秒の区切りで約 2〜3.7 秒）ため、約 2 秒より短い間隔で発話が続くと処理が追いつかず、たまる。測定値と配分との比較は docs/interpreter.md
 - Node.js は 24.21.0 に固定（24.22.0 は公開から 7 日未満のため見送り）。SHA-256 も Dockerfile で固定
 - コンテナは非 root（uid 10001 の app）。2 つのボリュームの置き場は、イメージの中で app が持ち主になる
 
@@ -116,6 +124,9 @@ output_system/
 - 社内の通信を検査する証明書の下での入手は、実機では未確認。このコンテナの経路では HF の証明書は検査されていない（発行元は Amazon）。仕組みは `SSL_CERT_FILE` を使う自動テストで確認した
 - Docker に buildx が無く、`docker build` は旧ビルダーになる。追加の文脈（`certs`）は `docker compose build` で渡す
 
+- `uv sync`（既定の依存グループ）に `interpreter` を入れていなかったため、素の `uv sync --locked` が faster-whisper・onnxruntime・av を外し、通訳ワーカーのテストが落ちた。`default-groups` に足した（`uv.lock` の `default-groups` の 1 行も変わる。`uv lock --check` で確かめる）
+- `ruff` の E501 は、日本語の文字を幅 2 で数える。日本語の長い文字列は、100 桁に収まるよう分ける
+- 本物のモデルでの測定は、約 90 秒かかり、CPU を使い切る。ほかの重い処理（pytest 全体など）と同時に走らせると、遅れの値が悪くなる。ファイルのキャッシュが効いた状態の値のため、初回の読み込みは別に測る
 - slots の dataclass には `__dict__` が無い。コピーして一部を変えるときは `dataclasses.replace`
 - 変換の自動テストの本物の変換（小さな翻訳モデル）は 1 回で数秒かかる。変換プロセスの結果をアプリサーバーが使う処理は、偽の起動（`FakeRunner`）に差し替えて確かめる
 - CTranslate2 は CPU で、保存された `int8_float16` を `int8_float32` に自動で直し、警告を 1 行出す。翻訳の結果には影響しない
@@ -128,3 +139,4 @@ output_system/
 - PBI #12: 接続元の制限（宛先 Host と送り元 Origin の判定、WebSocket の送り元必須、CORS なし、断った要求の接続ログ）、応答ヘッダー（CSP・nosniff・Referrer-Policy・X-Frame-Options）、ビルドの外部 URL 検査
 - PBI #17: AI モデルの定義と検証、モデル置き場と一致の確認、HTTPS での入手（続きから・進み具合・失敗の原因 5 種）、準備状況の取得とやり直し（`/api/models/status`・`/retry`）、起動時の非同期の開始、外向きの通信を入手の部品だけに限る検査、ワーカー・変換プロセスの起動の入口。通知の送り先は未接続
 - PBI #23: 翻訳モデルの変換（別のプロセス、外へ通信しない 3 段の備え、安全な重みの読み込み）、変換後のハッシュ値の控えと変換し直しの判定、準備状況の「変換中」と失敗（翻訳モデルを変換できない）、入手のやり直しで変換だけをやり直す流れ。測定値（イメージ +1.33GB、変換のメモリの最大値 約 625MB）は `output_system/docs/models.md`
+- PBI #28: 通訳ワーカー（別のプロセス）。16kHz・モノラルの音声を無音と長さの上限（5 秒）で区切り、Whisper small.en で英語の文字に、FuguMT で日本語にして、段ごとの所要時間と先頭の音声が届いた日時つきの字幕を返す。失敗した区切りは飛ばし、翻訳の失敗は日本語訳なしで出す。処理が追いつかなくても音声を捨てず、届いた順に処理する。外へ通信しない備え 3 段。本物のモデルでの測定（字幕の遅れ 平均 5.3 秒・最大 7.6 秒、ワーカーのメモリ 最大 約 0.82GB）は `output_system/docs/interpreter.md`。会議管理部・画面・保存は含まない
