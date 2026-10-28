@@ -14,6 +14,12 @@ AI の実行基盤（Hugging Face の部品、llama.cpp など）は、次の 2 
 - アプリサーバー自身の環境変数にも、起動のときに反映する（apply_offline_environment）。
   このプロセスが起動する子のプロセス（multiprocessing を含む）は、環境変数を引き継ぐ。
 
+会議の間ずっと動く子の入口（start_worker_process）
+- 通訳ワーカーのように、会議の間ずっと動いて、親とメッセージをやり取りする子は、
+  start_worker_process で起動する。子の標準入力へ書く口と、子の出力を受け取るパイプ
+  （子には --output-fd で番号を渡す）を持つ。
+  止めるときは、プロセスのグループごと止める（孫のプロセスを残さない）。
+
 終わりまで見届ける入口（run_child_process）
 - 変換プロセスのように、始めてから終わるまでを 1 回で扱うプロセスは、run_child_process で動かす。
   標準出力と標準エラーを上限つきで読み（子の出力の量で、アプリサーバーのメモリを使い切らない）、
@@ -186,6 +192,123 @@ def _stop(process: "subprocess.Popen[bytes]", grace_seconds: float) -> None:
     # 強制終了は、猶予の中で終わっていても送る（孫のプロセスが残らないように）。
     _signal_group(process.pid, signal.SIGKILL)
     process.wait()
+
+
+class WorkerProcess:
+    """会議の間ずっと動く子のプロセス。標準入力へ書き、出力のパイプを持ち、止められる。
+
+    子の標準出力と標準エラーは、親のものをそのまま使う（ログの出力先）。
+    子からのメッセージは、出力のパイプ（output_fd）で受け取る。
+    """
+
+    def __init__(self, process: "subprocess.Popen[bytes]", output_fd: int) -> None:
+        self._process = process
+        self._output_fd = output_fd
+        self._output_closed = False
+        self._lock = threading.Lock()
+
+    @property
+    def pid(self) -> int:
+        """子のプロセス番号。"""
+        return self._process.pid
+
+    @property
+    def output_fd(self) -> int:
+        """子の出力を読むパイプ（読み取り側）。close_output で閉じる。"""
+        return self._output_fd
+
+    def write(self, data: bytes) -> None:
+        """子の標準入力へ書く。書き終わるまで戻らない（子が読まないと止まる）。
+
+        Raises:
+            OSError: 子が終わっていて、書けないとき（BrokenPipeError を含む）。
+        """
+        stdin = self._process.stdin
+        if stdin is None:
+            raise BrokenPipeError("子の標準入力は閉じられています")
+        with self._lock:
+            stdin.write(data)
+            stdin.flush()
+
+    def poll(self) -> int | None:
+        """子が終わっていれば終了コード、動いていれば None。"""
+        return self._process.poll()
+
+    def wait(self, timeout: float | None = None) -> int | None:
+        """子の終わりを待つ。時間内に終わらなければ None。"""
+        try:
+            return self._process.wait(timeout=timeout)
+        except subprocess.TimeoutExpired:
+            return None
+
+    def stop(self, grace_seconds: float = DEFAULT_TERMINATE_GRACE_SECONDS) -> int:
+        """子のプロセスのグループを止める。先に終了の合図、猶予のあとに強制終了。
+
+        子が自分で終わっていても、強制終了を送り、孫のプロセスを残さない。止めたあとに呼んでも害は無い。
+
+        Returns:
+            子の終了コード。信号で終わったときは負の値。
+        """
+        try:
+            if self._process.stdin is not None:
+                self._process.stdin.close()
+        except OSError:
+            pass  # 子がすでに終わっていて、閉じるときの書き込みが失敗した
+        _stop(self._process, grace_seconds)
+        assert self._process.returncode is not None
+        return self._process.returncode
+
+    def close_output(self) -> None:
+        """出力のパイプ（読み取り側）を閉じる。出力を読むスレッドが終わってから呼ぶ。何回呼んでもよい。
+
+        読んでいる最中に閉じると、別の用途に再利用された番号を読んでしまうおそれがある。
+        そのため stop は閉じず、読む側が終わったあとに、呼び出し側が閉じる。
+        """
+        with self._lock:
+            if not self._output_closed:
+                self._output_closed = True
+                os.close(self._output_fd)
+
+
+def start_worker_process(
+    args: Sequence[str],
+    *,
+    env_extra: Mapping[str, str] | None = None,
+    cwd: Path | str | None = None,
+    **popen_options: Any,
+) -> WorkerProcess:
+    """会議の間ずっと動く子のプロセスを起動する。止める環境変数が必ず付く。
+
+    子には、引数の末尾に `--output-fd <番号>` を足して渡す。子はその番号のパイプへ書く。
+    子は新しいセッション（プロセスのグループ）で動かす。
+
+    Args:
+        args: 起動するコマンドと引数。シェルを通さない。
+        env_extra: 追加の環境変数。止める環境変数は、これで外せない。
+        cwd: 子の作業フォルダー。
+
+    Raises:
+        TypeError: env を直接指定したとき、またはシェルを通す指定をしたとき
+            （start_child_process と同じ）。
+    """
+    read_fd, write_fd = os.pipe()
+    try:
+        process = start_child_process(
+            [*args, "--output-fd", str(write_fd)],
+            env_extra=env_extra,
+            cwd=cwd,
+            stdin=subprocess.PIPE,
+            pass_fds=(write_fd,),
+            start_new_session=True,
+            **popen_options,
+        )
+    except BaseException:
+        os.close(read_fd)
+        raise
+    finally:
+        # 書き込み側は子が持つ。親が持ち続けると、子が終わっても読み取り側が終わりを検出できない。
+        os.close(write_fd)
+    return WorkerProcess(process, read_fd)
 
 
 def run_child_process(

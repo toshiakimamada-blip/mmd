@@ -392,3 +392,127 @@ class TestRunChildProcess:
         """
         with pytest.raises(TypeError):
             run_child_process(_python("pass"), env={"PATH": "/usr/bin"})  # type: ignore[call-arg]
+
+
+class TestStartWorkerProcess:
+    """長く動くワーカーの起動（標準入力へ書き、出力用のパイプを受け取る）。"""
+
+    # 子が、出力用のパイプの番号（--output-fd）を読み、標準入力から読んだ内容をそのまま書き戻す。
+    ECHO = (
+        "import os, sys\n"
+        "fd = int(sys.argv[sys.argv.index('--output-fd') + 1])\n"
+        "os.write(fd, os.read(0, 100))\n"
+        "os.write(fd, os.environ.get('HF_HUB_OFFLINE', 'unset').encode())\n"
+    )
+
+    def test_should_pass_the_input_and_the_output_pipe_with_the_offline_variables(self):
+        """
+        【テスト対象】start_worker_process
+        【テスト内容】標準入力の内容と環境変数を、出力用のパイプへ書き戻す子を起動する
+        【期待結果】子に標準入力へ書いた内容が届き、出力用のパイプで受け取れること。
+                    止める環境変数（HF_HUB_OFFLINE=1）が付いていること
+        """
+        from meeting_interpreter.child_process import start_worker_process
+
+        worker = start_worker_process([sys.executable, "-c", self.ECHO])
+        try:
+            worker.write(b"ping")
+            received = b""
+            while len(received) < len(b"ping1"):
+                received += os.read(worker.output_fd, 100)
+        finally:
+            worker.stop(grace_seconds=1.0)
+            worker.close_output()
+
+        assert received == b"ping1"
+
+    def test_should_not_let_extra_variables_turn_the_protection_off(self):
+        """
+        【テスト対象】start_worker_process
+        【テスト内容】止める環境変数を 0 に戻そうとする追加の環境変数を付けて起動する
+        【期待結果】子から見える値は 1 のまま
+        """
+        from meeting_interpreter.child_process import start_worker_process
+
+        worker = start_worker_process(
+            [sys.executable, "-c", self.ECHO], env_extra={"HF_HUB_OFFLINE": "0"}
+        )
+        try:
+            worker.write(b"x")
+            received = b""
+            while len(received) < len(b"x1"):
+                received += os.read(worker.output_fd, 100)
+        finally:
+            worker.stop(grace_seconds=1.0)
+            worker.close_output()
+
+        assert received.endswith(b"1")
+
+    def test_should_stop_the_worker_and_its_children_and_leave_nothing_behind(self):
+        """
+        【テスト対象】WorkerProcess.stop
+        【テスト内容】終了の合図を無視する子と、その孫を起動し、止める
+        【期待結果】子も孫も残らない（プロセスのグループごと止める）。止めたあとの stop は何もしない
+        """
+        from meeting_interpreter.child_process import start_worker_process
+
+        code = (
+            "import os, signal, subprocess, sys, time\n"
+            "signal.signal(signal.SIGTERM, signal.SIG_IGN)\n"
+            "grandchild = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(60)'])\n"
+            "fd = int(sys.argv[sys.argv.index('--output-fd') + 1])\n"
+            "os.write(fd, str(grandchild.pid).encode() + b'\\n')\n"
+            "time.sleep(60)\n"
+        )
+        worker = start_worker_process([sys.executable, "-c", code])
+        grandchild_pid = int(os.read(worker.output_fd, 100).strip())
+
+        returncode = worker.stop(grace_seconds=0.3)
+        worker.stop(grace_seconds=0.3)
+        worker.close_output()
+        worker.close_output()
+
+        assert returncode != 0
+        assert worker.poll() == returncode
+        with pytest.raises(ProcessLookupError):
+            os.kill(worker.pid, 0)
+        # 孫は、プロセスのグループへの強制終了で止まる。孫の後始末（親が引き取る）を少し待つ。
+        deadline = time.monotonic() + 5
+        while time.monotonic() < deadline:
+            try:
+                os.kill(grandchild_pid, 0)
+            except ProcessLookupError:
+                break
+            time.sleep(0.05)
+        with pytest.raises(ProcessLookupError):
+            os.kill(grandchild_pid, 0)
+
+    def test_should_report_a_process_that_exited_by_itself(self):
+        """
+        【テスト対象】WorkerProcess.wait と poll
+        【テスト内容】すぐに終わる子を起動し、終わりを待つ
+        【期待結果】終了コードが返ること。終わる前の poll は None、時間切れの wait は None
+        """
+        from meeting_interpreter.child_process import start_worker_process
+
+        worker = start_worker_process(
+            [sys.executable, "-c", "import sys, time; time.sleep(0.3); sys.exit(7)"]
+        )
+        try:
+            assert worker.poll() is None
+            assert worker.wait(timeout=0.01) is None
+            assert worker.wait(timeout=5) == 7
+        finally:
+            worker.stop(grace_seconds=0.1)
+            worker.close_output()
+
+    def test_should_refuse_to_take_the_environment_directly(self):
+        """
+        【テスト対象】start_worker_process
+        【テスト内容】env を直接指定して起動する
+        【期待結果】TypeError（止める環境変数を外せてしまうため）
+        """
+        from meeting_interpreter.child_process import start_worker_process
+
+        with pytest.raises(TypeError):
+            start_worker_process([sys.executable, "-c", "pass"], env={})  # type: ignore[call-arg]
