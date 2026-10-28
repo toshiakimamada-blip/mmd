@@ -5,12 +5,11 @@
 本物の声の検出（Silero VAD）は、test_interpreter_silero.py で確かめる。
 """
 
-import math
 from datetime import UTC, datetime, timedelta
 
-import numpy as np
 import pytest
 
+from interpreter_audio import seconds_of, silence, tone
 from meeting_interpreter.interpreter.engines import WINDOW_SAMPLES
 from meeting_interpreter.interpreter.fake import EnergySpeechDetector
 from meeting_interpreter.interpreter.protocol import SAMPLE_RATE
@@ -25,23 +24,6 @@ from meeting_interpreter.interpreter.segmenter import (
 WINDOW_SECONDS = WINDOW_SAMPLES / SAMPLE_RATE
 
 START = datetime(2026, 10, 27, 12, 0, 0, tzinfo=UTC)
-
-
-def tone(seconds: float, amplitude: float = 0.3) -> bytes:
-    """440Hz の音（声の代わり）を、16 ビットの PCM にする。"""
-    count = round(seconds * SAMPLE_RATE)
-    wave = amplitude * np.sin(2 * math.pi * 440 * np.arange(count) / SAMPLE_RATE)
-    return (wave * 32767).astype("<i2").tobytes()
-
-
-def silence(seconds: float) -> bytes:
-    """無音を、16 ビットの PCM にする。"""
-    return bytes(round(seconds * SAMPLE_RATE) * 2)
-
-
-def seconds_of(pcm: bytes) -> float:
-    """PCM の長さ（秒）。"""
-    return len(pcm) / 2 / SAMPLE_RATE
 
 
 def make_segmenter(

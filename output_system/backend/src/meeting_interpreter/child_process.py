@@ -227,8 +227,23 @@ class WorkerProcess:
         if stdin is None:
             raise BrokenPipeError("子の標準入力は閉じられています")
         with self._lock:
-            stdin.write(data)
-            stdin.flush()
+            try:
+                stdin.write(data)
+                stdin.flush()
+            except ValueError:
+                # 閉じたあとに書いた。子が終わっているときと同じ扱いにする。
+                raise BrokenPipeError("子の標準入力は閉じられています") from None
+
+    def close_input(self) -> None:
+        """子の標準入力を閉じる。子から見ると、親が消えたのと同じになる。"""
+        stdin = self._process.stdin
+        if stdin is None:
+            return
+        with self._lock:
+            try:
+                stdin.close()
+            except OSError:
+                pass  # 閉じるときの書き込みが失敗した。子がすでに終わっている。
 
     def poll(self) -> int | None:
         """子が終わっていれば終了コード、動いていれば None。"""
