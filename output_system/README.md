@@ -10,7 +10,7 @@
 | `frontend/` | 画面。TypeScript と React を Vite でビルドします。ロックファイルは `package-lock.json` です |
 | `config/` | アプリに同梱する設定ファイル。調整値（`tuning.toml`）と、AI モデルの定義（`models.toml`。翻訳モデルの代わりの候補は `translation_alternatives.md`） |
 | `tools/` | 補助の道具。画面の依存を足すときに、固定した Node.js で実行する `with-pinned-node.sh` など |
-| `docs/` | 実装に付ける文書。エラーの扱いと、エラーコードの一覧は `docs/errors.md`。お知らせ帯とエラー表示の部品の使い方は `docs/notices.md`。AI モデルの入手と、翻訳モデルの変換（確かめた結果、部品、測定値）は `docs/models.md` |
+| `docs/` | 実装に付ける文書。エラーの扱いと、エラーコードの一覧は `docs/errors.md`。お知らせ帯とエラー表示の部品の使い方は `docs/notices.md`。AI モデルの入手と、翻訳モデルの変換（確かめた結果、部品、測定値）は `docs/models.md`。通訳ワーカー（音声から字幕を作る別のプロセス）の構成、測り方、字幕の遅れとメモリの測定値、外へ通信しない確認は `docs/interpreter.md` |
 
 テストは、各フォルダの `src/` と同じ階層の `test/` に置き、`src/` と同じ構造にします。起動したコンテナを相手にするテストだけは、`backend/test/container/` に置きます。ブラウザーで手動で確かめるための確認用のサーバーは、`backend/test/browser/` に置きます（pytest は集めません）。
 
