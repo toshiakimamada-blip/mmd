@@ -21,6 +21,7 @@ from meeting_interpreter.interpreter.client import (
     WorkerStartError,
 )
 from meeting_interpreter.interpreter.protocol import (
+    Backlog,
     ErrorKind,
     FakeEngineOptions,
     OutputMessage,
@@ -325,3 +326,83 @@ class TestNoExternalCommunication:
 
         assert isinstance(stopped, Stopped)
         assert stopped.network_attempts == 0
+
+
+class TestSlowProcessing:
+    """処理が音声に追いつかないとき。音声を捨てず、届いた順に処理する。"""
+
+    # 文字起こし 1 件に 0.6 秒かかる偽のエンジン。
+    SLOW = FakeEngineOptions(transcribe_delay_seconds=0.6)
+
+    @staticmethod
+    def five_utterances() -> bytes:
+        """声 1 秒と無音 1 秒の組を 5 回（10 秒分。パイプの容量 64KB の約 5 倍）。"""
+        return (tone(1.0) + silence(1.0)) * 5
+
+    def test_should_keep_reading_audio_while_the_engines_are_slow(self, client):
+        """
+        【テスト対象】通訳ワーカー（受け取りと処理の分離）
+        【テスト内容】1 件 0.6 秒かかるエンジンで、10 秒分の音声（5 件の区切り）を 0.5 秒分ずつ送る
+        【期待結果】送り終えるのに、処理の合計（約 3 秒）より短い時間しかかからないこと
+                    （処理中も音声を読み続けるため、親の書き込みが止まらない）
+        """
+        client.start(fake_start(self.SLOW), timeout_seconds=START_TIMEOUT)
+        audio = self.five_utterances()
+        chunk = 16000
+
+        started = time.monotonic()
+        for index, offset in enumerate(range(0, len(audio), chunk)):
+            client.send_audio(
+                audio[offset : offset + chunk], START + timedelta(seconds=0.5 * index)
+            )
+        elapsed = time.monotonic() - started
+
+        assert elapsed < 1.5
+
+    def test_should_output_every_subtitle_in_order_and_show_the_waiting(self, client):
+        """
+        【テスト対象】通訳ワーカー（追いつかないときの処理）
+        【テスト内容】5 件の区切りを一度に送り、終了処理を依頼する
+        【期待結果】字幕が 5 件、区切りができた順に出ること（音声が失われない）。
+                    待ち時間が件ごとに伸びること。遅れの見込みが、待つ音声の長さとして知らされ、
+                    正の値が含まれること。そのあと停止完了が来ること
+        """
+        client.start(fake_start(self.SLOW), timeout_seconds=START_TIMEOUT)
+        client.send_audio(self.five_utterances(), START)
+        client.finish()
+
+        messages = read_until(client, (Stopped,), timeout=30)
+
+        subtitles = [message for message in messages if isinstance(message, Subtitle)]
+        assert [item.english.split(" (")[0] for item in subtitles] == [
+            f"utterance {index}" for index in range(5)
+        ]
+        waits = [item.timings.wait_seconds for item in subtitles]
+        assert waits == sorted(waits)
+        assert waits[-1] > waits[0] + 1.0
+        backlog = [m.pending_audio_seconds for m in messages if isinstance(m, Backlog)]
+        assert backlog
+        assert max(backlog) > 0
+
+    def test_should_stop_at_once_even_when_many_utterances_are_waiting(self, client):
+        """
+        【テスト対象】InterpreterClient.stop（待っている区切りがあるとき）
+        【テスト内容】1 件 1 秒かかるエンジンに、5 件の区切りを送ってから、停止する
+        【期待結果】待っている区切りを字幕にせず、処理を待たずに停止完了が返ること（3 秒以内）。
+                    ワーカーのプロセスは残らない
+        """
+        client.start(
+            fake_start(FakeEngineOptions(transcribe_delay_seconds=1.0)),
+            timeout_seconds=START_TIMEOUT,
+        )
+        pid = client.pid
+        client.send_audio(self.five_utterances(), START)
+        time.sleep(0.3)
+
+        started = time.monotonic()
+        stopped = client.stop(timeout_seconds=10)
+        elapsed = time.monotonic() - started
+
+        assert isinstance(stopped, Stopped)
+        assert elapsed < 3.0
+        assert pid is not None and process_group_members(pid) == []

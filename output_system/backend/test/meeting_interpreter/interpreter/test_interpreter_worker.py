@@ -70,10 +70,17 @@ def make_worker(
     return worker, sent
 
 
+def settle(worker: InterpreterWorker) -> None:
+    """待っている区切りを、すべて処理する（受け取りと処理は分かれているため）。"""
+    while worker.process_next():
+        pass
+
+
 def say(worker: InterpreterWorker, *bursts: float, at: datetime = START) -> None:
     """声（音）と無音を交互に、1 つの音声として渡す。最後は、区切りが確定する無音で終える。"""
     audio = b"".join(tone(seconds) + silence(1.0) for seconds in bursts)
     worker.accept_audio(Audio(pcm=audio, received_at=at))
+    settle(worker)
 
 
 def subtitles(sent: list[OutputMessage]) -> list[Subtitle]:
@@ -120,6 +127,7 @@ class TestSubtitles:
 
         worker.accept_audio(Audio(pcm=tone(1.0) + silence(1.0), received_at=moment))
         worker.accept_audio(Audio(pcm=tone(1.0) + silence(1.0), received_at=moment))
+        settle(worker)
 
         first, second = subtitles(sent)
         assert first.received_at == moment
@@ -153,6 +161,7 @@ class TestSubtitles:
         worker.accept_audio(Audio(pcm=tone(1.5), received_at=START))
         assert subtitles(sent) == []
         worker.finish()
+        settle(worker)
 
         assert len(subtitles(sent)) == 1
 
@@ -256,6 +265,7 @@ class TestSilence:
         worker, sent = make_worker()
 
         worker.accept_audio(Audio(pcm=silence(12.0), received_at=START))
+        settle(worker)
 
         assert [type(message) for message in sent] == [Silence]
         assert isinstance(sent[0], Silence)

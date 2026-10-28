@@ -8,17 +8,22 @@ test_interpreter_process.py にある。
 
 import os
 import threading
-from collections.abc import Iterator
+import time
+from collections.abc import Callable, Iterator
 from dataclasses import dataclass
 from datetime import UTC, datetime
+from typing import Any
 
 import pytest
 
 from interpreter_audio import silence, tone
 from meeting_interpreter.interpreter import entry
+from meeting_interpreter.interpreter.engines import Engines
 from meeting_interpreter.interpreter.entry import EXIT_FAILED, EXIT_OK, OutputWriter, serve
+from meeting_interpreter.interpreter.fake import build_fake_engines
 from meeting_interpreter.interpreter.protocol import (
     Audio,
+    Backlog,
     ErrorKind,
     FakeEngineOptions,
     Finish,
@@ -58,6 +63,8 @@ class Session:
     receive: FrameReader
     thread: threading.Thread
     result: list[int]
+    # 処理のスレッドが想定外の失敗をして、プロセスを終えようとしたときの終了コード。
+    exits: list[int]
 
     def send(self, message: InputMessage) -> None:
         os.write(self.send_fd, encode_input(message))
@@ -81,25 +88,53 @@ class Session:
 
 
 @pytest.fixture
-def session() -> Iterator[Session]:
-    """入口を動かす。終わりに、パイプを閉じる。"""
-    in_read, in_write = os.pipe()
-    out_read, out_write = os.pipe()
-    result: list[int] = []
+def open_session() -> Iterator[Callable[..., Session]]:
+    """入口を動かす関数を返す。終わりに、開いたパイプをすべて閉じる。
 
-    def run() -> None:
-        result.append(serve(FrameReader(in_read), OutputWriter(out_write), NetworkGuard()))
-        os.close(out_write)
+    serve の想定外の失敗でプロセスを終える関数は、記録するだけのものに差し替える
+    （本物の os._exit は、テストを動かしているプロセスごと終えてしまう）。
+    """
+    opened: list[Session] = []
+    descriptors: list[int] = []
 
-    thread = threading.Thread(target=run, daemon=True)
-    thread.start()
-    current = Session(in_write, FrameReader(out_read), thread, result)
-    yield current
-    if current.send_fd >= 0:
-        os.close(current.send_fd)
-    thread.join(timeout=5)
-    os.close(out_read)
-    os.close(in_read)
+    def open_one(**serve_options: Any) -> Session:
+        in_read, in_write = os.pipe()
+        out_read, out_write = os.pipe()
+        descriptors.extend([in_read, out_read])
+        result: list[int] = []
+        exits: list[int] = []
+
+        def run() -> None:
+            result.append(
+                serve(
+                    FrameReader(in_read),
+                    OutputWriter(out_write),
+                    NetworkGuard(),
+                    exit_process=exits.append,
+                    **serve_options,
+                )
+            )
+            os.close(out_write)
+
+        thread = threading.Thread(target=run, daemon=True)
+        thread.start()
+        current = Session(in_write, FrameReader(out_read), thread, result, exits)
+        opened.append(current)
+        return current
+
+    yield open_one
+    for current in opened:
+        if current.send_fd >= 0:
+            os.close(current.send_fd)
+        current.thread.join(timeout=5)
+    for descriptor in descriptors:
+        os.close(descriptor)
+
+
+@pytest.fixture
+def session(open_session) -> Session:
+    """既定の設定で動かす入口。"""
+    return open_session()
 
 
 def fake_start(options: FakeEngineOptions | None = None, trace_id: str | None = "t-1") -> Start:
@@ -318,3 +353,109 @@ class TestLogLevel:
         monkeypatch.setenv("MMD_LOG_LEVEL", value)
 
         assert entry._log_level() == expected  # noqa: SLF001
+
+
+class TestThreads:
+    """処理・知らせのスレッドの動き。"""
+
+    SLOW = FakeEngineOptions(transcribe_delay_seconds=0.3)
+
+    def test_should_report_the_waiting_audio_at_the_given_interval_while_processing(
+        self, open_session
+    ):
+        """
+        【テスト対象】serve（遅れの見込みの定期的な知らせ）
+        【テスト内容】知らせる間隔を 0.05 秒にして、1 件 0.3 秒かかるエンジンに 3 件の区切りを送る
+        【期待結果】処理の途中で、遅れの見込み（正の値）が知らされ、字幕もすべて出ること
+        """
+        session = open_session(backlog_interval_seconds=0.05)
+        session.send(fake_start(self.SLOW))
+        session.read()
+
+        session.send(Audio(pcm=(tone(1.0) + silence(1.0)) * 3, received_at=START))
+        session.send(Finish())
+        received = [session.read()]
+        while not isinstance(received[-1], Stopped):
+            received.append(session.read())
+
+        assert any(isinstance(m, Backlog) and m.pending_audio_seconds > 0 for m in received)
+        assert len([m for m in received if isinstance(m, Subtitle)]) == 3
+
+    def test_should_write_nothing_after_the_stopped_message_even_if_processing_is_in_flight(
+        self, open_session
+    ):
+        """
+        【テスト対象】serve（停止完了が最後のメッセージ）
+        【テスト内容】文字起こしの途中（1 件 0.3 秒）で停止する
+        【期待結果】停止完了のあとに、字幕などのメッセージが書かれないこと
+                    （停止完了のあと、出力が終わりまで読めて、何も続かない）
+        """
+        session = open_session()
+        session.send(fake_start(self.SLOW))
+        session.read()
+        session.send(Audio(pcm=(tone(1.0) + silence(1.0)) * 2, received_at=START))
+        time.sleep(0.1)
+
+        session.send(Stop())
+
+        assert isinstance(session.read(), Stopped)
+        assert session.exit_code() == EXIT_OK
+        time.sleep(0.5)  # 処理の途中だった文字起こしが終わるのを待つ。
+        assert session.receive.read_frame(timeout=1) is None
+
+    def test_should_report_an_internal_error_and_end_the_process_when_processing_fails(
+        self, open_session, monkeypatch
+    ):
+        """
+        【テスト対象】serve（処理のスレッドの想定外の失敗）
+        【テスト内容】文字起こしが Exception でない失敗（BaseException）を起こすエンジンで、声を送る
+        【期待結果】回復できない INTERNAL_ERROR が返り、プロセスを終える関数が
+                    終了コード 1 で呼ばれること
+                    （入口のスレッドは親の読み取りで止まっているため、処理のスレッドが終える）
+        """
+
+        class Fatal(BaseException):
+            pass
+
+        class Exploding:
+            def transcribe(self, samples):
+                raise Fatal
+
+        base = build_fake_engines(FakeEngineOptions())
+        monkeypatch.setattr(
+            "meeting_interpreter.interpreter.engines.build_engines",
+            lambda start: Engines(base.detector, Exploding(), base.translator),
+        )
+        session = open_session()
+        session.send(fake_start())
+        session.read()
+
+        session.send(Audio(pcm=tone(1.0) + silence(1.0), received_at=START))
+
+        error = session.read()
+        assert isinstance(error, WorkerError)
+        assert (error.kind, error.recoverable) == (ErrorKind.INTERNAL_ERROR, False)
+        deadline = time.monotonic() + 5
+        while not session.exits and time.monotonic() < deadline:
+            time.sleep(0.01)
+        assert session.exits == [EXIT_FAILED]
+
+    def test_should_drain_every_waiting_utterance_before_the_stopped_message(self, open_session):
+        """
+        【テスト対象】serve（終了処理の依頼で、待ち行列を空にする）
+        【テスト内容】1 件 0.3 秒かかるエンジンに 4 件を送り、すぐ終了処理を依頼する
+        【期待結果】字幕が 4 件、順に出てから、停止完了が来ること
+        """
+        session = open_session()
+        session.send(fake_start(self.SLOW))
+        session.read()
+        session.send(Audio(pcm=(tone(1.0) + silence(1.0)) * 4, received_at=START))
+        session.send(Finish())
+
+        received = [session.read() for _ in range(5)]
+
+        assert [type(m) for m in received[:4]] == [Subtitle] * 4
+        assert isinstance(received[4], Stopped)
+        assert [m.english.split(" (")[0] for m in received[:4] if isinstance(m, Subtitle)] == [
+            f"utterance {index}" for index in range(4)
+        ]

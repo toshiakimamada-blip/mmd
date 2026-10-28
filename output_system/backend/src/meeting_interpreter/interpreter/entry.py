@@ -19,9 +19,14 @@ OS の仕組みは、UNIX ドメイン以外のソケットと、32 ビットの
 このワーカーが動かす部品（faster-whisper・CTranslate2・ONNX Runtime）は、どちらも使わない。
 別の部品を足すときは、これを使わないことを先に確かめる。
 
+スレッド（処理が音声に追いつかなくても、音声を受け取り続けるため）
+- 入口のスレッド（主）: 親からのメッセージを読み、音声を発話の区切りにして、待ち行列へ入れる
+- 処理のスレッド: 待ち行列の区切りを、文字起こしと翻訳で字幕にして、親へ返す
+- 知らせのスレッド: 処理を待つ音声の長さを、一定の間隔で親へ知らせる
+
 停止の手順
-- 終了処理の依頼（Finish）: 残りの音声を字幕にして、停止完了を返し、終わる
-- 停止（Stop）: 残りを字幕にせず、停止完了を返して、すぐ終わる
+- 終了処理の依頼（Finish）: 待ち行列が空になるまで字幕にして、停止完了を返し、終わる
+- 停止（Stop）: 待ち行列を捨て、停止完了を返して、すぐ終わる
 - 親が標準入力を閉じた（親が消えた）: 何も返さず、終わる
 終わるときは、AI の部品が作った終わらないスレッドがあっても止まるよう、プロセスを直接終える
 （__main__.py）。終わると、AI モデルが使っていたメモリが戻る。
@@ -32,9 +37,9 @@ import os
 import resource
 import threading
 import time
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass
-from typing import Final
+from typing import TYPE_CHECKING, Final
 
 from ..logs import configure_logging, log_error, log_processing, new_trace_id
 from ..models.conversion import network_guard, sandbox
@@ -55,12 +60,18 @@ from .protocol import (
     encode_output,
 )
 
+if TYPE_CHECKING:
+    from .worker import InterpreterWorker
+
 # 終了コード。
 EXIT_OK: Final = 0
 EXIT_FAILED: Final = 1
 
 # 親から読む標準入力のファイル記述子。
 STDIN_FD: Final = 0
+
+# 遅れの見込み（処理を待つ音声の長さ）を、親へ知らせる間隔（秒）。
+BACKLOG_REPORT_SECONDS: Final = 1.0
 
 # ログに書くコンポーネントの名前。
 COMPONENT = "interpreter_worker"
@@ -91,18 +102,26 @@ class OutputWriter:
     def __init__(self, fd: int) -> None:
         self._fd = fd
         self._lock = threading.Lock()
+        self._closed = False
 
     def send(self, message: OutputMessage) -> None:
-        """メッセージを 1 つ書く。書き終わるまで戻らない。
+        """メッセージを 1 つ書く。書き終わるまで戻らない。閉じたあとは、何も書かない。
 
         Raises:
             OSError: 親が読み取り側を閉じたとき（BrokenPipeError を含む）。
         """
         frame = memoryview(encode_output(message))
         with self._lock:
+            if self._closed:
+                return
             while frame:
                 written = os.write(self._fd, frame)
                 frame = frame[written:]
+
+    def close(self) -> None:
+        """以後、何も書かない。停止完了を最後のメッセージにするため、書いたあとに呼ぶ。"""
+        with self._lock:
+            self._closed = True
 
 
 def peak_memory_mb() -> float:
@@ -116,8 +135,23 @@ def _log_level() -> str:
     return value if value in LOG_LEVEL_NAMES else DEFAULT_LOG_LEVEL
 
 
-def serve(reader: FrameReader, writer: OutputWriter, guard: network_guard.NetworkGuard) -> int:
+def serve(
+    reader: FrameReader,
+    writer: OutputWriter,
+    guard: network_guard.NetworkGuard,
+    *,
+    backlog_interval_seconds: float = BACKLOG_REPORT_SECONDS,
+    exit_process: Callable[[int], None] = os._exit,
+) -> int:
     """開始を待ち、AI モデルを読み込み、終わりまでメッセージを処理する。
+
+    Args:
+        reader: 親からのメッセージを読む口。
+        writer: 親へのメッセージを書く口。
+        guard: 外への通信の試みを数える見張り。
+        backlog_interval_seconds: 遅れの見込みを知らせる間隔（秒）。
+        exit_process: 処理のスレッドが想定外の失敗をしたときに、プロセスを終える関数。
+            入口のスレッドは、親からの読み取りで止まっているため、戻って終わらせられない。
 
     Returns:
         終了コード。
@@ -161,6 +195,66 @@ def serve(reader: FrameReader, writer: OutputWriter, guard: network_guard.Networ
     writer.send(Ready(load_seconds=load_seconds, trace_id=trace_id))
 
     worker = InterpreterWorker(engines, start.settings, trace_id=trace_id, send=writer.send)
+    shutdown = threading.Event()
+
+    def process() -> None:
+        """処理のスレッド。待ち行列の区切りを、終了処理か停止まで処理する。"""
+        try:
+            worker.run()
+        except BaseException as error:  # noqa: BLE001 (想定外の失敗は、種類を問わず、プロセスを終える)
+            log_error(
+                "SYSTEM_INTERPRETER_FAILED",
+                COMPONENT,
+                trace_id=trace_id,
+                exception_type=type(error).__name__,
+            )
+            try:
+                writer.send(WorkerError(ErrorKind.INTERNAL_ERROR, False, trace_id))
+            except OSError:
+                pass  # 親へ書けない。親が消えている。
+            exit_process(EXIT_FAILED)
+
+    def report() -> None:
+        """知らせのスレッド。遅れの見込みを、一定の間隔で親へ知らせる。"""
+        while not shutdown.wait(backlog_interval_seconds):
+            try:
+                worker.report_backlog()
+            except OSError:
+                return  # 親へ書けない。親が消えている。
+
+    processing = threading.Thread(target=process, name="interpreter-process", daemon=True)
+    reporting = threading.Thread(target=report, name="interpreter-report", daemon=True)
+    processing.start()
+    reporting.start()
+
+    try:
+        code = _read_messages(reader, writer, worker, processing, trace_id, guard)
+    except Exception as error:  # noqa: BLE001 (想定外の失敗は、種類を問わず、回復できないエラーにする)
+        log_error(
+            "SYSTEM_INTERPRETER_FAILED",
+            COMPONENT,
+            trace_id=trace_id,
+            exception_type=type(error).__name__,
+        )
+        writer.send(WorkerError(ErrorKind.INTERNAL_ERROR, False, trace_id))
+        code = EXIT_FAILED
+    finally:
+        # 終わるとき、処理のスレッドが親へ書き続けないようにする（停止完了のあとにも書かない）。
+        worker.stop()
+        writer.close()
+        shutdown.set()
+    return code
+
+
+def _read_messages(
+    reader: FrameReader,
+    writer: OutputWriter,
+    worker: "InterpreterWorker",
+    processing: threading.Thread,
+    trace_id: str,
+    guard: network_guard.NetworkGuard,
+) -> int:
+    """親からのメッセージを、終わりまで読んで処理する。終了コードを返す。"""
     while True:
         try:
             frame = reader.read_frame()
@@ -175,16 +269,18 @@ def serve(reader: FrameReader, writer: OutputWriter, guard: network_guard.Networ
             worker.accept_audio(message)
         elif isinstance(message, Finish):
             worker.finish()
+            processing.join()  # 待ち行列が空になるまで処理する。
             break
         elif isinstance(message, Stop):
+            worker.stop()
             break
         else:
             writer.send(WorkerError(ErrorKind.PROTOCOL_ERROR, False, trace_id))
             return EXIT_FAILED
 
-    stopped = Stopped(network_attempts=guard.attempts, trace_id=trace_id)
     log_processing("interpreter_worker_stopped", trace_id=trace_id, peak_memory_mb=peak_memory_mb())
-    writer.send(stopped)
+    writer.send(Stopped(network_attempts=guard.attempts, trace_id=trace_id))
+    writer.close()  # 停止完了が最後のメッセージ。処理のスレッドが、このあと書かないようにする。
     return EXIT_OK
 
 
