@@ -4,8 +4,10 @@ AI の実行基盤は、モデルを自動で入手する機能と、利用状�
 モデル管理部の入手だけにするため、ワーカーと変換プロセスの起動には、これらを止める環境変数を必ず付ける。
 """
 
+import contextlib
 import json
 import os
+import signal
 import sys
 import threading
 import time
@@ -392,3 +394,232 @@ class TestRunChildProcess:
         """
         with pytest.raises(TypeError):
             run_child_process(_python("pass"), env={"PATH": "/usr/bin"})  # type: ignore[call-arg]
+
+
+class TestStartWorkerProcess:
+    """長く動くワーカーの起動（標準入力へ書き、出力用のパイプを受け取る）。"""
+
+    # 子が、出力用のパイプの番号（--output-fd）を読み、標準入力から読んだ内容をそのまま書き戻す。
+    ECHO = (
+        "import os, sys\n"
+        "fd = int(sys.argv[sys.argv.index('--output-fd') + 1])\n"
+        "os.write(fd, os.read(0, 100))\n"
+        "os.write(fd, os.environ.get('HF_HUB_OFFLINE', 'unset').encode())\n"
+    )
+
+    def test_should_pass_the_input_and_the_output_pipe_with_the_offline_variables(self):
+        """
+        【テスト対象】start_worker_process
+        【テスト内容】標準入力の内容と環境変数を、出力用のパイプへ書き戻す子を起動する
+        【期待結果】子に標準入力へ書いた内容が届き、出力用のパイプで受け取れること。
+                    止める環境変数（HF_HUB_OFFLINE=1）が付いていること
+        """
+        from meeting_interpreter.child_process import start_worker_process
+
+        worker = start_worker_process([sys.executable, "-c", self.ECHO])
+        try:
+            worker.write(b"ping")
+            received = b""
+            while len(received) < len(b"ping1"):
+                received += os.read(worker.output_fd, 100)
+        finally:
+            worker.stop(grace_seconds=1.0)
+            worker.close_output()
+
+        assert received == b"ping1"
+
+    def test_should_not_let_extra_variables_turn_the_protection_off(self):
+        """
+        【テスト対象】start_worker_process
+        【テスト内容】止める環境変数を 0 に戻そうとする追加の環境変数を付けて起動する
+        【期待結果】子から見える値は 1 のまま
+        """
+        from meeting_interpreter.child_process import start_worker_process
+
+        worker = start_worker_process(
+            [sys.executable, "-c", self.ECHO], env_extra={"HF_HUB_OFFLINE": "0"}
+        )
+        try:
+            worker.write(b"x")
+            received = b""
+            while len(received) < len(b"x1"):
+                received += os.read(worker.output_fd, 100)
+        finally:
+            worker.stop(grace_seconds=1.0)
+            worker.close_output()
+
+        assert received.endswith(b"1")
+
+    def test_should_stop_the_worker_and_its_children_and_leave_nothing_behind(self):
+        """
+        【テスト対象】WorkerProcess.stop
+        【テスト内容】終了の合図を無視する子と、その孫を起動し、止める
+        【期待結果】子も孫も残らない（プロセスのグループごと止める）。止めたあとの stop は何もしない
+        """
+        from meeting_interpreter.child_process import start_worker_process
+
+        code = (
+            "import os, signal, subprocess, sys, time\n"
+            "signal.signal(signal.SIGTERM, signal.SIG_IGN)\n"
+            "grandchild = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(60)'])\n"
+            "fd = int(sys.argv[sys.argv.index('--output-fd') + 1])\n"
+            "os.write(fd, str(grandchild.pid).encode() + b'\\n')\n"
+            "time.sleep(60)\n"
+        )
+        worker = start_worker_process([sys.executable, "-c", code])
+        grandchild_pid = int(os.read(worker.output_fd, 100).strip())
+
+        returncode = worker.stop(grace_seconds=0.3)
+        worker.stop(grace_seconds=0.3)
+        worker.close_output()
+        worker.close_output()
+
+        assert returncode != 0
+        assert worker.poll() == returncode
+        with pytest.raises(ProcessLookupError):
+            os.kill(worker.pid, 0)
+        # 孫は、プロセスのグループへの強制終了で止まる。孫の後始末（親が引き取る）を少し待つ。
+        deadline = time.monotonic() + 5
+        while time.monotonic() < deadline:
+            try:
+                os.kill(grandchild_pid, 0)
+            except ProcessLookupError:
+                break
+            time.sleep(0.05)
+        with pytest.raises(ProcessLookupError):
+            os.kill(grandchild_pid, 0)
+
+    def test_should_report_a_process_that_exited_by_itself(self):
+        """
+        【テスト対象】WorkerProcess.wait と poll
+        【テスト内容】すぐに終わる子を起動し、終わりを待つ
+        【期待結果】終了コードが返ること。終わる前の poll は None、時間切れの wait は None
+        """
+        from meeting_interpreter.child_process import start_worker_process
+
+        worker = start_worker_process(
+            [sys.executable, "-c", "import sys, time; time.sleep(0.3); sys.exit(7)"]
+        )
+        try:
+            assert worker.poll() is None
+            assert worker.wait(timeout=0.01) is None
+            assert worker.wait(timeout=5) == 7
+        finally:
+            worker.stop(grace_seconds=0.1)
+            worker.close_output()
+
+    # 標準入力を読まずに眠る子。親の書き込みは、パイプが満杯になると止まる。
+    NEVER_READ = "import time\ntime.sleep(120)\n"
+
+    def test_should_stop_a_worker_that_does_not_read_while_a_write_is_blocked(self):
+        """
+        【テスト対象】WorkerProcess.stop（書き込みが止まっているとき）
+        【テスト内容】標準入力を読まない子に、別のスレッドで 4MiB を書き込み、パイプの満杯で
+                    止まっている最中に stop を呼ぶ
+        【期待結果】stop が止まった書き込みを待たずに戻り、子が強制終了されること。
+                    止まっていた書き込みは OSError で終わる
+        """
+        from meeting_interpreter.child_process import start_worker_process
+
+        worker = start_worker_process([sys.executable, "-c", self.NEVER_READ])
+        errors: list[OSError] = []
+
+        def write_much() -> None:
+            try:
+                worker.write(b"x" * (4 * 1024 * 1024))
+            except OSError as error:
+                errors.append(error)
+
+        writer = threading.Thread(target=write_much, daemon=True)
+        returned: list[int] = []
+        stopper = threading.Thread(
+            target=lambda: returned.append(worker.stop(grace_seconds=0.5)), daemon=True
+        )
+        try:
+            writer.start()
+            time.sleep(0.5)
+            assert writer.is_alive(), "パイプが満杯になり、書き込みが止まっているはず"
+
+            stopper.start()
+            stopper.join(timeout=10)
+            assert not stopper.is_alive(), "stop が戻りません"
+        finally:
+            with contextlib.suppress(ProcessLookupError):
+                os.killpg(worker.pid, signal.SIGKILL)
+            writer.join(timeout=10)
+            worker.close_output()
+
+        assert returned and returned[0] != 0
+        assert not writer.is_alive()
+        assert len(errors) == 1
+
+    def test_should_give_up_a_timed_write_when_another_write_holds_the_pipe(self):
+        """
+        【テスト対象】WorkerProcess.write の timeout
+        【テスト内容】標準入力を読まない子に、別のスレッドで 4MiB を書き込んで止めておき、
+                    timeout=0.3 つきで小さなデータを書く
+        【期待結果】0.3 秒ほどで TimeoutError（OSError の一種）になり、待ち続けないこと
+        """
+        from meeting_interpreter.child_process import start_worker_process
+
+        worker = start_worker_process([sys.executable, "-c", self.NEVER_READ])
+
+        def write_much() -> None:
+            with contextlib.suppress(OSError):
+                worker.write(b"x" * (4 * 1024 * 1024))
+
+        writer = threading.Thread(target=write_much, daemon=True)
+        try:
+            writer.start()
+            time.sleep(0.5)
+
+            started = time.monotonic()
+            with pytest.raises(TimeoutError):
+                worker.write(b"stop", timeout=0.3)
+            elapsed = time.monotonic() - started
+        finally:
+            worker.stop(grace_seconds=0.2)
+            writer.join(timeout=10)
+            worker.close_output()
+
+        assert elapsed < 3.0
+
+    def test_should_give_up_a_timed_write_when_the_pipe_is_full_and_nothing_else_writes(self):
+        """
+        【テスト対象】WorkerProcess.write の timeout
+        【テスト内容】標準入力を読まない子のパイプを、非ブロックで満杯にしておき、
+                    timeout=0.3 つきで小さなデータを書く
+        【期待結果】0.3 秒ほどで TimeoutError になり、待ち続けないこと
+        """
+        from meeting_interpreter.child_process import start_worker_process
+
+        worker = start_worker_process([sys.executable, "-c", self.NEVER_READ])
+        try:
+            assert worker._process.stdin is not None
+            fd = worker._process.stdin.fileno()
+            os.set_blocking(fd, False)
+            with contextlib.suppress(BlockingIOError):
+                while True:
+                    os.write(fd, b"x" * 4096)
+            os.set_blocking(fd, True)
+
+            started = time.monotonic()
+            with pytest.raises(TimeoutError):
+                worker.write(b"stop", timeout=0.3)
+            elapsed = time.monotonic() - started
+        finally:
+            worker.stop(grace_seconds=0.2)
+            worker.close_output()
+
+        assert elapsed < 3.0
+
+    def test_should_refuse_to_take_the_environment_directly(self):
+        """
+        【テスト対象】start_worker_process
+        【テスト内容】env を直接指定して起動する
+        【期待結果】TypeError（止める環境変数を外せてしまうため）
+        """
+        from meeting_interpreter.child_process import start_worker_process
+
+        with pytest.raises(TypeError):
+            start_worker_process([sys.executable, "-c", "pass"], env={})  # type: ignore[call-arg]

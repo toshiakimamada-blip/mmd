@@ -1,0 +1,580 @@
+"""通訳ワーカーを、別のプロセスとして起動して確かめるテスト。
+
+親側のクライアント（interpreter/client.py）が、ワーカーのプロセスを起動・停止し、メッセージをやり取りする。
+AI モデルは、偽のエンジン（開始のメッセージの engine が fake）に差し替えて、同じ契約で動かす。
+本物の AI モデルでの確認は、test_interpreter_real_models.py にある。
+"""
+
+import contextlib
+import os
+import signal
+import sys
+import threading
+import time
+from collections.abc import Iterator
+from datetime import UTC, datetime, timedelta
+from pathlib import Path
+
+import pytest
+
+from interpreter_audio import silence, tone
+from meeting_interpreter.child_process import OFFLINE_ENVIRONMENT
+from meeting_interpreter.interpreter.client import (
+    InterpreterClient,
+    WorkerExited,
+    WorkerStartError,
+)
+from meeting_interpreter.interpreter.protocol import (
+    Backlog,
+    ErrorKind,
+    FakeEngineOptions,
+    OutputMessage,
+    Ready,
+    Start,
+    Stopped,
+    Subtitle,
+    WorkerError,
+)
+from meeting_interpreter.interpreter.settings import InterpreterSettings
+from meeting_interpreter.logs.trace import is_valid_trace_id
+
+START = datetime(2026, 10, 27, 12, 0, 0, tzinfo=UTC)
+
+SETTINGS = InterpreterSettings(
+    interpreter_cpu_threads=2,
+    utterance_max_seconds=5.0,
+    utterance_end_silence_seconds=0.5,
+    silence_wait_seconds=10.0,
+    transcription_beam_size=1,
+    translation_beam_size=1,
+    interpreter_backlog_warning_seconds=300.0,
+)
+
+# 子のプロセスが起動して準備完了になるまでの上限（秒）。偽のエンジンなら 1 秒前後。
+START_TIMEOUT = 30.0
+# 1 つのメッセージを待つ上限（秒）。
+MESSAGE_TIMEOUT = 20.0
+
+
+def fake_start(options: FakeEngineOptions | None = None, trace_id: str | None = "t-start") -> Start:
+    """偽のエンジンで動かす、開始のメッセージ。"""
+    return Start(
+        trace_id=trace_id,
+        engine="fake",
+        settings=SETTINGS,
+        fake=options or FakeEngineOptions(),
+    )
+
+
+@pytest.fixture
+def client() -> Iterator[InterpreterClient]:
+    """テストの終わりに、必ずワーカーを止めるクライアント。"""
+    instance = InterpreterClient()
+    yield instance
+    instance.stop()
+
+
+def read_until(
+    client: InterpreterClient, kinds: tuple[type, ...], timeout: float = MESSAGE_TIMEOUT
+) -> list[OutputMessage | WorkerExited]:
+    """kinds のどれかが来るまでのメッセージを、すべて集める（来たものも含む）。"""
+    collected: list[OutputMessage | WorkerExited] = []
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        item = client.get(timeout=max(deadline - time.monotonic(), 0.0))
+        if item is None:
+            break
+        collected.append(item)
+        if isinstance(item, kinds):
+            return collected
+    pytest.fail(f"待っていたメッセージが来ませんでした: 受け取った {collected}")
+
+
+def process_group_members(group: int) -> list[int]:
+    """プロセスのグループに残っているプロセスの番号を、/proc から調べる。"""
+    members: list[int] = []
+    for entry in Path("/proc").iterdir():
+        if not entry.name.isdigit():
+            continue
+        try:
+            stat = (entry / "stat").read_text()
+        except OSError:
+            continue
+        # 形式: pid (comm) state ppid pgrp ...。comm に空白や括弧が入りうるため、最後の ) から読む。
+        fields = stat.rsplit(")", 1)[1].split()
+        if int(fields[2]) == group and fields[0] != "Z":
+            members.append(int(entry.name))
+    return members
+
+
+class TestLifecycle:
+    """起動・準備完了・終了処理・停止。"""
+
+    def test_should_start_in_a_separate_process_and_report_ready(self, client):
+        """
+        【テスト対象】InterpreterClient.start
+        【テスト内容】偽のエンジンで、ワーカーを別のプロセスとして起動する
+        【期待結果】準備完了が返り、読み込みの所要時間が 0 以上であること。
+                    開始で渡した処理の識別子が、準備完了に引き継がれていること。
+                    ワーカーはこのテストとは別のプロセスであること
+        """
+        ready = client.start(fake_start(trace_id="trace-abc"), timeout_seconds=START_TIMEOUT)
+
+        assert isinstance(ready, Ready)
+        assert ready.load_seconds >= 0.0
+        assert ready.trace_id == "trace-abc"
+        assert client.pid is not None and client.pid != os.getpid()
+
+    def test_should_issue_a_trace_id_when_the_start_message_has_none(self, client):
+        """
+        【テスト対象】InterpreterClient.start（処理の識別子の発行）
+        【テスト内容】処理の識別子を持たない開始のメッセージで起動する
+        【期待結果】ワーカーが新しい識別子を発行し、準備完了で返すこと
+        """
+        ready = client.start(fake_start(trace_id=None), timeout_seconds=START_TIMEOUT)
+
+        assert is_valid_trace_id(ready.trace_id)
+
+    def test_should_turn_audio_into_a_subtitle_across_the_processes(self, client):
+        """
+        【テスト対象】InterpreterClient.send_audio と get
+        【テスト内容】0.5 秒ごとに届いた音声（無音 1 秒、声 1 秒、無音 1 秒）を送る
+        【期待結果】字幕が 1 件返り、英語の原文と日本語訳があること。
+                    先頭の音声が届いた日時が、声を含む最初の塊の日時であること
+        """
+        client.start(fake_start(), timeout_seconds=START_TIMEOUT)
+        audio = silence(1.0) + tone(1.0) + silence(1.0)
+        chunk = 16000  # 0.5 秒分のバイト数
+        for index, offset in enumerate(range(0, len(audio), chunk)):
+            client.send_audio(
+                audio[offset : offset + chunk], START + timedelta(seconds=0.5 * index)
+            )
+
+        [subtitle] = [
+            message for message in read_until(client, (Subtitle,)) if isinstance(message, Subtitle)
+        ]
+
+        assert subtitle.english.startswith("utterance 0")
+        assert subtitle.japanese == f"訳 {subtitle.english}"
+        # 声は 1.0 秒に始まる。先頭の余白（約 0.19 秒）を含めた先頭は 0.8 秒台で、0.5 秒の塊に入る。
+        assert subtitle.received_at == START + timedelta(seconds=0.5)
+        assert is_valid_trace_id(subtitle.trace_id)
+
+    def test_should_finish_the_remaining_audio_and_exit_cleanly(self, client):
+        """
+        【テスト対象】InterpreterClient.finish
+        【テスト内容】無音で終わらない声を送ってから、終了処理を依頼する
+        【期待結果】残りの声が字幕になり、そのあと停止完了が返ること。
+                    停止完了の通信の試みは 0。プロセスは終了コード 0 で終わり、残らない
+        """
+        client.start(fake_start(), timeout_seconds=START_TIMEOUT)
+        pid = client.pid
+        client.send_audio(tone(1.5), START)
+
+        client.finish()
+        messages = read_until(client, (Stopped,))
+
+        assert [type(message) for message in messages] == [Subtitle, Stopped]
+        stopped = messages[-1]
+        assert isinstance(stopped, Stopped)
+        assert stopped.network_attempts == 0
+        assert client.wait_exit(timeout_seconds=10) == 0
+        assert pid is not None and process_group_members(pid) == []
+
+    def test_should_stop_at_once_without_making_subtitles_of_the_remaining_audio(self, client):
+        """
+        【テスト対象】InterpreterClient.stop
+        【テスト内容】声の途中の音声を送ってから、停止する
+        【期待結果】停止完了が返り、字幕は出ないこと。ワーカーのプロセスも、その子も残らない
+        """
+        client.start(fake_start(), timeout_seconds=START_TIMEOUT)
+        pid = client.pid
+        client.send_audio(tone(1.5), START)
+
+        stopped = client.stop(timeout_seconds=10)
+
+        assert isinstance(stopped, Stopped)
+        assert pid is not None
+        with pytest.raises(ProcessLookupError):
+            os.kill(pid, 0)
+        assert process_group_members(pid) == []
+
+    def test_should_do_nothing_when_stopped_twice_or_before_start(self):
+        """
+        【テスト対象】InterpreterClient.stop
+        【テスト内容】起動前、停止後に stop を呼ぶ
+        【期待結果】例外にならず、None を返すこと
+        """
+        client = InterpreterClient()
+        assert client.stop() is None
+        client.start(fake_start(), timeout_seconds=START_TIMEOUT)
+        assert isinstance(client.stop(timeout_seconds=10), Stopped)
+        assert client.stop() is None
+
+    def test_should_reject_a_second_start_on_the_same_client(self, client):
+        """
+        【テスト対象】InterpreterClient.start
+        【テスト内容】起動済みのクライアントで、もう一度 start を呼ぶ
+        【期待結果】RuntimeError（ワーカーは 1 つのクライアントにつき 1 つ）
+        """
+        client.start(fake_start(), timeout_seconds=START_TIMEOUT)
+
+        with pytest.raises(RuntimeError):
+            client.start(fake_start(), timeout_seconds=START_TIMEOUT)
+
+
+class TestStartFailure:
+    """開始に失敗したとき。"""
+
+    def test_should_report_a_start_failure_and_leave_no_process(self, client):
+        """
+        【テスト対象】InterpreterClient.start（AI モデルの読み込みの失敗）
+        【テスト内容】読み込みに失敗する偽のエンジンで起動する
+        【期待結果】WorkerStartError（種類は START_FAILED）になること。ワーカーのプロセスは残らない
+        """
+        with pytest.raises(WorkerStartError) as caught:
+            client.start(
+                fake_start(FakeEngineOptions(load_fails=True)), timeout_seconds=START_TIMEOUT
+            )
+
+        assert caught.value.kind is ErrorKind.START_FAILED
+        assert client.pid is None or process_group_members(client.pid) == []
+
+    def test_should_time_out_when_the_worker_does_not_become_ready(self, client):
+        """
+        【テスト対象】InterpreterClient.start（準備完了の待ち時間）
+        【テスト内容】待ち時間を 0.01 秒にして起動する（準備完了より短い）
+        【期待結果】WorkerStartError になり、ワーカーのプロセスは残らないこと
+        """
+        with pytest.raises(WorkerStartError):
+            client.start(fake_start(), timeout_seconds=0.01)
+
+        assert client.pid is None or process_group_members(client.pid) == []
+
+
+class TestProtocolErrors:
+    """親からの入力が壊れているとき。"""
+
+    def test_should_report_a_protocol_error_and_exit_when_the_input_is_broken(self, client):
+        """
+        【テスト対象】ワーカーの入力の検査
+        【テスト内容】フレームの形をしていない入力（種類が不明な JSON）を送る
+        【期待結果】回復できない PROTOCOL_ERROR を返し、ワーカーは 0 以外の終了コードで終わること
+        """
+        client.start(fake_start(), timeout_seconds=START_TIMEOUT)
+        # 長さ 2、種類 9（知らない種類）、本体 {}。クライアントを通さず、子の標準入力へ直接書く。
+        client._worker.write(b"\x00\x00\x00\x02\x09{}")  # noqa: SLF001
+
+        messages = read_until(client, (WorkerExited,))
+
+        errors = [message for message in messages if isinstance(message, WorkerError)]
+        assert [(error.kind, error.recoverable) for error in errors] == [
+            (ErrorKind.PROTOCOL_ERROR, False)
+        ]
+        assert client.wait_exit(timeout_seconds=10) not in (None, 0)
+
+    @pytest.mark.parametrize(
+        "bad_payload",
+        [
+            'b"[" * 200000 + b"]" * 200000',
+            'b\'{"type":"silence","silent_seconds":\' + b"9" * 400 + b"}"',
+        ],
+        ids=["deeply-nested-json", "huge-integer"],
+    )
+    def test_should_report_worker_exited_when_the_worker_output_breaks_the_protocol(
+        self, tmp_path, bad_payload
+    ):
+        """
+        【テスト対象】InterpreterClient の出力の読み取り（子の出力は信頼しない）
+        【テスト内容】準備完了を返したあとで、深く入れ子にした JSON、または 400 桁の整数を含む
+                    メッセージを出力する偽のワーカーを起動する
+        【期待結果】読み取りのスレッドが例外で死なず、WorkerExited（protocol_error）が届くこと。
+                    停止すると、ワーカーのプロセスは残らない
+        """
+        script = tmp_path / "broken_worker.py"
+        script.write_text(
+            f"#!{sys.executable}\n"
+            "import struct, sys\n"
+            "fd = int(sys.argv[sys.argv.index('--output-fd') + 1])\n"
+            "sys.stdin.buffer.read1(1)\n"  # 開始のメッセージが届くまで待つ
+            "def send(payload):\n"
+            "    data = struct.pack('>IB', len(payload), 1) + payload\n"
+            "    while data:\n"
+            "        data = data[__import__('os').write(fd, data):]\n"
+            'send(b\'{"type":"ready","load_seconds":0.1,"trace_id":"t"}\')\n'
+            f"send({bad_payload})\n"
+        )
+        script.chmod(0o755)
+        broken = InterpreterClient(python=script)
+        try:
+            broken.start(fake_start(), timeout_seconds=START_TIMEOUT)
+            pid = broken.pid
+
+            exited = broken.get(timeout=MESSAGE_TIMEOUT)
+        finally:
+            broken.stop(timeout_seconds=0.2)
+
+        assert isinstance(exited, WorkerExited)
+        assert exited.protocol_error is True
+        assert pid is not None and process_group_members(pid) == []
+
+    def test_should_report_worker_exited_even_when_decoding_raises_an_unexpected_error(
+        self, client, monkeypatch
+    ):
+        """
+        【テスト対象】InterpreterClient の出力の読み取り（想定外の例外）
+        【テスト内容】2 件目のメッセージの復号で ProtocolError 以外の例外（RuntimeError）が起きる
+                    ようにし、終了処理の依頼で 2 件目（停止完了）を返させる
+        【期待結果】読み取りのスレッドが例外で死なず、WorkerExited（protocol_error）が届くこと
+        """
+        from meeting_interpreter.interpreter import client as client_module
+
+        real_decode = client_module.decode_output
+        calls: list[int] = []
+
+        def decode_that_breaks_the_second_time(kind, payload):
+            calls.append(1)
+            if len(calls) > 1:
+                raise RuntimeError("想定外")
+            return real_decode(kind, payload)
+
+        monkeypatch.setattr(client_module, "decode_output", decode_that_breaks_the_second_time)
+        client.start(fake_start(), timeout_seconds=START_TIMEOUT)
+
+        client.finish()
+        exited = client.get(timeout=MESSAGE_TIMEOUT)
+
+        assert isinstance(exited, WorkerExited)
+        assert exited.protocol_error is True
+
+    def test_should_exit_by_itself_when_the_parent_closes_the_input(self, client):
+        """
+        【テスト対象】ワーカーの終了（親が消えたとき）
+        【テスト内容】親が、ワーカーの標準入力を閉じる（親のプロセスが終わった状況を真似る）
+        【期待結果】ワーカーが自分で終わり、プロセスが残らないこと
+        """
+        client.start(fake_start(), timeout_seconds=START_TIMEOUT)
+        pid = client.pid
+
+        client._worker.close_input()  # noqa: SLF001
+
+        assert client.wait_exit(timeout_seconds=10) == 0
+        assert pid is not None and process_group_members(pid) == []
+
+
+class TestNoExternalCommunication:
+    """ワーカーは外部へ通信しない。"""
+
+    def test_should_run_with_the_environment_that_stops_automatic_downloads(self, client):
+        """
+        【テスト対象】ワーカーの環境変数
+        【テスト内容】動いているワーカーの環境変数を /proc から読む
+        【期待結果】自動入手と利用状況の送信を止める 6 つの環境変数が、すべて 1 であること
+        """
+        client.start(fake_start(), timeout_seconds=START_TIMEOUT)
+
+        raw = Path(f"/proc/{client.pid}/environ").read_bytes().split(b"\0")
+        environment = dict(item.decode().split("=", 1) for item in raw if b"=" in item)
+
+        for name in OFFLINE_ENVIRONMENT:
+            assert environment.get(name) == "1", name
+
+    def test_should_run_with_an_operating_system_filter_that_refuses_sockets(self, client):
+        """
+        【テスト対象】ワーカーの OS の仕組み（seccomp）
+        【テスト内容】動いているワーカーの状態を /proc から読む
+        【期待結果】フィルターが入っていること（Seccomp: 2）。権限の追加は禁じられていること
+        """
+        client.start(fake_start(), timeout_seconds=START_TIMEOUT)
+
+        status = Path(f"/proc/{client.pid}/status").read_text()
+
+        assert "Seccomp:\t2" in status
+        assert "NoNewPrivs:\t1" in status
+
+    def test_should_report_the_number_of_attempts_to_reach_outside_when_stopped(self, client):
+        """
+        【テスト対象】Stopped.network_attempts
+        【テスト内容】何もせず停止する
+        【期待結果】停止完了の通信の試みが 0 であること（Python の見張りが数えた値）
+        """
+        client.start(fake_start(), timeout_seconds=START_TIMEOUT)
+
+        stopped = client.stop(timeout_seconds=10)
+
+        assert isinstance(stopped, Stopped)
+        assert stopped.network_attempts == 0
+
+
+class TestSlowProcessing:
+    """処理が音声に追いつかないとき。音声を捨てず、届いた順に処理する。"""
+
+    # 文字起こし 1 件に 0.6 秒かかる偽のエンジン。
+    SLOW = FakeEngineOptions(transcribe_delay_seconds=0.6)
+
+    @staticmethod
+    def five_utterances() -> bytes:
+        """声 1 秒と無音 1 秒の組を 5 回（10 秒分。パイプの容量 64KB の約 5 倍）。"""
+        return (tone(1.0) + silence(1.0)) * 5
+
+    def test_should_keep_reading_audio_while_the_engines_are_slow(self, client):
+        """
+        【テスト対象】通訳ワーカー（受け取りと処理の分離）
+        【テスト内容】1 件 0.6 秒かかるエンジンで、10 秒分の音声（5 件の区切り）を 0.5 秒分ずつ送る
+        【期待結果】送り終えるのに、処理の合計（約 3 秒）より短い時間しかかからないこと
+                    （処理中も音声を読み続けるため、親の書き込みが止まらない）
+        """
+        client.start(fake_start(self.SLOW), timeout_seconds=START_TIMEOUT)
+        audio = self.five_utterances()
+        chunk = 16000
+
+        started = time.monotonic()
+        for index, offset in enumerate(range(0, len(audio), chunk)):
+            client.send_audio(
+                audio[offset : offset + chunk], START + timedelta(seconds=0.5 * index)
+            )
+        elapsed = time.monotonic() - started
+
+        assert elapsed < 1.5
+
+    def test_should_output_every_subtitle_in_order_and_show_the_waiting(self, client):
+        """
+        【テスト対象】通訳ワーカー（追いつかないときの処理）
+        【テスト内容】5 件の区切りを一度に送り、終了処理を依頼する
+        【期待結果】字幕が 5 件、区切りができた順に出ること（音声が失われない）。
+                    待ち時間が件ごとに伸びること。遅れの見込みが、待つ音声の長さとして知らされ、
+                    正の値が含まれること。そのあと停止完了が来ること
+        """
+        client.start(fake_start(self.SLOW), timeout_seconds=START_TIMEOUT)
+        client.send_audio(self.five_utterances(), START)
+        client.finish()
+
+        messages = read_until(client, (Stopped,), timeout=30)
+
+        subtitles = [message for message in messages if isinstance(message, Subtitle)]
+        assert [item.english.split(" (")[0] for item in subtitles] == [
+            f"utterance {index}" for index in range(5)
+        ]
+        waits = [item.timings.wait_seconds for item in subtitles]
+        assert waits == sorted(waits)
+        assert waits[-1] > waits[0] + 1.0
+        backlog = [m.pending_audio_seconds for m in messages if isinstance(m, Backlog)]
+        assert backlog
+        assert max(backlog) > 0
+
+    def test_should_stop_at_once_even_when_many_utterances_are_waiting(self, client):
+        """
+        【テスト対象】InterpreterClient.stop（待っている区切りがあるとき）
+        【テスト内容】1 件 1 秒かかるエンジンに、5 件の区切りを送ってから、停止する
+        【期待結果】待っている区切りを字幕にせず、処理を待たずに停止完了が返ること（3 秒以内）。
+                    ワーカーのプロセスは残らない
+        """
+        client.start(
+            fake_start(FakeEngineOptions(transcribe_delay_seconds=1.0)),
+            timeout_seconds=START_TIMEOUT,
+        )
+        pid = client.pid
+        client.send_audio(self.five_utterances(), START)
+        time.sleep(0.3)
+
+        started = time.monotonic()
+        stopped = client.stop(timeout_seconds=10)
+        elapsed = time.monotonic() - started
+
+        assert isinstance(stopped, Stopped)
+        assert elapsed < 3.0
+        assert pid is not None and process_group_members(pid) == []
+
+
+class TestStopWhenTheWorkerFreezes:
+    """ワーカーが標準入力を読まなくなったとき。停止は時間内に戻り、プロセスを残さない。"""
+
+    def test_should_return_from_stop_and_kill_the_worker_while_a_send_is_blocked(self, client):
+        """
+        【テスト対象】InterpreterClient.stop（固まったワーカー）
+        【テスト内容】ワーカーを SIGSTOP で止め、別のスレッドで音声を送り続けて、送信がパイプの
+                    満杯で止まった状態にする。そこで stop(timeout_seconds=1.0) を呼ぶ
+        【期待結果】送信が止まっていても、stop が待ち続けずに戻ること（約 2 秒。10 秒以内）。
+                    停止完了は受け取れないので None。ワーカーのプロセスは強制終了されて残らず、
+                    止まっていた送信は OSError で終わること
+        """
+        client.start(fake_start(), timeout_seconds=START_TIMEOUT)
+        pid = client.pid
+        assert pid is not None
+        errors: list[OSError] = []
+
+        def keep_sending() -> None:
+            try:
+                while True:
+                    client.send_audio(silence(1.0), START)
+            except OSError as error:
+                errors.append(error)
+
+        outcome: dict[str, object] = {}
+
+        def call_stop() -> None:
+            started = time.monotonic()
+            outcome["stopped"] = client.stop(timeout_seconds=1.0)
+            outcome["elapsed"] = time.monotonic() - started
+
+        sender = threading.Thread(target=keep_sending, daemon=True)
+        stopper = threading.Thread(target=call_stop, daemon=True)
+        try:
+            # プロセスのグループごと止める（子の入口のスレッドは標準入力を読まなくなる）。
+            os.killpg(pid, signal.SIGSTOP)
+            sender.start()
+            time.sleep(1.5)
+            assert sender.is_alive(), "パイプが満杯になり、送信が止まっているはず"
+
+            stopper.start()
+            stopper.join(timeout=10)
+            assert not stopper.is_alive(), "stop が戻りません"
+        finally:
+            # 失敗したときも、固まったワーカーと止まった送信を残さない。
+            with contextlib.suppress(ProcessLookupError):
+                os.killpg(pid, signal.SIGKILL)
+            sender.join(timeout=10)
+
+        assert outcome["stopped"] is None
+        assert isinstance(outcome["elapsed"], float) and outcome["elapsed"] < 10.0
+        assert not sender.is_alive()
+        assert len(errors) == 1
+        with pytest.raises(ProcessLookupError):
+            os.kill(pid, 0)
+        assert process_group_members(pid) == []
+
+    def test_should_not_wait_past_the_timeout_while_other_messages_keep_coming(self, client):
+        """
+        【テスト対象】InterpreterClient.stop（停止完了を待つ時間）
+        【テスト内容】停止完了を返さず、遅れの見込みだけを 0.1 秒ごとに返し続けるワーカーを想定し、
+                    stop(timeout_seconds=1.0) を呼ぶ。ワーカーは SIGSTOP で止めておき、
+                    返事の代わりに、待ち行列へ遅れの見込みを入れ続ける
+        【期待結果】メッセージが来るたびに待ち時間が延びず、約 1 秒で戻ること（10 秒以内）。
+                    ワーカーのプロセスは残らない
+        """
+        client.start(fake_start(), timeout_seconds=START_TIMEOUT)
+        pid = client.pid
+        assert pid is not None
+        os.killpg(pid, signal.SIGSTOP)
+        feeding = threading.Event()
+
+        def keep_feeding() -> None:
+            while not feeding.is_set():
+                client._messages.put(Backlog(pending_audio_seconds=1.0))  # noqa: SLF001
+                time.sleep(0.1)
+
+        feeder = threading.Thread(target=keep_feeding, daemon=True)
+        feeder.start()
+        try:
+            started = time.monotonic()
+            stopped = client.stop(timeout_seconds=1.0)
+            elapsed = time.monotonic() - started
+        finally:
+            feeding.set()
+            feeder.join(timeout=5)
+            with contextlib.suppress(ProcessLookupError):
+                os.killpg(pid, signal.SIGKILL)
+
+        assert stopped is None
+        assert elapsed < 10.0
+        assert process_group_members(pid) == []

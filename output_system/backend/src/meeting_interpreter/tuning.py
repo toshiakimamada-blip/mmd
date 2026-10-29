@@ -86,6 +86,17 @@ class Tuning:
     # 生成ワーカーに割り当てる CPU のスレッド数（会議中）。
     # 字幕の処理を優先するため、通常より小さくする。
     generation_cpu_threads_during_meeting: int = _limits(1, 256)
+    # 通訳ワーカーに割り当てる CPU のスレッド数。会議中は字幕の処理を優先する。
+    interpreter_cpu_threads: int = _limits(1, 256)
+    # 声のあと、この秒数だけ無音が続いたら、発話の区切りを確定する。
+    # 短いと文の途中で区切れやすく、長いと字幕の遅れが増える。
+    utterance_end_silence_seconds: float = _limits(0.1, 5.0)
+    # 文字起こしのビーム幅（候補の数）。1 は最も速い。大きくすると質は上がるが遅くなる。
+    transcription_beam_size: int = _limits(1, 10)
+    # 翻訳のビーム幅（候補の数）。小さい値で速さを優先する。
+    translation_beam_size: int = _limits(1, 10)
+    # 処理を待つ音声の長さ（秒）がこの値を超えたら、警告のログを出す。音声は捨てず、メモリに溜める。
+    interpreter_backlog_warning_seconds: float = _limits(10.0, 7200.0)
     # 翻訳モデルを実行基盤の形式へ変換するときの量子化。選べる値は TRANSLATION_QUANTIZATIONS。
     # 変換後のファイルの大きさと、翻訳の速さと質に効く。変えると、変換し直しになる。
     translation_quantization: str = _choices(*TRANSLATION_QUANTIZATIONS)

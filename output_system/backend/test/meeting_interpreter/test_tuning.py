@@ -78,6 +78,23 @@ class TestShippedTuningFile:
             1 <= tuning.generation_cpu_threads_during_meeting < tuning.generation_cpu_threads_normal
         )
 
+    def test_should_define_interpreter_worker_values(self):
+        """
+        【テスト対象】同梱の tuning.toml（通訳ワーカーまわり）
+        【テスト内容】環境変数なしで読み込む
+        【期待結果】通訳ワーカーの CPU の割り当て・区切りを確定する無音の長さ・文字起こしと翻訳の
+                    ビーム幅・遅れの警告の長さが入っていること。
+                    通訳ワーカーの割り当ては、会議中の生成ワーカーより多い（字幕の処理を優先するため）。
+                    翻訳のビーム幅は小さい値（速さを優先）
+        """
+        tuning = _load(REPO_CONFIG_DIR / TUNING_FILE_NAME)
+
+        assert tuning.interpreter_cpu_threads > tuning.generation_cpu_threads_during_meeting
+        assert 0 < tuning.utterance_end_silence_seconds < tuning.utterance_max_seconds
+        assert tuning.transcription_beam_size >= 1
+        assert 1 <= tuning.translation_beam_size <= 4
+        assert tuning.interpreter_backlog_warning_seconds > tuning.subtitle_delay_target_seconds
+
     def test_should_quantize_the_translation_model_to_8_bit_integers_by_default(self):
         """
         【テスト対象】同梱の tuning.toml（翻訳モデルの量子化）
