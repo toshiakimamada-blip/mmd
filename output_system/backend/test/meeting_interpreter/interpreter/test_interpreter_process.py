@@ -5,7 +5,10 @@ AI モデルは、偽のエンジン（開始のメッセージの engine が fa
 本物の AI モデルでの確認は、test_interpreter_real_models.py にある。
 """
 
+import contextlib
 import os
+import signal
+import threading
 import time
 from collections.abc import Iterator
 from datetime import UTC, datetime, timedelta
@@ -406,3 +409,97 @@ class TestSlowProcessing:
         assert isinstance(stopped, Stopped)
         assert elapsed < 3.0
         assert pid is not None and process_group_members(pid) == []
+
+
+class TestStopWhenTheWorkerFreezes:
+    """ワーカーが標準入力を読まなくなったとき。停止は時間内に戻り、プロセスを残さない。"""
+
+    def test_should_return_from_stop_and_kill_the_worker_while_a_send_is_blocked(self, client):
+        """
+        【テスト対象】InterpreterClient.stop（固まったワーカー）
+        【テスト内容】ワーカーを SIGSTOP で止め、別のスレッドで音声を送り続けて、送信がパイプの
+                    満杯で止まった状態にする。そこで stop(timeout_seconds=1.0) を呼ぶ
+        【期待結果】送信が止まっていても、stop が待ち続けずに戻ること（約 2 秒。10 秒以内）。
+                    停止完了は受け取れないので None。ワーカーのプロセスは強制終了されて残らず、
+                    止まっていた送信は OSError で終わること
+        """
+        client.start(fake_start(), timeout_seconds=START_TIMEOUT)
+        pid = client.pid
+        assert pid is not None
+        errors: list[OSError] = []
+
+        def keep_sending() -> None:
+            try:
+                while True:
+                    client.send_audio(silence(1.0), START)
+            except OSError as error:
+                errors.append(error)
+
+        outcome: dict[str, object] = {}
+
+        def call_stop() -> None:
+            started = time.monotonic()
+            outcome["stopped"] = client.stop(timeout_seconds=1.0)
+            outcome["elapsed"] = time.monotonic() - started
+
+        sender = threading.Thread(target=keep_sending, daemon=True)
+        stopper = threading.Thread(target=call_stop, daemon=True)
+        try:
+            # プロセスのグループごと止める（子の入口のスレッドは標準入力を読まなくなる）。
+            os.killpg(pid, signal.SIGSTOP)
+            sender.start()
+            time.sleep(1.5)
+            assert sender.is_alive(), "パイプが満杯になり、送信が止まっているはず"
+
+            stopper.start()
+            stopper.join(timeout=10)
+            assert not stopper.is_alive(), "stop が戻りません"
+        finally:
+            # 失敗したときも、固まったワーカーと止まった送信を残さない。
+            with contextlib.suppress(ProcessLookupError):
+                os.killpg(pid, signal.SIGKILL)
+            sender.join(timeout=10)
+
+        assert outcome["stopped"] is None
+        assert isinstance(outcome["elapsed"], float) and outcome["elapsed"] < 10.0
+        assert not sender.is_alive()
+        assert len(errors) == 1
+        with pytest.raises(ProcessLookupError):
+            os.kill(pid, 0)
+        assert process_group_members(pid) == []
+
+    def test_should_not_wait_past_the_timeout_while_other_messages_keep_coming(self, client):
+        """
+        【テスト対象】InterpreterClient.stop（停止完了を待つ時間）
+        【テスト内容】停止完了を返さず、遅れの見込みだけを 0.1 秒ごとに返し続けるワーカーを想定し、
+                    stop(timeout_seconds=1.0) を呼ぶ。ワーカーは SIGSTOP で止めておき、
+                    返事の代わりに、待ち行列へ遅れの見込みを入れ続ける
+        【期待結果】メッセージが来るたびに待ち時間が延びず、約 1 秒で戻ること（10 秒以内）。
+                    ワーカーのプロセスは残らない
+        """
+        client.start(fake_start(), timeout_seconds=START_TIMEOUT)
+        pid = client.pid
+        assert pid is not None
+        os.killpg(pid, signal.SIGSTOP)
+        feeding = threading.Event()
+
+        def keep_feeding() -> None:
+            while not feeding.is_set():
+                client._messages.put(Backlog(pending_audio_seconds=1.0))  # noqa: SLF001
+                time.sleep(0.1)
+
+        feeder = threading.Thread(target=keep_feeding, daemon=True)
+        feeder.start()
+        try:
+            started = time.monotonic()
+            stopped = client.stop(timeout_seconds=1.0)
+            elapsed = time.monotonic() - started
+        finally:
+            feeding.set()
+            feeder.join(timeout=5)
+            with contextlib.suppress(ProcessLookupError):
+                os.killpg(pid, signal.SIGKILL)
+
+        assert stopped is None
+        assert elapsed < 10.0
+        assert process_group_members(pid) == []

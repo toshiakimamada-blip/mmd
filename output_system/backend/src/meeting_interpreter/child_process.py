@@ -27,6 +27,7 @@ AI の実行基盤（Hugging Face の部品、llama.cpp など）は、次の 2 
 """
 
 import os
+import select
 import signal
 import subprocess
 import threading
@@ -217,22 +218,40 @@ class WorkerProcess:
         """子の出力を読むパイプ（読み取り側）。close_output で閉じる。"""
         return self._output_fd
 
-    def write(self, data: bytes) -> None:
-        """子の標準入力へ書く。書き終わるまで戻らない（子が読まないと止まる）。
+    def write(self, data: bytes, *, timeout: float | None = None) -> None:
+        """子の標準入力へ書く。
+
+        timeout が None なら、書き終わるまで戻らない（子が読まないと止まる）。
+        timeout を渡すと、その秒数のうちに書き始められないとき TimeoutError にして戻る。
+        別のスレッドの書き込みが終わらないときの待ちと、パイプが満杯の間の待ちの、どちらにも効く。
+        書き始めたあとは止まらないよう、timeout つきで書くデータは 4096 バイト以下にする
+        （停止の依頼のような小さなメッセージ向け）。
 
         Raises:
             OSError: 子が終わっていて、書けないとき（BrokenPipeError を含む）。
+                timeout つきで、時間内に書き始められないとき（TimeoutError）。
         """
         stdin = self._process.stdin
         if stdin is None:
             raise BrokenPipeError("子の標準入力は閉じられています")
-        with self._lock:
+        deadline = None if timeout is None else time.monotonic() + timeout
+        if not self._lock.acquire(timeout=-1 if timeout is None else timeout):
+            raise TimeoutError("子の標準入力へ、別の書き込みが終わりません")
+        try:
             try:
+                if deadline is not None:
+                    _, writable, _ = select.select(
+                        [], [stdin.fileno()], [], max(deadline - time.monotonic(), 0.0)
+                    )
+                    if not writable:
+                        raise TimeoutError("子が標準入力を読みません")
                 stdin.write(data)
                 stdin.flush()
             except ValueError:
                 # 閉じたあとに書いた。子が終わっているときと同じ扱いにする。
                 raise BrokenPipeError("子の標準入力は閉じられています") from None
+        finally:
+            self._lock.release()
 
     def close_input(self) -> None:
         """子の標準入力を閉じる。子から見ると、親が消えたのと同じになる。"""
@@ -265,11 +284,16 @@ class WorkerProcess:
             子の終了コード。信号で終わったときは負の値。
         """
         try:
-            if self._process.stdin is not None:
-                self._process.stdin.close()
-        except OSError:
-            pass  # 子がすでに終わっていて、閉じるときの書き込みが失敗した
-        _stop(self._process, grace_seconds)
+            # 先にプロセスのグループを止める。別のスレッドの書き込みが止まっていても、止められる。
+            _stop(self._process, grace_seconds)
+        finally:
+            # 止めたあとに閉じる。子が消えれば、止まっていた書き込みは BrokenPipeError で戻る。
+            # 先に閉じると、止まった書き込みが終わるまで close が戻らず、強制終了に進めない。
+            try:
+                if self._process.stdin is not None:
+                    self._process.stdin.close()
+            except (OSError, ValueError):
+                pass  # 子がすでに終わっていて、閉じるときの書き込みが失敗した
         assert self._process.returncode is not None
         return self._process.returncode
 

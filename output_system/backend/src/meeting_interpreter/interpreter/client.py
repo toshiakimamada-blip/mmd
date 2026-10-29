@@ -25,6 +25,7 @@ WorkerExited を 1 つ入れる。
 import queue
 import sys
 import threading
+import time
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
@@ -165,7 +166,10 @@ class InterpreterClient:
         self._write(encode_input(Audio(pcm=pcm, received_at=received_at)))
 
     def finish(self) -> None:
-        """終了処理を依頼する。ワーカーは、残りの音声を字幕にして、停止完了を返し、終わる。"""
+        """終了処理を依頼する。ワーカーは、残りの音声を字幕にして、停止完了を返し、終わる。
+
+        このあとは音声を送らない（ワーカーは標準入力を読まなくなり、送信が止まる）。
+        """
         self._write(encode_input(Finish()))
 
     def get(self, timeout: float | None = None) -> OutputMessage | WorkerExited | None:
@@ -193,11 +197,13 @@ class InterpreterClient:
     def stop(self, timeout_seconds: float = DEFAULT_STOP_TIMEOUT_SECONDS) -> Stopped | None:
         """ワーカーを止める。残りの音声は字幕にしない。何回呼んでもよい。
 
-        停止を依頼して、停止完了を待つ。時間内に終わらなければ、プロセスのグループごと強制終了する。
+        停止を依頼して、停止完了を待つ。依頼を書く待ちと、停止完了を待つ時間を合わせて、
+        timeout_seconds までにする。ワーカーが標準入力を読まなくなって、音声の送信が止まって
+        いても同じ。時間内に終わらなければ、プロセスのグループごと強制終了する（猶予は 1 秒）。
         どちらの場合も、戻るときに、ワーカーのプロセスは残っていない。
 
         Args:
-            timeout_seconds: 停止完了を待つ秒数。
+            timeout_seconds: 停止の依頼と停止完了を待つ秒数。
 
         Returns:
             ワーカーが返した停止完了。起動前、停止済み、停止完了を受け取れなかったときは None。
@@ -205,11 +211,13 @@ class InterpreterClient:
         worker = self._worker
         if worker is None:
             return None
+        deadline = time.monotonic() + timeout_seconds
         try:
-            worker.write(encode_input(Stop()))
+            # 別のスレッドの送信が止まっている間は書けない。時間で諦め、強制終了に進む。
+            worker.write(encode_input(Stop()), timeout=timeout_seconds)
         except OSError:
-            pass  # すでに終わっている。
-        stopped = self._wait_for_stopped(timeout_seconds)
+            pass  # すでに終わっている、または標準入力を読まなくなっている。
+        stopped = self._wait_for_stopped(deadline - time.monotonic())
         self._abort()
         return stopped
 
@@ -221,10 +229,11 @@ class InterpreterClient:
         self._worker.write(data)
 
     def _wait_for_stopped(self, timeout_seconds: float) -> Stopped | None:
-        """停止完了が来るか、出力が終わるまで、メッセージを読み捨てて待つ。"""
+        """停止完了が来るか、出力が終わるか、時間が切れるまで、メッセージを読み捨てて待つ。"""
+        deadline = time.monotonic() + timeout_seconds
         while True:
             try:
-                item = self._messages.get(timeout=timeout_seconds)
+                item = self._messages.get(timeout=max(deadline - time.monotonic(), 0.0))
             except queue.Empty:
                 return None
             if isinstance(item, Stopped):

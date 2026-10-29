@@ -4,8 +4,10 @@ AI の実行基盤は、モデルを自動で入手する機能と、利用状�
 モデル管理部の入手だけにするため、ワーカーと変換プロセスの起動には、これらを止める環境変数を必ず付ける。
 """
 
+import contextlib
 import json
 import os
+import signal
 import sys
 import threading
 import time
@@ -505,6 +507,111 @@ class TestStartWorkerProcess:
         finally:
             worker.stop(grace_seconds=0.1)
             worker.close_output()
+
+    # 標準入力を読まずに眠る子。親の書き込みは、パイプが満杯になると止まる。
+    NEVER_READ = "import time\ntime.sleep(120)\n"
+
+    def test_should_stop_a_worker_that_does_not_read_while_a_write_is_blocked(self):
+        """
+        【テスト対象】WorkerProcess.stop（書き込みが止まっているとき）
+        【テスト内容】標準入力を読まない子に、別のスレッドで 4MiB を書き込み、パイプの満杯で
+                    止まっている最中に stop を呼ぶ
+        【期待結果】stop が止まった書き込みを待たずに戻り、子が強制終了されること。
+                    止まっていた書き込みは OSError で終わる
+        """
+        from meeting_interpreter.child_process import start_worker_process
+
+        worker = start_worker_process([sys.executable, "-c", self.NEVER_READ])
+        errors: list[OSError] = []
+
+        def write_much() -> None:
+            try:
+                worker.write(b"x" * (4 * 1024 * 1024))
+            except OSError as error:
+                errors.append(error)
+
+        writer = threading.Thread(target=write_much, daemon=True)
+        returned: list[int] = []
+        stopper = threading.Thread(
+            target=lambda: returned.append(worker.stop(grace_seconds=0.5)), daemon=True
+        )
+        try:
+            writer.start()
+            time.sleep(0.5)
+            assert writer.is_alive(), "パイプが満杯になり、書き込みが止まっているはず"
+
+            stopper.start()
+            stopper.join(timeout=10)
+            assert not stopper.is_alive(), "stop が戻りません"
+        finally:
+            with contextlib.suppress(ProcessLookupError):
+                os.killpg(worker.pid, signal.SIGKILL)
+            writer.join(timeout=10)
+            worker.close_output()
+
+        assert returned and returned[0] != 0
+        assert not writer.is_alive()
+        assert len(errors) == 1
+
+    def test_should_give_up_a_timed_write_when_another_write_holds_the_pipe(self):
+        """
+        【テスト対象】WorkerProcess.write の timeout
+        【テスト内容】標準入力を読まない子に、別のスレッドで 4MiB を書き込んで止めておき、
+                    timeout=0.3 つきで小さなデータを書く
+        【期待結果】0.3 秒ほどで TimeoutError（OSError の一種）になり、待ち続けないこと
+        """
+        from meeting_interpreter.child_process import start_worker_process
+
+        worker = start_worker_process([sys.executable, "-c", self.NEVER_READ])
+
+        def write_much() -> None:
+            with contextlib.suppress(OSError):
+                worker.write(b"x" * (4 * 1024 * 1024))
+
+        writer = threading.Thread(target=write_much, daemon=True)
+        try:
+            writer.start()
+            time.sleep(0.5)
+
+            started = time.monotonic()
+            with pytest.raises(TimeoutError):
+                worker.write(b"stop", timeout=0.3)
+            elapsed = time.monotonic() - started
+        finally:
+            worker.stop(grace_seconds=0.2)
+            writer.join(timeout=10)
+            worker.close_output()
+
+        assert elapsed < 3.0
+
+    def test_should_give_up_a_timed_write_when_the_pipe_is_full_and_nothing_else_writes(self):
+        """
+        【テスト対象】WorkerProcess.write の timeout
+        【テスト内容】標準入力を読まない子のパイプを、非ブロックで満杯にしておき、
+                    timeout=0.3 つきで小さなデータを書く
+        【期待結果】0.3 秒ほどで TimeoutError になり、待ち続けないこと
+        """
+        from meeting_interpreter.child_process import start_worker_process
+
+        worker = start_worker_process([sys.executable, "-c", self.NEVER_READ])
+        try:
+            assert worker._process.stdin is not None
+            fd = worker._process.stdin.fileno()
+            os.set_blocking(fd, False)
+            with contextlib.suppress(BlockingIOError):
+                while True:
+                    os.write(fd, b"x" * 4096)
+            os.set_blocking(fd, True)
+
+            started = time.monotonic()
+            with pytest.raises(TimeoutError):
+                worker.write(b"stop", timeout=0.3)
+            elapsed = time.monotonic() - started
+        finally:
+            worker.stop(grace_seconds=0.2)
+            worker.close_output()
+
+        assert elapsed < 3.0
 
     def test_should_refuse_to_take_the_environment_directly(self):
         """
