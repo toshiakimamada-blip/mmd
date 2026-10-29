@@ -40,14 +40,20 @@ interpreter = [
     "faster-whisper>=1.2.1",
     "sentencepiece>=0.2.2",
 ]
+# 生成ワーカー（要約と質問の文章を作る別のプロセス）が使う部品。llama.cpp の Python の結び付け。
+# PyPI には wheel が無く、ソースから組み立てる。組み立ての指定は [tool.uv.config-settings-package] にある。
+# 組み込む方式を選んだ理由は output_system/docs/models.md の「文章生成モデルの動かし方」にある。
+generation = [
+    "llama-cpp-python>=0.3.36",
+]
 
 [tool.uv]
 # アプリとして動かすだけで、ライブラリとしては配布しない。
 # コードは PYTHONPATH（pytest では pythonpath 設定）で src/ を指して読み込む。
 package = false
-# 開発環境（uv sync）には、変換の部品と通訳ワーカーの部品も入れる。それぞれの自動テストが使うため。
+# 開発環境（uv sync）には、変換の部品と 2 つのワーカーの部品も入れる。それぞれの自動テストが使うため。
 # イメージでは、アプリサーバーの環境に入れない（Dockerfile が --no-default-groups で外す）。
-default-groups = ["dev", "conversion", "interpreter"]
+default-groups = ["dev", "conversion", "interpreter", "generation"]
 # サプライチェーン攻撃への対策。公開から 7 日未満の版は、版の解決の対象にしない。
 # 既にロックファイルへ記録した版には影響しない。
 exclude-newer = "7 days"
@@ -62,6 +68,15 @@ explicit = true
 
 [tool.uv.sources]
 torch = { index = "pytorch-cpu" }
+
+# llama-cpp-python は、ソースから組み立てる（scikit-build-core と CMake）。組み立ての指定は次のとおり。
+# - GGML_NATIVE=OFF: 組み立てた PC の CPU に合わせた命令（-march=native）を使わない。使うと、別の CPU で
+#   「不正な命令」で落ちるおそれがある。OFF にすると AVX2・FMA・F16C・BMI2 を使う（Haswell 以降の CPU）。
+# - GGML_OPENMP=OFF: OpenMP の実行時の部品（libgomp）を要らなくする。ggml 自身のスレッドの仕組みで動く。
+# - LLAVA_BUILD=OFF: 画像を扱う部品は使わない。
+# 値を変えると、uv が組み立て直す（指定が、組み立ての結果の使い回しの鍵に入るため）。
+[tool.uv.config-settings-package]
+llama-cpp-python = { "cmake.define.GGML_NATIVE" = "OFF", "cmake.define.GGML_OPENMP" = "OFF", "cmake.define.LLAVA_BUILD" = "OFF" }
 
 [tool.pytest.ini_options]
 # テストは src/ と同じ階層の test/ に置き、src/ と同じ構造にする。
