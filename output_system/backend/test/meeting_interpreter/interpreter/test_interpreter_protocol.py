@@ -343,6 +343,38 @@ class TestRejectInvalidInput:
         with pytest.raises(ProtocolError):
             decode_output(9, b"{}")
 
+    def test_should_reject_a_deeply_nested_json_as_a_protocol_error(self):
+        """
+        【テスト対象】decode_output と decode_input
+        【テスト内容】約 400KB の入れ子の JSON（[[[...]]]）を読む（RecursionError が起きる入力）
+        【期待結果】どちらも ProtocolError（別の例外を漏らさない）
+        """
+        payload = b"[" * 200_000 + b"]" * 200_000
+
+        with pytest.raises(ProtocolError):
+            decode_output(KIND_JSON, payload)
+        with pytest.raises(ProtocolError):
+            decode_input(KIND_JSON, payload)
+
+    def test_should_reject_an_integer_too_big_for_a_float_as_a_protocol_error(self):
+        """
+        【テスト対象】decode_output（silence）と decode_input（start の調整値）
+        【テスト内容】400 桁の整数を数の項目に入れて読む。math.isfinite は OverflowError を起こす
+        【期待結果】どちらも ProtocolError（別の例外を漏らさない）
+        """
+        huge = 10**400
+        silence_payload = json.dumps({"type": "silence", "silent_seconds": huge}).encode("utf-8")
+        _, start_payload = _split(
+            encode_input(Start(trace_id=None, engine="fake", settings=SETTINGS))
+        )
+        start_body = json.loads(start_payload)
+        start_body["settings"]["utterance_max_seconds"] = huge
+
+        with pytest.raises(ProtocolError):
+            decode_output(KIND_JSON, silence_payload)
+        with pytest.raises(ProtocolError):
+            decode_input(*_json_frame(start_body))
+
     def test_should_reject_a_start_for_the_real_engine_without_model_paths(self):
         """
         【テスト対象】decode_input（start）

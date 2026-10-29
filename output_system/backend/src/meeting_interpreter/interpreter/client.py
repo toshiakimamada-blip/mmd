@@ -270,6 +270,9 @@ class InterpreterClient:
             protocol_error = True
         except OSError:
             pass  # 出力のパイプが閉じられた。
+        except Exception:
+            # 想定外の例外でも、スレッドを黙って終わらせない（WorkerExited を必ず届ける）。
+            protocol_error = True
         self._messages.put(
             WorkerExited(returncode=worker.wait(timeout=5), protocol_error=protocol_error)
         )

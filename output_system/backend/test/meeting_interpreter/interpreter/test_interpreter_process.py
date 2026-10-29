@@ -8,6 +8,7 @@ AI モデルは、偽のエンジン（開始のメッセージの engine が fa
 import contextlib
 import os
 import signal
+import sys
 import threading
 import time
 from collections.abc import Iterator
@@ -271,6 +272,80 @@ class TestProtocolErrors:
             (ErrorKind.PROTOCOL_ERROR, False)
         ]
         assert client.wait_exit(timeout_seconds=10) not in (None, 0)
+
+    @pytest.mark.parametrize(
+        "bad_payload",
+        [
+            'b"[" * 200000 + b"]" * 200000',
+            'b\'{"type":"silence","silent_seconds":\' + b"9" * 400 + b"}"',
+        ],
+        ids=["deeply-nested-json", "huge-integer"],
+    )
+    def test_should_report_worker_exited_when_the_worker_output_breaks_the_protocol(
+        self, tmp_path, bad_payload
+    ):
+        """
+        【テスト対象】InterpreterClient の出力の読み取り（子の出力は信頼しない）
+        【テスト内容】準備完了を返したあとで、深く入れ子にした JSON、または 400 桁の整数を含む
+                    メッセージを出力する偽のワーカーを起動する
+        【期待結果】読み取りのスレッドが例外で死なず、WorkerExited（protocol_error）が届くこと。
+                    停止すると、ワーカーのプロセスは残らない
+        """
+        script = tmp_path / "broken_worker.py"
+        script.write_text(
+            f"#!{sys.executable}\n"
+            "import struct, sys\n"
+            "fd = int(sys.argv[sys.argv.index('--output-fd') + 1])\n"
+            "sys.stdin.buffer.read1(1)\n"  # 開始のメッセージが届くまで待つ
+            "def send(payload):\n"
+            "    data = struct.pack('>IB', len(payload), 1) + payload\n"
+            "    while data:\n"
+            "        data = data[__import__('os').write(fd, data):]\n"
+            'send(b\'{"type":"ready","load_seconds":0.1,"trace_id":"t"}\')\n'
+            f"send({bad_payload})\n"
+        )
+        script.chmod(0o755)
+        broken = InterpreterClient(python=script)
+        try:
+            broken.start(fake_start(), timeout_seconds=START_TIMEOUT)
+            pid = broken.pid
+
+            exited = broken.get(timeout=MESSAGE_TIMEOUT)
+        finally:
+            broken.stop(timeout_seconds=0.2)
+
+        assert isinstance(exited, WorkerExited)
+        assert exited.protocol_error is True
+        assert pid is not None and process_group_members(pid) == []
+
+    def test_should_report_worker_exited_even_when_decoding_raises_an_unexpected_error(
+        self, client, monkeypatch
+    ):
+        """
+        【テスト対象】InterpreterClient の出力の読み取り（想定外の例外）
+        【テスト内容】2 件目のメッセージの復号で ProtocolError 以外の例外（RuntimeError）が起きる
+                    ようにし、終了処理の依頼で 2 件目（停止完了）を返させる
+        【期待結果】読み取りのスレッドが例外で死なず、WorkerExited（protocol_error）が届くこと
+        """
+        from meeting_interpreter.interpreter import client as client_module
+
+        real_decode = client_module.decode_output
+        calls: list[int] = []
+
+        def decode_that_breaks_the_second_time(kind, payload):
+            calls.append(1)
+            if len(calls) > 1:
+                raise RuntimeError("想定外")
+            return real_decode(kind, payload)
+
+        monkeypatch.setattr(client_module, "decode_output", decode_that_breaks_the_second_time)
+        client.start(fake_start(), timeout_seconds=START_TIMEOUT)
+
+        client.finish()
+        exited = client.get(timeout=MESSAGE_TIMEOUT)
+
+        assert isinstance(exited, WorkerExited)
+        assert exited.protocol_error is True
 
     def test_should_exit_by_itself_when_the_parent_closes_the_input(self, client):
         """

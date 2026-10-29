@@ -351,11 +351,11 @@ class _Body:
     def number(self, key: str, *, positive: bool = False) -> float:
         """有限の数。positive が True なら 0 を含まない正の数、False なら 0 以上。"""
         value = self._data[key]
-        if (
-            isinstance(value, bool)
-            or not isinstance(value, int | float)
-            or not math.isfinite(value)
-        ):
+        try:
+            finite = isinstance(value, int | float) and math.isfinite(value)
+        except OverflowError:
+            finite = False  # float に直せない巨大な整数
+        if isinstance(value, bool) or not finite:
             raise self._fail(key, "有限の数")
         if value < 0 or (positive and value == 0):
             raise self._fail(key, "正の数" if positive else "0 以上の数")
@@ -544,7 +544,8 @@ def _load_json(kind: int, payload: bytes) -> dict[str, Any]:
         raise ProtocolError(f"知らないフレームの種類です: {kind}")
     try:
         data = json.loads(payload.decode("utf-8"))
-    except (UnicodeDecodeError, ValueError) as error:
+    except (UnicodeDecodeError, ValueError, RecursionError) as error:
+        # RecursionError: 深く入れ子にした JSON。信頼しない相手の入力でも、親を止めない。
         raise ProtocolError("JSON として読めません") from error
     if not isinstance(data, dict):
         raise ProtocolError("メッセージは辞書でなければなりません")
