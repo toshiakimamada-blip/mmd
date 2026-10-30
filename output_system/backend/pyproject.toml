@@ -95,3 +95,7 @@ src = ["src", "test"]
 # E/F: pycodestyle と pyflakes。I: import の並び順。B: バグの出やすい書き方。
 # T20: print の禁止。print は、ログの許可リストを通らずに標準出力へ出てしまう。
 select = ["E", "F", "I", "B", "UP", "T20"]
+
+[tool.ruff.lint.per-file-ignores]
+# 英語の会議の字幕のデータ。1 行が長い文があり、折り返すと読みにくくなる。
+"test/meeting_subtitles.py" = ["E501"]
