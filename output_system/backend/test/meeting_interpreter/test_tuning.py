@@ -78,6 +78,18 @@ class TestShippedTuningFile:
             1 <= tuning.generation_cpu_threads_during_meeting < tuning.generation_cpu_threads_normal
         )
 
+    def test_should_define_generation_priorities_for_normal_and_meeting_time(self):
+        """
+        【テスト対象】同梱の tuning.toml（生成ワーカーの処理の優先度）
+        【テスト内容】環境変数なしで読み込む
+        【期待結果】nice 値（通常・会議中）が入っていること。通常は譲らず（0）、会議中は
+                    それより大きい（会議中は字幕の処理へ CPU を譲るため）
+        """
+        tuning = _load(REPO_CONFIG_DIR / TUNING_FILE_NAME)
+
+        assert tuning.generation_nice_normal == 0
+        assert 0 < tuning.generation_nice_during_meeting <= 19
+
     def test_should_define_interpreter_worker_values(self):
         """
         【テスト対象】同梱の tuning.toml（通訳ワーカーまわり）
@@ -364,6 +376,35 @@ class TestFileValidation:
                     "MMD_TUNING_GENERATION_CPU_THREADS_NORMAL": "2",
                     "MMD_TUNING_GENERATION_CPU_THREADS_DURING_MEETING": "4",
                 },
+            )
+
+    def test_should_reject_a_meeting_priority_smaller_than_the_normal_one(self):
+        """
+        【テスト対象】load_tuning（項目どうしの関係: nice 値）
+        【テスト内容】会議中の nice 値を、通常より小さくする
+        【期待結果】ConfigError になること。
+                    会議中は字幕の処理に譲る（nice 値を大きくする）決まりのため
+        """
+        with pytest.raises(ConfigError, match="generation_nice_during_meeting"):
+            _load(
+                REPO_CONFIG_DIR / TUNING_FILE_NAME,
+                {
+                    "MMD_TUNING_GENERATION_NICE_NORMAL": "5",
+                    "MMD_TUNING_GENERATION_NICE_DURING_MEETING": "2",
+                },
+            )
+
+    @pytest.mark.parametrize("bad_value", ["-1", "20"])
+    def test_should_reject_a_priority_outside_the_range_of_nice_values(self, bad_value: str):
+        """
+        【テスト対象】load_tuning（nice 値の範囲）
+        【テスト内容】会議中の nice 値を -1 と 20 にする
+        【期待結果】ConfigError になること（nice 値は 0 から 19。負の値は特権が要るため許さない）
+        """
+        with pytest.raises(ConfigError, match="GENERATION_NICE_DURING_MEETING"):
+            _load(
+                REPO_CONFIG_DIR / TUNING_FILE_NAME,
+                {"MMD_TUNING_GENERATION_NICE_DURING_MEETING": bad_value},
             )
 
     def test_should_accept_an_integer_written_for_a_float_value(self, tmp_path: Path):

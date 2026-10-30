@@ -86,6 +86,11 @@ class Tuning:
     # 生成ワーカーに割り当てる CPU のスレッド数（会議中）。
     # 字幕の処理を優先するため、通常より小さくする。
     generation_cpu_threads_during_meeting: int = _limits(1, 256)
+    # 生成ワーカーの処理の優先度（nice 値。大きいほど譲る）。会議をしていないとき。
+    generation_nice_normal: int = _limits(0, 19)
+    # 生成ワーカーの処理の優先度（会議中）。字幕の処理（通訳ワーカー）に CPU を譲るため、
+    # 通常以上にする。
+    generation_nice_during_meeting: int = _limits(0, 19)
     # 通訳ワーカーに割り当てる CPU のスレッド数。会議中は字幕の処理を優先する。
     interpreter_cpu_threads: int = _limits(1, 256)
     # 声のあと、この秒数だけ無音が続いたら、発話の区切りを確定する。
@@ -300,4 +305,10 @@ def _check_relations(tuning: Tuning, problems: list[str]) -> None:
             "generation_cpu_threads_during_meeting（会議中の割り当て）は、"
             "generation_cpu_threads_normal（通常の割り当て）以下にしてください。"
             "会議中は字幕の処理を優先して、生成ワーカーの割り当てを減らします"
+        )
+    if tuning.generation_nice_during_meeting < tuning.generation_nice_normal:
+        problems.append(
+            "generation_nice_during_meeting（会議中の優先度）は、"
+            "generation_nice_normal（通常の優先度）以上にしてください。"
+            "nice 値は大きいほど CPU を譲ります。会議中は字幕の処理に譲ります"
         )
