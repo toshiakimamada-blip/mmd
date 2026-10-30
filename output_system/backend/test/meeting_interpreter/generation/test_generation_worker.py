@@ -211,6 +211,37 @@ class TestInterrupt:
         assert results(messages) == [Interrupted(next_block=2, memos=("memo 0", "memo 1"))]
         assert len(generator.calls("memo")) == 2
 
+    def test_should_apply_an_interrupt_request_to_a_summary_that_has_not_started_yet(
+        self, harness_factory
+    ):
+        """
+        【テスト対象】GenerationWorker.request_interrupt（始める前の要約）
+        【テスト内容】質問を作っている間に、要約の依頼を入れ、中断を求める（要約はまだ始まっていない）
+        【期待結果】質問が終わって要約が始まると、最初のブロックの区切りで止まり、中間メモが無い中断
+                    （次のブロックの番号 0）が返ること。要約の依頼の直後の中断が失われない
+        """
+        reached = threading.Event()
+        proceed = threading.Event()
+
+        def responder(request, nth):
+            if request.task == "questions":
+                reached.set()
+                assert proceed.wait(WAIT_SECONDS)
+            return ScriptedGenerator._default(request, nth)
+
+        generator = ScriptedGenerator(responder)
+        harness = harness_factory(generator)
+        harness.worker.submit(CreateQuestions(transcript="talk"))
+        assert reached.wait(WAIT_SECONDS)
+        harness.worker.submit(Summarize(blocks=("a", "b", "c")))
+
+        harness.worker.request_interrupt()
+        proceed.set()
+        messages = harness.wait_for_message(Interrupted)
+
+        assert results(messages)[-1] == Interrupted(next_block=0, memos=())
+        assert generator.calls("memo") == []
+
     def test_should_ignore_an_interrupt_request_while_no_summary_is_being_made(
         self, harness_factory
     ):
@@ -230,8 +261,9 @@ class TestInterrupt:
     def test_should_not_interrupt_a_question(self, harness_factory):
         """
         【テスト対象】GenerationWorker.request_interrupt（質問の作成中）
-        【テスト内容】質問を作っている最中に、中断を求める
-        【期待結果】質問は中断されず、5 組が返ること。そのあとの要約にも、中断の要求は残らない
+        【テスト内容】質問を作っている最中に、中断を求める。そのあとで、要約の依頼を入れる
+        【期待結果】質問は中断されず、5 組が返ること。そのあとに入れた要約にも、中断の要求は
+                    残らない
         """
         reached = threading.Event()
         proceed = threading.Event()
@@ -245,10 +277,10 @@ class TestInterrupt:
 
         harness = harness_factory(ScriptedGenerator(responder))
         harness.worker.submit(CreateQuestions(transcript="talk"))
-        harness.worker.submit(Summarize(blocks=("a", "b")))
         assert reached.wait(WAIT_SECONDS)
 
         harness.worker.request_interrupt()
+        harness.worker.submit(Summarize(blocks=("a", "b")))
         proceed.set()
         messages = harness.wait_for(lambda found: len(results(found)) == 2)
 

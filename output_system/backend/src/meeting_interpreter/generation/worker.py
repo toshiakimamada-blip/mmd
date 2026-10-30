@@ -116,9 +116,13 @@ class GenerationWorker:
             self._condition.notify_all()
 
     def request_interrupt(self) -> None:
-        """作成中の要約を、次のブロックの区切りで止める。要約を作っていないときは、何もしない。"""
+        """作成中の要約を、次のブロックの区切りで止める。
+
+        まだ始めていない要約（待ち行列に入っている）にも効く。要約の依頼を送った直後に中断を求めても、
+        要約が始まる前の中断が失われず、始めたブロックの区切りで止まる。要約が無いときは、何もしない。
+        """
         with self._condition:
-            if self._summarizing:
+            if self._summarizing or any(isinstance(job, Summarize) for job in self._queue):
                 self._interrupt = True
 
     def set_cpu_mode(self, mode: CpuMode) -> None:
@@ -181,8 +185,8 @@ class GenerationWorker:
         if isinstance(job, Summarize):
             kind = ErrorKind.SUMMARY_FAILED
             with self._condition:
+                # 待っている間に届いた中断の要求は、消さない。
                 self._summarizing = True
-                self._interrupt = False
         else:
             kind = ErrorKind.QUESTIONS_FAILED
         try:
