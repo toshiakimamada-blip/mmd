@@ -34,7 +34,6 @@ OS の仕組みは、UNIX ドメイン以外のソケットと、32 ビットの
 
 import argparse
 import os
-import resource
 import threading
 import time
 from collections.abc import Callable, Sequence
@@ -43,14 +42,12 @@ from typing import TYPE_CHECKING, Final
 
 from ..logs import configure_logging, log_error, log_processing, new_trace_id
 from ..models.conversion import network_guard, sandbox
-from ..settings import DEFAULT_LOG_LEVEL, ENV_LOG_LEVEL, LOG_LEVEL_NAMES
+from ..worker_ipc import FrameReader, ProtocolError, inherited_log_level, peak_memory_mb
+from ..worker_ipc import OutputWriter as SharedOutputWriter
 from .protocol import (
     Audio,
     ErrorKind,
     Finish,
-    FrameReader,
-    OutputMessage,
-    ProtocolError,
     Ready,
     Start,
     Stop,
@@ -96,43 +93,11 @@ def parse_arguments(argv: Sequence[str] | None = None) -> Arguments:
     return Arguments(output_fd=parsed.output_fd)
 
 
-class OutputWriter:
-    """親へのパイプへ、メッセージを書く。複数のスレッドから呼んでも、フレームが混ざらない。"""
+class OutputWriter(SharedOutputWriter):
+    """親へのパイプへ、通訳ワーカーのメッセージを書く。複数のスレッドから呼んでも、フレームが混ざらない。"""
 
     def __init__(self, fd: int) -> None:
-        self._fd = fd
-        self._lock = threading.Lock()
-        self._closed = False
-
-    def send(self, message: OutputMessage) -> None:
-        """メッセージを 1 つ書く。書き終わるまで戻らない。閉じたあとは、何も書かない。
-
-        Raises:
-            OSError: 親が読み取り側を閉じたとき（BrokenPipeError を含む）。
-        """
-        frame = memoryview(encode_output(message))
-        with self._lock:
-            if self._closed:
-                return
-            while frame:
-                written = os.write(self._fd, frame)
-                frame = frame[written:]
-
-    def close(self) -> None:
-        """以後、何も書かない。停止完了を最後のメッセージにするため、書いたあとに呼ぶ。"""
-        with self._lock:
-            self._closed = True
-
-
-def peak_memory_mb() -> float:
-    """このプロセスの、常駐メモリの最大値（MB）。Linux の ru_maxrss は KB 単位。"""
-    return resource.getrusage(resource.RUSAGE_SELF).ru_maxrss / 1024
-
-
-def _log_level() -> str:
-    """ログのレベルの下限。親から引き継いだ環境変数を読み、誤っていれば既定にする。"""
-    value = os.environ.get(ENV_LOG_LEVEL, DEFAULT_LOG_LEVEL).strip().lower()
-    return value if value in LOG_LEVEL_NAMES else DEFAULT_LOG_LEVEL
+        super().__init__(fd, encode_output)
 
 
 def serve(
@@ -290,7 +255,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     順序は次のとおり。引数、ログ、OS の仕組みで外への通信を断つ、Python の見張り、メッセージの処理。
     """
     arguments = parse_arguments(argv)
-    configure_logging(_log_level())  # type: ignore[arg-type]
+    configure_logging(inherited_log_level())  # type: ignore[arg-type]
     writer = OutputWriter(arguments.output_fd)
     try:
         sandbox.install()

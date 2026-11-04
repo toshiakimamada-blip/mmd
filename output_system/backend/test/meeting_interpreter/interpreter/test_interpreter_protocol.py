@@ -14,14 +14,11 @@ import pytest
 from meeting_interpreter.interpreter.protocol import (
     KIND_AUDIO,
     KIND_JSON,
-    MAX_PAYLOAD_BYTES,
     Audio,
     Backlog,
     ErrorKind,
     FakeEngineOptions,
     Finish,
-    FrameReader,
-    FrameTimeout,
     ModelPaths,
     ProtocolError,
     Ready,
@@ -41,6 +38,7 @@ from meeting_interpreter.interpreter.protocol import (
 )
 from meeting_interpreter.interpreter.settings import InterpreterSettings
 from meeting_interpreter.tuning import Tuning
+from meeting_interpreter.worker_ipc import MAX_PAYLOAD_BYTES, FrameReader, FrameTimeout
 
 MOMENT = datetime(2026, 10, 27, 1, 2, 3, 456789, tzinfo=UTC)
 

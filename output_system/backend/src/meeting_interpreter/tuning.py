@@ -26,6 +26,13 @@ TUNING_FILE_NAME: Final = "tuning.toml"
 ENV_TUNING_PREFIX: Final = "MMD_TUNING_"
 
 
+# 文章生成モデルへ一度に渡す字幕の量（generation_input_max_chars）の、許す範囲の最大（文字数）。
+# 生成ワーカーとのメッセージの、ブロックと質問の字幕の文字数の上限（generation/protocol.py）も、
+# この値に合わせる。調整値の最大が上限より大きいと、字幕が調整値いっぱいまで溜まったとき、
+# ワーカーが回復できないエラーで終わるため、定数にして両方から使う。
+GENERATION_INPUT_MAX_CHARS_LIMIT: Final = 1_000_000
+
+
 def _limits(minimum: float, maximum: float) -> Any:
     """項目の許す範囲（両端を含む）を、dataclass のメタデータとして持たせる。
 
@@ -80,12 +87,17 @@ class Tuning:
     # 字幕の遅れの目標（秒）。
     subtitle_delay_target_seconds: float = _limits(1.0, 600.0)
     # 文章生成モデルへ一度に渡す字幕の量（文字数）。
-    generation_input_max_chars: int = _limits(100, 1_000_000)
+    generation_input_max_chars: int = _limits(100, GENERATION_INPUT_MAX_CHARS_LIMIT)
     # 生成ワーカーに割り当てる CPU のスレッド数（会議をしていないとき）。
     generation_cpu_threads_normal: int = _limits(1, 256)
     # 生成ワーカーに割り当てる CPU のスレッド数（会議中）。
     # 字幕の処理を優先するため、通常より小さくする。
     generation_cpu_threads_during_meeting: int = _limits(1, 256)
+    # 生成ワーカーの処理の優先度（nice 値。大きいほど譲る）。会議をしていないとき。
+    generation_nice_normal: int = _limits(0, 19)
+    # 生成ワーカーの処理の優先度（会議中）。字幕の処理（通訳ワーカー）に CPU を譲るため、
+    # 通常以上にする。
+    generation_nice_during_meeting: int = _limits(0, 19)
     # 通訳ワーカーに割り当てる CPU のスレッド数。会議中は字幕の処理を優先する。
     interpreter_cpu_threads: int = _limits(1, 256)
     # 声のあと、この秒数だけ無音が続いたら、発話の区切りを確定する。
@@ -300,4 +312,10 @@ def _check_relations(tuning: Tuning, problems: list[str]) -> None:
             "generation_cpu_threads_during_meeting（会議中の割り当て）は、"
             "generation_cpu_threads_normal（通常の割り当て）以下にしてください。"
             "会議中は字幕の処理を優先して、生成ワーカーの割り当てを減らします"
+        )
+    if tuning.generation_nice_during_meeting < tuning.generation_nice_normal:
+        problems.append(
+            "generation_nice_during_meeting（会議中の優先度）は、"
+            "generation_nice_normal（通常の優先度）以上にしてください。"
+            "nice 値は大きいほど CPU を譲ります。会議中は字幕の処理に譲ります"
         )

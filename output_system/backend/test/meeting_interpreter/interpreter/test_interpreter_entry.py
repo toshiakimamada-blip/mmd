@@ -27,7 +27,6 @@ from meeting_interpreter.interpreter.protocol import (
     ErrorKind,
     FakeEngineOptions,
     Finish,
-    FrameReader,
     InputMessage,
     OutputMessage,
     Ready,
@@ -41,6 +40,7 @@ from meeting_interpreter.interpreter.protocol import (
 )
 from meeting_interpreter.interpreter.settings import InterpreterSettings
 from meeting_interpreter.models.conversion.network_guard import NetworkGuard
+from meeting_interpreter.worker_ipc import FrameReader, inherited_log_level
 
 START = datetime(2026, 10, 27, 12, 0, 0, tzinfo=UTC)
 
@@ -352,7 +352,7 @@ class TestLogLevel:
         """
         monkeypatch.setenv("MMD_LOG_LEVEL", value)
 
-        assert entry._log_level() == expected  # noqa: SLF001
+        assert inherited_log_level() == expected
 
 
 class TestThreads:
