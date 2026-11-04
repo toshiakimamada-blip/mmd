@@ -23,6 +23,7 @@ pytest は集めない。
 
     --meeting: 会議中の割り当て（スレッド数と優先度を減らす）で動かす
     --threads N: スレッド数を、調整値の代わりに指定する
+    --questions-only: 質問（会議中の場面）だけを測る。要約と、要約ありの質問は飛ばす
 
 結果は標準出力へ書く。要約と質問の文面も出す（質の確認用。文面は毎回変わる）。
 """
@@ -163,6 +164,7 @@ def main() -> int:
     parser.add_argument("--long-lines", type=int, default=0, help="長い会議の字幕の行数")
     parser.add_argument("--meeting", action="store_true", help="会議中の割り当てで動かす")
     parser.add_argument("--threads", type=int, default=0, help="スレッド数（調整値の代わり）")
+    parser.add_argument("--questions-only", action="store_true", help="質問だけを測る")
     arguments = parser.parse_args()
 
     problems: list[str] = []
@@ -237,11 +239,13 @@ def main() -> int:
             )
             print_questions(questions)
 
-            for label, lines in [("", subtitles)] + (
-                [(f"長い会議 {arguments.long_lines} 行", long_meeting(arguments.long_lines))]
-                if arguments.long_lines
-                else []
-            ):
+            summary_cases = [] if arguments.questions_only else [("", subtitles)]
+            if arguments.long_lines and not arguments.questions_only:
+                summary_cases.append(
+                    (f"長い会議 {arguments.long_lines} 行", long_meeting(arguments.long_lines))
+                )
+            short_summary: Summary | None = None
+            for label, lines in summary_cases:
                 write()
                 write(f"## 3. 要約{'（' + label + '）' if label else f'（字幕 {len(lines)} 行）'}")
                 blocks = split_into_blocks(lines, max_chars)
@@ -283,16 +287,20 @@ def main() -> int:
                         f"{meeting_minutes / 4:.0f} 分"
                     )
 
-            write()
-            write("## 4. 質問（会議後で要約ありの場面。短い会議の要約を使う）")
-            question_input = build_question_input(
-                QuestionScene.AFTER_MEETING_WITH_SUMMARY, subtitles, short_summary.text, max_chars
-            )
-            started = time.monotonic()
-            client.create_questions(question_input)
-            questions = wait_for(client, (Questions,))
-            write(f"- 作成時間: {time.monotonic() - started:.1f} 秒")
-            print_questions(questions)
+            if short_summary is not None:
+                write()
+                write("## 4. 質問（会議後で要約ありの場面。短い会議の要約を使う）")
+                question_input = build_question_input(
+                    QuestionScene.AFTER_MEETING_WITH_SUMMARY,
+                    subtitles,
+                    short_summary.text,
+                    max_chars,
+                )
+                started = time.monotonic()
+                client.create_questions(question_input)
+                questions = wait_for(client, (Questions,))
+                write(f"- 作成時間: {time.monotonic() - started:.1f} 秒")
+                print_questions(questions)
         peak = watcher.peak
         write()
         write("## 5. メモリ")
