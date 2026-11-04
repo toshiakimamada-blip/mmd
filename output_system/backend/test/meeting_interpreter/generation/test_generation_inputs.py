@@ -13,7 +13,8 @@ from meeting_interpreter.generation.inputs import (
     recent_lines,
     split_into_blocks,
 )
-from meeting_interpreter.generation.results import SummaryText
+from meeting_interpreter.generation.protocol import CreateQuestions, decode_input, encode_input
+from meeting_interpreter.generation.results import NOT_APPLICABLE, SummaryText
 from meeting_subtitles import long_meeting, sample_meeting
 
 SUMMARY = SummaryText(
@@ -250,6 +251,64 @@ class TestBuildQuestionInput:
         assert sum(len(item) for item in vars_of(shortened)) <= 500
         assert all(vars_of(shortened))
         assert result.transcript == "tail of the meeting"
+
+    @pytest.mark.parametrize("max_chars", [4000, 2000, 1000, 100])
+    def test_should_keep_a_short_summary_item_whole_when_shortening(self, max_chars):
+        """
+        【テスト対象】build_question_input（長い要約の切り方）
+        【テスト内容】決定事項が「該当なし」で、ほかの 3 項目が長い要約を、既定の上限（4,000）から
+                    調整値の下限（100）までの上限で組み立てる
+        【期待結果】「該当なし」は切られずに残り、長い 3 項目だけが同じ長さに切られ、
+                    要約の合計は上限の半分以内に収まること
+        """
+        summary = SummaryText("あ" * 700, "い" * 1000, NOT_APPLICABLE, "え" * 800)
+
+        result = build_question_input(
+            QuestionScene.AFTER_MEETING_WITH_SUMMARY, ["tail of the meeting"], summary, max_chars
+        )
+
+        shortened = result.summary
+        assert shortened is not None
+        assert shortened.decisions == NOT_APPLICABLE
+        cut = [shortened.overview, shortened.key_points, shortened.action_items]
+        assert len({len(item) for item in cut}) == 1
+        assert sum(len(item) for item in vars_of(shortened)) <= max_chars // 2
+        # 切った項目は、元の項目の先頭が残る
+        assert summary.overview.startswith(shortened.overview)
+        assert summary.key_points.startswith(shortened.key_points)
+        assert summary.action_items.startswith(shortened.action_items)
+
+    @pytest.mark.parametrize(
+        "summary",
+        [
+            SummaryText("あ" * 700, "い" * 1000, NOT_APPLICABLE, "え" * 800),
+            SummaryText(NOT_APPLICABLE, NOT_APPLICABLE, NOT_APPLICABLE, "え" * 3000),
+            SummaryText("\n\n\n\n" + "あ" * 800, "い" * 1000, "\n" + NOT_APPLICABLE, "え" * 800),
+            SummaryText("あ" * 2000, "い" * 4000, "う" * 4000, "え" * 4000),
+        ],
+        ids=["short-decisions", "three-short-items", "leading-newlines", "maximum-sizes"],
+    )
+    @pytest.mark.parametrize(
+        "max_chars", [8, 9, 10, 50, 99, 100, 101, 400, 999, 1000, 4000, 100_000]
+    )
+    def test_should_never_make_a_summary_item_empty(self, summary, max_chars):
+        """
+        【テスト対象】build_question_input（要約を切った結果の項目）
+        【テスト内容】短い項目・先頭が改行の項目を含む要約と、小さい上限から大きい上限までを組み合わせ、
+                    会議後で要約ありの場面を組み立てる。組み立てた入力を、ワーカーへ送るメッセージに
+                    して復号する
+        【期待結果】どの項目も空にならず、復号できること（空の項目があるとワーカーが
+                    ProtocolError で終わる）
+        """
+        result = build_question_input(
+            QuestionScene.AFTER_MEETING_WITH_SUMMARY, ["tail of the meeting"], summary, max_chars
+        )
+
+        shortened = result.summary
+        assert shortened is not None
+        assert all(item.strip() for item in vars_of(shortened))
+        message = CreateQuestions(transcript=result.transcript, summary=shortened)
+        assert decode_input(1, encode_input(message)[5:]) == message
 
     def test_should_fail_when_the_scene_needs_a_summary_that_is_missing(self):
         """

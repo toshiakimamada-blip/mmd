@@ -78,7 +78,7 @@ class QuestionInput:
 
     # 字幕（英語の原文）。話された順。量の上限を超えるときは、直近の字幕に絞ってある。
     transcript: str
-    # 要約。会議後で、要約があるときだけ。長すぎるときは、各項目を切って短くしてある。
+    # 要約。会議後で、要約があるときだけ。長すぎるときは、長い項目だけを切って短くしてある。
     summary: SummaryText | None
 
 
@@ -122,14 +122,52 @@ def _summary_chars(summary: SummaryText) -> int:
     )
 
 
+def _fair_share(lengths: Sequence[int], budget: int) -> int:
+    """項目ごとの文字数の上限を決める。合計が budget に収まる、最も大きい値（1 以上）。
+
+    短い項目から順に、元の長さのまま残してよいかを調べる。残りの項目が全部その長さで入らなくなったら、
+    残りの上限を残りの項目の数で等分する。上限より短い項目は、切らない。
+
+    Args:
+        lengths: 項目の文字数。合計が budget を超えること。
+        budget: 項目の文字数の合計の上限。
+
+    Returns:
+        項目 1 つの文字数の上限。budget が項目の数より小さいときも、空の項目を作らないよう 1。
+    """
+    remaining = budget
+    for position, length in enumerate(sorted(lengths)):
+        items_left = len(lengths) - position
+        if length * items_left > remaining:
+            return max(1, remaining // items_left)
+        remaining -= length
+    # 合計が budget 以下なら、どの項目も切らない。呼び出し側は先にこの場合を除くため、通常は来ない。
+    return max(lengths, default=1)
+
+
+def _cut(item: str, limit: int) -> str:
+    """項目を、先頭から limit 文字まで残して切る。limit 以下の項目は、そのまま返す。
+
+    切った結果が空白だけになるとき（項目が改行で始まるとき）は、先頭の空白を除いてから切る。
+    質問を作る側（ワーカー）は、空の項目を受け付けないため。
+    """
+    if len(item) <= limit:
+        return item
+    return item[:limit].rstrip() or item.strip()[:limit] or item
+
+
 def _shorten_summary(summary: SummaryText, max_chars: int) -> SummaryText:
-    """要約の文字数の合計を、上限に収める。超えるときは、各項目を同じ割合で、先頭から残して切る。"""
-    total = _summary_chars(summary)
-    if total <= max_chars:
+    """要約の文字数の合計を、上限に収める。
+
+    切るのは、割り当て（_fair_share）より長い項目だけ。「該当なし」のような短い項目は切らない。
+    どの項目も空にしない（上限が 4 未満のように小さいときは、項目 1 つにつき 1 文字を残し、
+    合計が上限を超える）。
+    """
+    if _summary_chars(summary) <= max_chars:
         return summary
     items = (summary.overview, summary.key_points, summary.decisions, summary.action_items)
-    kept = [item[: len(item) * max_chars // total].rstrip() for item in items]
-    return SummaryText(*kept)
+    limit = _fair_share([len(item) for item in items], max_chars)
+    return SummaryText(*(_cut(item, limit) for item in items))
 
 
 def build_question_input(
