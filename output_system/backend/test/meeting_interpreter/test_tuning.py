@@ -8,7 +8,12 @@ import pytest
 
 from conftest import REPO_CONFIG_DIR
 from meeting_interpreter.config_error import ConfigError
-from meeting_interpreter.tuning import TUNING_FILE_NAME, Tuning, load_tuning
+from meeting_interpreter.tuning import (
+    GENERATION_INPUT_MAX_CHARS_LIMIT,
+    TUNING_FILE_NAME,
+    Tuning,
+    load_tuning,
+)
 
 
 def _write_tuning(directory: Path, text: str) -> Path:
@@ -361,6 +366,29 @@ class TestFileValidation:
 
         with pytest.raises(ConfigError, match="translation_quantization"):
             _load(path)
+
+    def test_should_accept_the_largest_input_amount_and_reject_one_more(self):
+        """
+        【テスト対象】load_tuning（generation_input_max_chars の範囲の最大）
+        【テスト内容】GENERATION_INPUT_MAX_CHARS_LIMIT ちょうどと、それより 1 大きい値を、
+                    環境変数で上書きする
+        【期待結果】ちょうどの値は読め、1 大きい値は ConfigError になること。
+                    生成ワーカーとのメッセージの上限（generation/protocol.py）は、この定数に
+                    合わせて作る。定数と実際の範囲がずれると、上限より大きい調整値で
+                    ワーカーが止まる
+        """
+        name = "MMD_TUNING_GENERATION_INPUT_MAX_CHARS"
+
+        tuning = _load(
+            REPO_CONFIG_DIR / TUNING_FILE_NAME, {name: str(GENERATION_INPUT_MAX_CHARS_LIMIT)}
+        )
+
+        assert tuning.generation_input_max_chars == GENERATION_INPUT_MAX_CHARS_LIMIT
+        with pytest.raises(ConfigError, match=name):
+            _load(
+                REPO_CONFIG_DIR / TUNING_FILE_NAME,
+                {name: str(GENERATION_INPUT_MAX_CHARS_LIMIT + 1)},
+            )
 
     def test_should_reject_a_meeting_allocation_larger_than_the_normal_one(self, tmp_path: Path):
         """

@@ -186,12 +186,22 @@ class JsonBody:
             raise self._fail(key, "真偽値")
         return value
 
-    def text(self, key: str, *, allow_empty: bool = False, optional: bool = False) -> str | None:
-        """文字列。optional が True なら None も認める。"""
+    def text(
+        self,
+        key: str,
+        *,
+        allow_empty: bool = False,
+        optional: bool = False,
+        max_chars: int = MAX_TEXT_CHARS,
+    ) -> str | None:
+        """文字列。optional が True なら None も認める。max_chars は、文字数の上限。
+
+        項目ごとに許す量が違う（会議の字幕は、他の項目より長い）ため、上限は呼び出し側が選べる。
+        """
         value = self._data[key]
         if value is None and optional:
             return None
-        if not isinstance(value, str) or len(value) > MAX_TEXT_CHARS:
+        if not isinstance(value, str) or len(value) > max_chars:
             raise self._fail(key, "文字列")
         if not allow_empty and not value.strip():
             raise self._fail(key, "空でない文字列")

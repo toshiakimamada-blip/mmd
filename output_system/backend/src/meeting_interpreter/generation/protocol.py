@@ -30,17 +30,19 @@ from enum import StrEnum
 from pathlib import Path
 from typing import Any, Final, Literal
 
+from ..tuning import GENERATION_INPUT_MAX_CHARS_LIMIT
 from ..worker_ipc import JsonBody, ProtocolError, json_frame
 from .results import QuestionPair, SummaryText, question_problem, summary_problem
 from .settings import GenerationSettings
 
 # 要約の作成 1 回に含められるブロックの数の上限。2 時間の会議（約 25 ブロック）より十分に大きい。
 MAX_BLOCKS: Final = 5000
-# ブロック 1 つの文字数の上限。調整値（一度に渡す字幕の量）の範囲より大きく取る。
-# 壊れたメッセージを断るだけ。
-MAX_BLOCK_CHARS: Final = 100_000
-# 質問の作成で渡す字幕の文字数の上限。
-MAX_TRANSCRIPT_CHARS: Final = 100_000
+# ブロック 1 つの文字数の上限。ブロックは調整値（一度に渡す字幕の量）まで大きくなるため、
+# 調整値の範囲の最大に合わせる。これより小さいと、調整値を上げたとき、ワーカーが
+# 回復できないエラー（PROTOCOL_ERROR）で終わる。壊れたメッセージを断るだけの上限。
+MAX_BLOCK_CHARS: Final = GENERATION_INPUT_MAX_CHARS_LIMIT
+# 質問の作成で渡す字幕の文字数の上限。質問の入力も調整値まで大きくなるため、同じ理由で合わせる。
+MAX_TRANSCRIPT_CHARS: Final = GENERATION_INPUT_MAX_CHARS_LIMIT
 
 
 class CpuMode(StrEnum):
@@ -530,9 +532,8 @@ def _decode_summarize(data: dict[str, Any]) -> Summarize:
 
 def _decode_create_questions(data: dict[str, Any]) -> CreateQuestions:
     body = JsonBody(_fields(data), {"transcript", "summary"}, what="create_questions")
-    transcript = str(body.text("transcript"))
-    if len(transcript) > MAX_TRANSCRIPT_CHARS:
-        raise ProtocolError("create_questions の transcript が長すぎます")
+    # 字幕は、他の文字列の項目より長い。文字数の上限は MAX_TRANSCRIPT_CHARS（調整値の最大）。
+    transcript = str(body.text("transcript", max_chars=MAX_TRANSCRIPT_CHARS))
     raw_summary = body.raw("summary")
     summary = None if raw_summary is None else _decode_summary_text(raw_summary, what="summary")
     return CreateQuestions(transcript=transcript, summary=summary)

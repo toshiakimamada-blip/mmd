@@ -5,6 +5,7 @@
 同じ契約で動かす。本物の AI モデルでの確認は、test_generation_real_model.py にある。
 """
 
+import dataclasses
 import os
 import signal
 import time
@@ -19,7 +20,12 @@ from meeting_interpreter.generation.client import (
     WorkerExited,
     WorkerStartError,
 )
-from meeting_interpreter.generation.inputs import QuestionInput
+from meeting_interpreter.generation.inputs import (
+    QuestionInput,
+    QuestionScene,
+    build_question_input,
+    split_into_blocks,
+)
 from meeting_interpreter.generation.protocol import (
     CpuApplied,
     CpuMode,
@@ -36,8 +42,10 @@ from meeting_interpreter.generation.protocol import (
     Summary,
     WorkerError,
 )
+from meeting_interpreter.generation.results import SummaryText
 from meeting_interpreter.generation.settings import GenerationSettings
 from meeting_interpreter.logs.trace import is_valid_trace_id
+from meeting_interpreter.tuning import GENERATION_INPUT_MAX_CHARS_LIMIT
 
 SETTINGS = GenerationSettings(
     generation_input_max_chars=4000,
@@ -172,6 +180,37 @@ class TestLifecycle:
         questions = question_messages[-1]
         assert isinstance(questions, Questions)
         assert len(questions.pairs) == 5
+
+    def test_should_work_on_the_largest_input_the_tuning_range_allows(self, client):
+        """
+        【テスト対象】ワーカーの入力の検査（ブロックと質問の字幕の文字数の上限）
+        【テスト内容】調整値 generation_input_max_chars を許す最大にして、その量いっぱいの
+                    ブロックの要約と、会議後で要約ありの質問（決定事項は「該当なし」）を依頼する
+        【期待結果】要約と質問（5 組）が返ること。ワーカーはエラーも終了もしない
+        """
+        limit = GENERATION_INPUT_MAX_CHARS_LIMIT
+        settings = dataclasses.replace(SETTINGS, generation_input_max_chars=limit)
+        client.start(
+            dataclasses.replace(fake_start(), settings=settings), timeout_seconds=START_TIMEOUT
+        )
+        subtitles = [f"subtitle number {n:07d} of the meeting" for n in range(60000)]
+        blocks = split_into_blocks(subtitles, limit)
+        summary = SummaryText("概要です。", "話題 A: 要点", "該当なし", "Dana が確認する")
+        question_input = build_question_input(
+            QuestionScene.AFTER_MEETING_WITH_SUMMARY, subtitles, summary, limit
+        )
+        # 既存の上限（1 つの文字列 10,000 文字）を超える量であること
+        assert len(blocks[0]) > 10_000
+        assert len(question_input.transcript) > 10_000
+
+        client.summarize((blocks[0],))
+        summary_messages = read_until(client, (Summary, WorkerError, WorkerExited))
+        client.create_questions(question_input)
+        question_messages = read_until(client, (Questions, WorkerError, WorkerExited))
+
+        assert isinstance(summary_messages[-1], Summary)
+        assert isinstance(question_messages[-1], Questions)
+        assert len(question_messages[-1].pairs) == 5
 
     def test_should_stop_and_leave_no_process(self, client):
         """

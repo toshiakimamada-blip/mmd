@@ -9,7 +9,9 @@ from pathlib import Path
 import pytest
 
 from meeting_interpreter.generation.protocol import (
+    MAX_BLOCK_CHARS,
     MAX_BLOCKS,
+    MAX_TRANSCRIPT_CHARS,
     CpuApplied,
     CpuMode,
     CreateQuestions,
@@ -36,7 +38,12 @@ from meeting_interpreter.generation.protocol import (
     encode_output,
 )
 from meeting_interpreter.generation.settings import GenerationSettings
-from meeting_interpreter.tuning import TUNING_FILE_NAME, Tuning, load_tuning
+from meeting_interpreter.tuning import (
+    GENERATION_INPUT_MAX_CHARS_LIMIT,
+    TUNING_FILE_NAME,
+    Tuning,
+    load_tuning,
+)
 from meeting_interpreter.worker_ipc import ProtocolError
 
 # このファイルは backend/test/meeting_interpreter/generation/ にある。4 つ上が output_system/。
@@ -142,6 +149,25 @@ class TestInputRoundTrip:
         assert decoded.settings == settings
         for name in GenerationSettings.__slots__:
             assert getattr(decoded.settings, name) == getattr(tuning, name)
+
+    def test_should_pass_the_largest_input_the_tuning_range_allows(self):
+        """
+        【テスト対象】encode_input と decode_input（質問の字幕・ブロックの文字数の上限）
+        【テスト内容】調整値 generation_input_max_chars の許す最大の文字数の字幕とブロックを、
+                    符号化して復号する。字幕は、日本語（1 文字が 6 バイトに符号化される）と
+                    英語の両方
+        【期待結果】どれも、そのまま復号できること（上限がこの範囲より小さいと、調整値を上げたとき
+                    ワーカーが回復不能のエラーで終わる）
+        """
+        assert MAX_TRANSCRIPT_CHARS >= GENERATION_INPUT_MAX_CHARS_LIMIT
+        assert MAX_BLOCK_CHARS >= GENERATION_INPUT_MAX_CHARS_LIMIT
+        messages = [
+            CreateQuestions(transcript="x" * GENERATION_INPUT_MAX_CHARS_LIMIT),
+            CreateQuestions(transcript="あ" * GENERATION_INPUT_MAX_CHARS_LIMIT, summary=SUMMARY),
+            Summarize(blocks=("x" * GENERATION_INPUT_MAX_CHARS_LIMIT, "last block")),
+        ]
+        for message in messages:
+            assert decode_input(*_split(encode_input(message))) == message
 
 
 class TestOutputRoundTrip:
@@ -292,11 +318,21 @@ class TestInputRejection:
         with pytest.raises(ProtocolError):
             decode_input(1, json.dumps(data).encode())
 
+    def test_should_reject_a_block_that_is_longer_than_the_limit(self):
+        """
+        【テスト対象】decode_input（ブロックの文字数の上限）
+        【テスト内容】上限 MAX_BLOCK_CHARS を 1 文字超えるブロックを渡す
+        【期待結果】ProtocolError になること
+        """
+        frame = encode_input(Summarize(blocks=("a", "b")))
+        with pytest.raises(ProtocolError):
+            decode_input(*_send(frame, blocks=["a", "x" * (MAX_BLOCK_CHARS + 1)]))
+
     @pytest.mark.parametrize(
         "changes",
         [
             {"transcript": ""},
-            {"transcript": "x" * 100_001},
+            {"transcript": "x" * (MAX_TRANSCRIPT_CHARS + 1)},
             {"summary": {"overview": "概要"}},
             {"summary": 5},
         ],
