@@ -8,7 +8,8 @@
 - クールダウン: uv は `exclude-newer = "7 days"`（`backend/pyproject.toml`）、npm は `min-release-age=7`（`frontend/.npmrc`）
 - AI モデルの入手: 依存を足さず、標準ライブラリの HTTPS クライアント（urllib）で自前に行う
 - 通訳ワーカー: faster-whisper（Whisper small.en。Silero VAD の ONNX 形式が同梱。ONNX Runtime で動かす）、CTranslate2（FuguMT）、SentencePiece。依存グループ `interpreter`（`uv.lock` で固定。開発環境の `uv sync` の既定に入る）。PyTorch は使わない。**出荷するイメージには、まだ入れていない**（Dockerfile は `--no-default-groups`）
-- 翻訳モデルの変換: 部品（PyTorch の CPU 版 wheel、transformers、CTranslate2、SentencePiece）は依存グループ `conversion`（`uv.lock` で固定）。開発環境の `uv sync` には入り、イメージではアプリサーバーの環境に入れず `/opt/conversion-venv` にだけ入れる（展開後 約 1.33GB）。llama.cpp は、まだ入れていない
+- 翻訳モデルの変換: 部品（PyTorch の CPU 版 wheel、transformers、CTranslate2、SentencePiece）は依存グループ `conversion`（`uv.lock` で固定）。開発環境の `uv sync` には入り、イメージではアプリサーバーの環境に入れず `/opt/conversion-venv` にだけ入れる（展開後 約 1.33GB）。llama.cpp は、生成ワーカーの部品（下）として入れた
+- 生成ワーカー: llama-cpp-python（llama.cpp の Python の結び付け。PyPI に wheel が無く、ソースから組み立てる。組み立ての指定は `pyproject.toml` の `[tool.uv.config-settings-package]`）で Qwen3-4B（Q4_K_M の GGUF）を動かす。依存グループ `generation`（`uv.lock` で固定。開発環境の `uv sync` の既定に入る）。**出荷するイメージには、まだ入れていない**
 
 ## ディレクトリ構成
 ```
@@ -30,10 +31,12 @@ output_system/
 │   │   ├── healthcheck.py    # HEALTHCHECK 用（外向きの通信の例外: 127.0.0.1 だけ）
 │   │   ├── child_process.py  # ワーカー・変換プロセスの起動の入口。自動入手と利用状況の送信を止める環境変数を必ず付ける
 │   │   ├── interpreter/      # 通訳ワーカー（会議の間だけ動く別のプロセス）。protocol.py（メッセージの型とフレーム）、client.py（親側の起動・送受信・停止）、entry.py/__main__.py（子の入口。通信を断つ備え）、worker.py（待ち行列と字幕の組み立て）、segmenter.py/vad.py（発話の区切り）、transcriber.py、translator.py、engines.py/fake.py（差し替え口と偽のエンジン）、locations.py、settings.py。使い方・測定値は docs/interpreter.md
+│   │   ├── worker_ipc.py, worker_client.py # 2 つのワーカー共通の枠の読み書き・出力の書き込み・親側のプロセス管理（固まったワーカーの強制終了を含む）
+│   │   ├── generation/       # 生成ワーカー（要約と質問を作る別のプロセス）。protocol.py（メッセージの型）、client.py（親側）、entry.py/__main__.py（子の入口。通信を断つ備え）、worker.py（待ち行列・中断・割り当ての反映）、pipeline.py（ブロック・中間メモ・統合・作り直し）、prompts.py（指示の文面・出力の形）、results.py（出力の検証）、inputs.py（ブロック分けと質問の入力の組み立て。依頼を作る側が使う）、cpu.py、engines.py/llama.py/fake.py（差し替え口・本物・偽）、locations.py、settings.py。使い方・測定値は docs/generation.md
 │   │   ├── models/           # モデル管理部。definition.py（定義の検証）、store.py（置き場・一致の確認）、download.py（唯一の外向きの通信）、hosts.py（通信を許すホスト）、fetch.py（確認→入手の流れ）、manager.py（準備状況）、failure.py（失敗の原因）
 │   │   │   └── conversion/   # 翻訳モデルの変換。アプリサーバー側: service.py（管理部への口）・process.py（起動と見届け）・receipt.py（控えと判定）・layout.py・protocol.py。変換プロセス側: worker.py・network_guard.py・sandbox.py・safe_torch.py
 │   │   └── api/{health,models}.py  # GET /api/health、GET /api/models/status、POST /api/models/retry
-│   └── test/                 # src と同じ構造。test/container/ は起動したコンテナを相手にする（MMD_CONTAINER_URL のときだけ動く）。test/browser/ はブラウザーで手動で確かめる確認用のサーバー（pytest は集めない）。test/distribution_server.py（擬似の配布元、HTTPS）と test/model_fakes.py（小さな定義・偽の入手の部品）と test/interpreter_audio.py（合成音声・音声ファイルの読み込み）は共通の道具。test/measure/measure_interpreter.py は、本物のモデルで字幕の遅れとメモリを測る道具（pytest は集めない）
+│   └── test/                 # src と同じ構造。test/container/ は起動したコンテナを相手にする（MMD_CONTAINER_URL のときだけ動く）。test/browser/ はブラウザーで手動で確かめる確認用のサーバー（pytest は集めない）。test/distribution_server.py（擬似の配布元、HTTPS）と test/model_fakes.py（小さな定義・偽の入手の部品）と test/interpreter_audio.py（合成音声・音声ファイルの読み込み）は共通の道具。test/measure/measure_interpreter.py は、本物のモデルで字幕の遅れとメモリを測る道具、test/measure/measure_generation.py は、生成ワーカーの作成時間とメモリを測る道具（どちらも pytest は集めない）。test/generation_fakes.py（偽の文章生成）と test/meeting_subtitles.py（英語の会議の字幕の見本。測定と動作確認用）も共通の道具
 ├── frontend/
 │   ├── src/{routes.ts,router.tsx,components/AppFrame.tsx,screens/*,styles/{frame,notices}.css}
 │   ├── scripts/              # ビルドした dist/ に外部の URL への参照が無いかの検査（npm run build の最後に走る）
@@ -42,7 +45,7 @@ output_system/
 │   └── test/                 # src と同じ構造
 ├── tools/with-pinned-node.sh # Dockerfile と同じ版の Node.js で、渡されたコマンド（npm install など）を実行する
 ├── config/                   # tuning.toml（調整値の仮置き）、models.toml（3 つの AI モデルの定義）、translation_alternatives.md（翻訳モデルの代わりの候補）
-├── docs/                     # errors.md（エラーの扱い・コード一覧）、notices.md（画面の部品の使い方）、models.md（入手・変換）、interpreter.md（通訳ワーカー・測定値）
+├── docs/                     # errors.md（エラーの扱い・コード一覧）、notices.md（画面の部品の使い方）、models.md（入手・変換）、interpreter.md（通訳ワーカー・測定値）、generation.md（生成ワーカー・測定値）
 ```
 
 ## ビルド・起動方法
@@ -52,6 +55,7 @@ output_system/
 - 出荷するコンテナの WebSocket の確認: `docker compose up -d --build` のあと、`backend/` で `MMD_CONTAINER_URL=http://toshiakimamada-blip-mmd-output-system:3001 uv run pytest test/container --no-cov`
 - ブラウザーでの WebSocket の確認（CSP のもとで接続できるか）: `backend/` で `uv run python test/browser/serve_websocket_check.py --port 3101 --app-hostname <開発用コンテナ名>` を起動し、`playwright-cli` で `http://localhost:3101/`・`http://127.0.0.1:3101/`・`http://<コンテナ名>:3101/` を開く。Edge は `--config` の `executablePath` で指す（README「ブラウザーでの WebSocket の確認」）
 - 本物のモデルを使う確認（通常の `pytest` では飛ばす）: コンテナのボリュームから `docker cp <コンテナ>:/var/lib/mmd/models/whisper-small-en` と `.../fugumt-en-ja` を `/tmp/mmd-models/` へ取り出し、`MMD_TEST_MODELS_DIR=/tmp/mmd-models MMD_TEST_SPEECH_FILE=<英語の音声> uv run pytest test/meeting_interpreter/interpreter/test_interpreter_real_models.py --no-cov`。測定は `uv run python test/measure/measure_interpreter.py --models-dir /tmp/mmd-models --speech <音声> --repeat 6`（引数は docs/interpreter.md）
+- 生成ワーカーの本物のモデルを使う確認: コンテナのボリュームから `docker cp <コンテナ>:/var/lib/mmd/models/qwen3-4b-q4-k-m` を `/tmp/mmd-models/` へ取り出し（約 2.5GB）、`MMD_TEST_MODELS_DIR=/tmp/mmd-models uv run pytest test/meeting_interpreter/generation/test_generation_real_model.py --no-cov`（約 4 分）。測定は `uv run python test/measure/measure_generation.py --models-dir /tmp/mmd-models --threads 4`（`--long-lines 1500` で 2 時間分、`--meeting --questions-only` で会議中の割り当ての質問だけ。引数は docs/generation.md）。2 時間分は約 45 分かかる。測っている間は、ほかの重い処理を動かさない
 - 社内の証明書: 既定でリポジトリ直下の `ssl-certificates/` を登録する。フォルダーが無い環境は `SSL_CERTS_DIR=<空のフォルダー>` を付ける
 - AI モデルの入手: コンテナを起動すると、自動で始まる（初回は約 3.1GB、10MB/s 前後で約 5 分）。`curl http://toshiakimamada-blip-mmd-output-system:3001/api/models/status` で見る。2 回目以降の起動は、確認（約 5 秒）だけで入手しない。モデル置き場のボリューム `toshiakimamada-blip-mmd-models` を消すと入手し直しになる
 
@@ -67,7 +71,7 @@ output_system/
 - 設定は `Settings`（`MMD_PORT`、`MMD_APP_HOSTNAME`、`MMD_RECORDS_DIR`、`MMD_MODELS_DIR`、`MMD_STATIC_DIR`、`MMD_CONFIG_DIR`、`MMD_LOG_LEVEL`）。記録とモデルの置き場は既定値を持たせない（ボリュームと食い違ったまま別の場所へ黙って書く事故を防ぐ）。誤りは起動時にすべて出し、終了コード 2 で止める
 - ログは標準出力（標準エラーではない）。許可リスト（`logs/fields.py`）に無い項目と、決めた形に合わない値は捨てる。項目を足すときは `FieldSpec` を足す
 - 標準のロガー（`logging`）の記録は `log_type: runtime` で出し、文面を出さない（ロガーの名前・レベル・例外の種類だけ。出さなかった数は `dropped_field_count`）。文面を出すのは、起動の知らせ用の `STARTUP_LOGGER`（`logs/output.py`）と、uvicorn の起動・終了・接続の知らせ（`_UVICORN_FIXED_MESSAGES` にある文の形だけ）。uvicorn のアクセスの記録は `access_log=False` で止めている。会議に関わる記録は `log_processing`・`log_error`・`log_connection` で出す。`runtime` は基本設計書の 3 種別の外で、起動できない理由を日本語の文で出すために設けた。ワーカーなど別のプロセスを足すときは、最初に `configure_logging` を呼ぶ。`print` は ruff（T20）で禁止している
-- 調整値（`config/tuning.toml`）は仮置き。うち `generation_input_max_chars`（4000）と `generation_cpu_threads_during_meeting`（2）は、設計書と要件に根拠が無く、測ってもいない。利用者の PC で測り直す。各項目に許す範囲（`tuning.py`）の外と、知らない項目名・`MMD_TUNING_` の知らない環境変数は、起動を止める
+- 調整値（`config/tuning.toml`）は仮置き。うち `generation_input_max_chars`（4000）、`generation_cpu_threads_during_meeting`（2）、`generation_nice_during_meeting`（10）は、設計書と要件に根拠が無く、十分には測っていない（`generation_cpu_threads_normal` の 8 は、この開発環境の物理 4 コアでは 4 より遅かった。docs/generation.md）。利用者の PC で測り直す。各項目に許す範囲（`tuning.py`）の外と、知らない項目名・`MMD_TUNING_` の知らない環境変数は、起動を止める
 - 会議の内容を URL（経路と問い合わせの文字列）に載せない。uvicorn のアクセスの記録は止めている（`access_log=False`）が、会議の内容を受け取る API は、URL ではなく本文で受ける
 - 画面へ返すエラーは 4 項目（分類・コード・何が起きたか・次に行う操作）。画面はサーバーが返した文面を表示せず、エラーコードごとの文言の一覧（`errorMessages.ts`）から引く。未登録のコードは分類ごとの汎用の文言。機能を足すときは、コードと文言の両方を足す（`docs/errors.md`）
 - WebSocket の処理（接続を受け付けたあと）が `AppError` を起こしたときは、HTTP の応答を返せないため、ログを出して、分類の符号（入力・業務は 1008、システムは 1011）とエラーコードの理由で接続を閉じる（`errors.py` の `_handle_app_error`）。接続を受け付ける前なら 403 で断られる。Starlette の TestClient は受け付け済みの接続へ HTTP の応答を返しても失敗するため、確かめるテストは本物の uvicorn を使う（`test_websocket_server.py`）。画面側で閉じる理由を読む処理は、接続を扱う作業で足す
@@ -97,6 +101,11 @@ output_system/
 - 子の出力が壊れたときは、深い入れ子の JSON と巨大な整数も `ProtocolError` にする。読み取りスレッドは、想定外の例外でも `WorkerExited(protocol_error=True)` を届けて終わる（黙って死なない）。`finish()` のあとは音声を送らない（ワーカーが標準入力を読まなくなり、送信が止まる）
 - 文字起こしは、前の区切りの文章を次の条件に使わない。無音や雑音で Whisper が出す幻覚（「you」など）は、声が無い確からしさが 0.6 を超える区間を除いて防ぐ。翻訳は文を分けず、原文を 1 件ずつ訳す（2 文でも欠けなかった）。翻訳が失敗したか空なら、日本語訳を `None` にして字幕を出す。文字起こしの失敗は、その区切りを飛ばして回復できるエラーを返す
 - 声の検出は、faster-whisper に同梱の Silero VAD（ONNX）を使う（1 秒分の判定が約 2 ミリ秒）。文字起こしの所要時間は区切りの長さにほとんど依らない（0.5〜5 秒の区切りで約 2〜3.7 秒）ため、約 2 秒より短い間隔で発話が続くと処理が追いつかず、たまる。測定値と配分との比較は docs/interpreter.md
+- 生成ワーカーの契約: 依頼（要約・質問）は届いた順に 1 件ずつ処理し、親は結果（要約・質問・中断・エラー）が返ってから次を送る。中断は要約だけで、次のブロックの区切りと統合の前に確かめる。中断で返った中間メモと次のブロックの番号を付けて送り直すと再開する（中間メモは親がメモリの上で持つ。ワーカーは保存しない）。1 ブロックの要約は中間メモを作らない。質問は中断できない。中断の要求は、作っている要約と、待ち行列にあってまだ始めていない要約に効く（依頼の直後に求めても失われない）。要約が無いときの要求は捨てる
+- 文章生成モデルは llama.cpp の結び付けでワーカーの中に組み込む。付属のサーバーは TCP で待ち受けるため、seccomp（UNIX ドメイン以外のソケットを拒む）と両立しない。`use_mmap=False`（mmap だと準備完了で 4.93GB、しないと 3.27GB）。思考モードは、助手の発言の頭に空の思考を置いて飛ばす（GGUF の会話の形式の `enable_thinking=false` と同じ形）。会議の内容は `special=False` でトークンにし、区切りの記号と特別な記号に見える文字列を取り除く。ツールは与えない（docs/models.md、docs/generation.md）
+- 要約の日本語は、指示だけでは英語の文が混ざる（会議のデータが英語のため）。system・書式の見本・念押しの 3 か所で日本語を指定すると 4 項目とも日本語になった。見本は具体的な内容を避け、欄の説明にした（内容を写されないため）。中間メモは英語、質問は英語と日本語の組
+- 検証に失敗したら 1 回だけ作り直し、それでも合わなければ回復できるエラー（`summary_failed`・`questions_failed`）を返す。ワーカーは続ける。生成そのものの失敗（例外）は作り直さない。エラーに会議の内容と例外の文面を入れない
+- CPU の割り当て（スレッド数と nice 値）は、`SetCpu` を覚えておき、処理のスレッドが次の生成の前に反映する。nice 値は、生成の呼び出しごとに新しいスレッドへ付ける（一般の利用者のプロセスは nice 値を上げられても下げられず、スレッドごとの値は子の計算のスレッドが引き継ぐため）。付けられないときは付けず、`CpuApplied` の読み直した値に現れる
 - Node.js は 24.21.0 に固定（24.22.0 は公開から 7 日未満のため見送り）。SHA-256 も Dockerfile で固定
 - コンテナは非 root（uid 10001 の app）。2 つのボリュームの置き場は、イメージの中で app が持ち主になる
 
@@ -134,6 +143,12 @@ output_system/
 - CTranslate2 は CPU で、保存された `int8_float16` を `int8_float32` に自動で直し、警告を 1 行出す。翻訳の結果には影響しない
 - イメージの大きさ: `docker image ls` の DISK USAGE は「展開後 + 圧縮後」の合計。増えた分を測るときは `docker history` の層（展開後）と `docker save | wc -c`（圧縮後）で見る
 - `conftest.py` の自動の見張りは、手元以外への接続と名前の解決を失敗にする。本物の変換プロセスは子のプロセスなので、見張りの外で動く（外へ通信しないことは、変換プロセス自身の備えが守る）
+- 文章生成の速さは、CPU とメモリの空きに強く左右される。同じ条件（4 スレッド、同じ入力）で、質問の作成が 110 秒の回と 189 秒の回があった。開発環境は 7.6GB で、モデルを読み込むと使えるメモリが約 3GB まで減り、スワップが使われた。測るときは、ほかの重い処理を止め、先にモデルを読み込んで約 700 トークンの入力を処理する短い測定で、速さが平常かを確かめる
+- この環境では、測定の途中で時計（壁時計）が約 22 分飛んだ（ログの timestamp の差が実際の所要時間の 4 倍に見えた）。所要時間は単調増加時計で測る（測定ツールはそうしている）。ログの timestamp の差は信用しない。待機の `pgrep -f <名前>` は、待っているシェル自身のコマンド行に一致して終わらないので、プロセス番号で待つ
+- ggml のスレッド数を物理コアの数より多くすると、生成が遅くなる（8 スレッド 5.2 トークン/秒、4 スレッド 7.8 トークン/秒。読み込み側はほぼ同じ）
+- 文章生成の出力は、1 トークンずつ文法で制約するため、文法なしより遅い。測定は本物の入力と文法で行う
+- 英語の字幕を日本語で要約させると、presence penalty（モデルの配布元は量子化したモデルに 1.5 を勧める）が高いと言語が混ざることがある、と README にある。今のところ、日本語の指定で足りている。混ざったら、まず値を下げて試す
+- `ruff` の E501 を、英語の字幕の見本（`test/meeting_subtitles.py`）だけ許している（`pyproject.toml` の `per-file-ignores`）
 
 ## 実装済み機能
 - PBI #2: コンテナの起動、共通の枠と 4 画面の骨組み、`GET /api/health`、配信部、名前付きボリューム 2 つ、自動再起動
@@ -142,3 +157,4 @@ output_system/
 - PBI #17: AI モデルの定義と検証、モデル置き場と一致の確認、HTTPS での入手（続きから・進み具合・失敗の原因 5 種）、準備状況の取得とやり直し（`/api/models/status`・`/retry`）、起動時の非同期の開始、外向きの通信を入手の部品だけに限る検査、ワーカー・変換プロセスの起動の入口。通知の送り先は未接続
 - PBI #23: 翻訳モデルの変換（別のプロセス、外へ通信しない 3 段の備え、安全な重みの読み込み）、変換後のハッシュ値の控えと変換し直しの判定、準備状況の「変換中」と失敗（翻訳モデルを変換できない）、入手のやり直しで変換だけをやり直す流れ。測定値（イメージ +1.33GB、変換のメモリの最大値 約 625MB）は `output_system/docs/models.md`
 - PBI #28: 通訳ワーカー（別のプロセス）。16kHz・モノラルの音声を無音と長さの上限（5 秒）で区切り、Whisper small.en で英語の文字に、FuguMT で日本語にして、段ごとの所要時間と先頭の音声が届いた日時つきの字幕を返す。失敗した区切りは飛ばし、翻訳の失敗は日本語訳なしで出す。処理が追いつかなくても音声を捨てず、届いた順に処理する。外へ通信しない備え 3 段。本物のモデルでの測定（字幕の遅れ 平均 5.3 秒・最大 7.6 秒、ワーカーのメモリ 最大 約 0.82GB）は `output_system/docs/interpreter.md`。会議管理部・画面・保存は含まない
+- PBI #34: 生成ワーカー（別のプロセス）。字幕（英語の原文）のブロックから、4 項目の日本語の要約（1 ブロックは直接、複数ブロックは中間メモを作って統合）と、英語と日本語の質問 5 問を作る。出力は文法で制約し、検証に失敗したら 1 回作り直す。ブロックの区切りで中断・再開できる。質問の入力を 3 つの場面で組み立てる。CPU の割り当て（スレッド数と nice 値）を通常と会議中で切り替えられる。外へ通信しない備え 3 段。実モデル（Qwen3-4B）での測定（4 スレッド）: 質問は作成 93〜127 秒（起動を含めて 124〜166 秒。目標 180 秒以内）、要約は 2 時間分で 2,124 秒（35.4 分。**目標の 30 分を超えた**）、常駐メモリの最大は 2 時間分の要約のあとで 3,803MB（利用時の 4.5GB には収まるが、**自動テスト時の 3.5GB を 0.21GB 超えた**。質問だけなら 3,516MB）。詳細は `output_system/docs/generation.md`。作成ジョブ管理部・保存は含まない
