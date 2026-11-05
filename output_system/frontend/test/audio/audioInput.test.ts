@@ -1,7 +1,7 @@
 import { describe, expect, it, vi } from 'vitest';
 
 import { AudioCaptureError } from '../../src/audio/audioErrors';
-import { openSystemAudio } from '../../src/audio/audioInput';
+import { openAudioInput, openMicrophone, openSystemAudio } from '../../src/audio/audioInput';
 import { asMediaStream, domException, FakeStream, FakeTrack } from './fakes';
 
 /** getDisplayMedia / getUserMedia だけを持つ、偽の MediaDevices を作る。 */
@@ -192,5 +192,145 @@ describe('openSystemAudio', () => {
     const input = await openSystemAudio(mediaDevices);
 
     expect(input.stream).toBe(asMediaStream(stream));
+  });
+});
+
+/**
+ * 【モジュール】src/audio/audioInput（マイク。F-02）
+ * マイクの音声を取り込む。PC で再生される音声と同じ形（AudioInput）で返す。
+ */
+describe('openMicrophone', () => {
+  /**
+   * 【テスト対象】openMicrophone（正常系）
+   * 【テスト内容】利用を許可して、マイクの音声のストリームが得られる
+   * 【期待結果】音声の出どころは microphone。音声のトラックを持つストリームを返し、トラックは動いたまま。
+   *            マイクの音声だけを求める（映像は求めない）
+   */
+  it('should return the microphone stream and request audio only', async () => {
+    const audio = new FakeTrack('audio');
+    const mediaDevices = fakeMediaDevices({
+      getUserMedia: () => Promise.resolve(new FakeStream([audio])),
+    });
+
+    const input = await openMicrophone(mediaDevices);
+
+    expect(input.source).toBe('microphone');
+    expect(input.stream.getAudioTracks()).toEqual([audio]);
+    expect(audio.readyState).toBe('live');
+    expect(mediaDevices.getUserMedia).toHaveBeenCalledWith({ audio: true });
+    expect(mediaDevices.getDisplayMedia).not.toHaveBeenCalled();
+  });
+
+  /**
+   * 【テスト対象】openMicrophone（利用の拒否）
+   * 【テスト内容】マイクの利用の確認で拒否する（ブラウザーが NotAllowedError を返す）
+   * 【期待結果】AUDIO_PERMISSION_DENIED で失敗する
+   */
+  it('should fail with AUDIO_PERMISSION_DENIED when the user denies the microphone', async () => {
+    const mediaDevices = fakeMediaDevices({
+      getUserMedia: () => Promise.reject(domException('NotAllowedError')),
+    });
+
+    const failure = await openMicrophone(mediaDevices).catch((error: unknown) => error);
+
+    expect(failure).toBeInstanceOf(AudioCaptureError);
+    expect((failure as AudioCaptureError).code).toBe('AUDIO_PERMISSION_DENIED');
+  });
+
+  /**
+   * 【テスト対象】openMicrophone（マイクが見つからない）
+   * 【テスト内容】マイクがつながっていない（ブラウザーが NotFoundError を返す）
+   * 【期待結果】AUDIO_MIC_NOT_FOUND で失敗する
+   */
+  it('should fail with AUDIO_MIC_NOT_FOUND when no microphone is connected', async () => {
+    const mediaDevices = fakeMediaDevices({
+      getUserMedia: () => Promise.reject(domException('NotFoundError')),
+    });
+
+    const failure = await openMicrophone(mediaDevices).catch((error: unknown) => error);
+
+    expect(failure).toBeInstanceOf(AudioCaptureError);
+    expect((failure as AudioCaptureError).code).toBe('AUDIO_MIC_NOT_FOUND');
+  });
+
+  /**
+   * 【テスト対象】openMicrophone（そのほかの失敗）
+   * 【テスト内容】マイクをほかのアプリが使っている（NotReadableError）。mediaDevices が無い
+   * 【期待結果】どちらも AUDIO_CAPTURE_FAILED で失敗する
+   */
+  it('should fail with AUDIO_CAPTURE_FAILED for other failures', async () => {
+    const busy = fakeMediaDevices({
+      getUserMedia: () => Promise.reject(domException('NotReadableError')),
+    });
+
+    const busyFailure = await openMicrophone(busy).catch((error: unknown) => error);
+    const missingFailure = await openMicrophone(undefined).catch((error: unknown) => error);
+
+    expect((busyFailure as AudioCaptureError).code).toBe('AUDIO_CAPTURE_FAILED');
+    expect((missingFailure as AudioCaptureError).code).toBe('AUDIO_CAPTURE_FAILED');
+  });
+
+  /**
+   * 【テスト対象】openMicrophone（音声のトラックが無いストリーム）
+   * 【テスト内容】許可は得られたが、ストリームに音声のトラックが無い
+   * 【期待結果】AUDIO_MIC_NOT_FOUND で失敗する（取り込める音声が無いため）
+   */
+  it('should fail with AUDIO_MIC_NOT_FOUND when the stream has no audio track', async () => {
+    const mediaDevices = fakeMediaDevices({ getUserMedia: () => Promise.resolve(new FakeStream([])) });
+
+    const failure = await openMicrophone(mediaDevices).catch((error: unknown) => error);
+
+    expect((failure as AudioCaptureError).code).toBe('AUDIO_MIC_NOT_FOUND');
+  });
+
+  /**
+   * 【テスト対象】AudioInput.onEnded / stop（マイク）
+   * 【テスト内容】マイクが外れてトラックが終わる。別のマイクの取り込みを stop() で止める
+   * 【期待結果】外れたときは通知が 1 回呼ばれる。stop() ではトラックが停止され、通知は呼ばれない
+   */
+  it('should notify when the microphone is unplugged and release the track on stop', async () => {
+    const unplugged = new FakeTrack('audio');
+    const input = await openMicrophone(
+      fakeMediaDevices({ getUserMedia: () => Promise.resolve(new FakeStream([unplugged])) }),
+    );
+    const listener = vi.fn();
+    input.onEnded(listener);
+
+    unplugged.end();
+
+    expect(listener).toHaveBeenCalledTimes(1);
+
+    const stopped = new FakeTrack('audio');
+    const secondInput = await openMicrophone(
+      fakeMediaDevices({ getUserMedia: () => Promise.resolve(new FakeStream([stopped])) }),
+    );
+    const afterStop = vi.fn();
+    secondInput.onEnded(afterStop);
+    secondInput.stop();
+    expect(stopped.readyState).toBe('ended');
+    expect(afterStop).not.toHaveBeenCalled();
+  });
+});
+
+describe('openAudioInput', () => {
+  /**
+   * 【テスト対象】openAudioInput
+   * 【テスト内容】音声の出どころごとに呼ぶ
+   * 【期待結果】system_audio は画面共有を、microphone はマイクを求める。出どころが AudioInput に残る
+   */
+  it('should pick the capture method from the audio source', async () => {
+    const mediaDevices = fakeMediaDevices({
+      getDisplayMedia: () =>
+        Promise.resolve(new FakeStream([new FakeTrack('video'), new FakeTrack('audio')])),
+      getUserMedia: () => Promise.resolve(new FakeStream([new FakeTrack('audio')])),
+    });
+
+    const shared = await openAudioInput('system_audio', mediaDevices);
+    const microphone = await openAudioInput('microphone', mediaDevices);
+
+    expect(shared.source).toBe('system_audio');
+    expect(microphone.source).toBe('microphone');
+    expect(mediaDevices.getDisplayMedia).toHaveBeenCalledTimes(1);
+    expect(mediaDevices.getUserMedia).toHaveBeenCalledTimes(1);
   });
 });

@@ -123,6 +123,50 @@ export async function openSystemAudio(
   return createAudioInput('system_audio', stream);
 }
 
+/**
+ * マイクの音声を取り込む（F-02）。
+ *
+ * 呼ぶと、ブラウザーがマイクの利用の確認を出す。許可すると、音声が得られる。
+ * 取り込んだ音声は、ブラウザーの保存領域へも書かない。
+ *
+ * @param mediaDevices マイクを求める先。省略すると、ブラウザーのもの
+ * @throws AudioCaptureError 利用を拒否したとき（AUDIO_PERMISSION_DENIED）、マイクが見つからないとき
+ *   （AUDIO_MIC_NOT_FOUND）、そのほかの失敗（AUDIO_CAPTURE_FAILED）
+ */
+export async function openMicrophone(
+  mediaDevices: MediaDevices | undefined = globalThis.navigator?.mediaDevices,
+): Promise<AudioInput> {
+  let stream: MediaStream;
+  try {
+    // 音の加工（エコー除去など）は、ブラウザーの既定に任せる。会議室の遠くの声を拾うには、既定が向いている。
+    stream = await requireMediaDevices(mediaDevices).getUserMedia({ audio: true });
+  } catch (failure) {
+    throw toAudioCaptureError(failure, 'microphone');
+  }
+  if (stream.getAudioTracks().length === 0) {
+    // 許可は得られたが、取り込める音声が無い。デバイスを残さないよう、止める。
+    for (const track of stream.getTracks()) {
+      track.stop();
+    }
+    throw new AudioCaptureError('AUDIO_MIC_NOT_FOUND');
+  }
+  return createAudioInput('microphone', stream);
+}
+
+/**
+ * 音声の出どころに応じて、取り込みを始める。
+ * やり直しのとき、開始時に選んだ出どころで取り込み直すために使う。
+ *
+ * @param source 音声の出どころ
+ * @param mediaDevices 取り込みを求める先。省略すると、ブラウザーのもの
+ */
+export function openAudioInput(
+  source: AudioSource,
+  mediaDevices: MediaDevices | undefined = globalThis.navigator?.mediaDevices,
+): Promise<AudioInput> {
+  return source === 'system_audio' ? openSystemAudio(mediaDevices) : openMicrophone(mediaDevices);
+}
+
 /** mediaDevices が無い（安全な接続でないページ）ときに、取り込みの失敗として扱うための確認。 */
 function requireMediaDevices(mediaDevices: MediaDevices | undefined): MediaDevices {
   if (mediaDevices === undefined) {
