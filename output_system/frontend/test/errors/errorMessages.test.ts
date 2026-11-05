@@ -279,3 +279,44 @@ describe('ERROR_WORDINGS for audio capture', () => {
     }
   });
 });
+
+describe('ERROR_WORDINGS for meetings', () => {
+  const MEETING_CODES = [
+    'MEETING_TITLE_INVALID',
+    'MEETING_AUDIO_SOURCE_INVALID',
+    'MODEL_NOT_READY',
+    'MEETING_ALREADY_RUNNING',
+    'MEETING_NOT_FOUND',
+    'MEETING_NOT_RUNNING',
+    'MEETING_AUDIO_ALREADY_CONNECTED',
+    'MEETING_INVALID_TRANSITION',
+    'SYSTEM_INTERPRETER_UNAVAILABLE',
+  ];
+
+  /**
+   * 【テスト対象】ERROR_WORDINGS（会議の開始と終了のコード）
+   * 【テスト内容】会議管理部が返す 9 つのコードが、一覧にあるかを調べる
+   * 【期待結果】どれも一覧にあり、文言がコードごとに異なること（取り違えて案内しない）
+   */
+  it('should register a distinct wording for every code the meeting manager returns', () => {
+    const messages = MEETING_CODES.map((code) => {
+      expect(Object.keys(ERROR_WORDINGS), code).toContain(code);
+      return ERROR_WORDINGS[code].message;
+    });
+
+    expect(new Set(messages).size).toBe(MEETING_CODES.length);
+  });
+
+  /**
+   * 【テスト対象】ERROR_WORDINGS（通訳ワーカーを起動し直せなかった）
+   * 【テスト内容】会議を中断にしたときの案内を調べる
+   * 【期待結果】それまでの字幕が保存されていることと、会議の記録から要約を作れることが書かれていること
+   */
+  it('should tell the user that the subtitles were kept when the worker could not restart', () => {
+    const wording = ERROR_WORDINGS.SYSTEM_INTERPRETER_UNAVAILABLE;
+
+    expect(wording.message).toContain('中断');
+    expect(wording.action).toContain('保存されています');
+    expect(wording.action).toContain('要約');
+  });
+});

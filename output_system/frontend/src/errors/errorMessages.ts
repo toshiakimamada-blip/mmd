@@ -99,6 +99,43 @@ export const ERROR_WORDINGS: Readonly<Record<string, ErrorWording>> = Object.fre
     message: '音声を取り込めませんでした。',
     action: `同じ音声を使っているほかのアプリを閉じてから、もう一度操作してください。${REPORT_IF_NOT_FIXED}`,
   },
+  // --- 会議の開始と終了（会議管理部が返す。タイトルなど会議の内容は、文言に入れない） ---
+  MEETING_TITLE_INVALID: {
+    message: 'タイトルは、100 文字以内で、改行を含まない形にしてください。',
+    action: 'タイトルを直してから、会議を開始してください。',
+  },
+  MEETING_AUDIO_SOURCE_INVALID: {
+    message: '音声の出どころを選んでください。',
+    action: 'PC で再生される音声か、マイクを選んでから、会議を開始してください。',
+  },
+  MODEL_NOT_READY: {
+    message: 'AI モデルの準備が終わっていないため、会議を開始できません。',
+    action: '「会議の準備」で AI モデルの準備状況を確かめ、準備完了になってから開始してください。',
+  },
+  MEETING_ALREADY_RUNNING: {
+    message: '進行中の会議があります。',
+    action: '進行中の会議を終了してから、新しい会議を開始してください。',
+  },
+  MEETING_NOT_FOUND: {
+    message: '会議が見つかりません。',
+    action: `会議の一覧を開き直して、会議を確かめてください。${REPORT_IF_NOT_FIXED}`,
+  },
+  MEETING_NOT_RUNNING: {
+    message: 'この会議は通訳中ではないため、音声を受け付けられません。',
+    action: '会議の記録を開いて、状態を確かめてください。',
+  },
+  MEETING_AUDIO_ALREADY_CONNECTED: {
+    message: 'この会議には、すでに音声を送る接続があります。',
+    action: 'ほかの画面で同じ会議を開いていないか確かめてください。',
+  },
+  MEETING_INVALID_TRANSITION: {
+    message: 'いまの会議の状態では、この操作を受け付けられません。',
+    action: `会議の記録を開いて、状態を確かめてください。${REPORT_IF_NOT_FIXED}`,
+  },
+  SYSTEM_INTERPRETER_UNAVAILABLE: {
+    message: '字幕を作る処理が止まり、起動し直せなかったため、会議を中断しました。',
+    action: `それまでの字幕は保存されています。会議の記録から要約を作れます。新しい会議を開始する前に、${REPORT_IF_NOT_FIXED}`,
+  },
   // --- AI モデルの入手の失敗（準備状況が入手失敗のときの、原因の種類ごとの文言） ---
   MODEL_NETWORK_UNREACHABLE: {
     message: 'ネットワークにつながらないため、AI モデルを入手できませんでした。',
