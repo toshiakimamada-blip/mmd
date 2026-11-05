@@ -20,7 +20,7 @@ export interface AudioInput {
   readonly stream: MediaStream;
   /**
    * 音声が終わったときに呼ぶ通知を登録する（共有を止めた・マイクを外した）。
-   * stop() で止めたときは呼ばない。
+   * stop() で止めたときは呼ばない。登録の前に終わっていたときは、登録の直後に呼ぶ（見逃さない）。
    *
    * @returns 登録を外す関数
    */
@@ -45,6 +45,8 @@ function createAudioInput(source: AudioSource, stream: MediaStream): AudioInput 
   const listeners = new Set<() => void>();
   const audioTracks = stream.getAudioTracks();
   let stopped = false;
+  // stop() によらず、すべての音声のトラックが終わったか。通知の登録が遅れた側にも知らせるために覚える。
+  let ended = false;
 
   // すべての音声のトラックが終わったときに、1 回だけ通知する。
   const handleTrackEnded = (): void => {
@@ -52,6 +54,7 @@ function createAudioInput(source: AudioSource, stream: MediaStream): AudioInput 
       return;
     }
     stopped = true;
+    ended = true;
     for (const listener of [...listeners]) {
       listener();
     }
@@ -64,6 +67,18 @@ function createAudioInput(source: AudioSource, stream: MediaStream): AudioInput 
     source,
     stream,
     onEnded(listener) {
+      if (ended) {
+        // 登録の前に終わっていた（取り込みの準備の間に共有が止まった、など）。見逃さないよう、登録の直後に知らせる。
+        let removed = false;
+        queueMicrotask(() => {
+          if (!removed) {
+            listener();
+          }
+        });
+        return () => {
+          removed = true;
+        };
+      }
       listeners.add(listener);
       return () => {
         listeners.delete(listener);

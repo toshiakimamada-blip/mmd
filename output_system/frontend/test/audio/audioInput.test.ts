@@ -181,6 +181,31 @@ describe('openSystemAudio', () => {
   });
 
   /**
+   * 【テスト対象】AudioInput.onEnded（登録の前に終わっていた場合）
+   * 【テスト内容】取り込みの準備の間に共有が止まり、音声のトラックが終わったあとで、通知を登録する。
+   *            別の通知は、登録した直後に外す
+   * 【期待結果】登録した通知が 1 回呼ばれる（終わったことを見逃さない）。外した通知は呼ばれない
+   */
+  it('should notify a listener registered after the audio already ended', async () => {
+    const audio = new FakeTrack('audio');
+    const input = await openSystemAudio(
+      fakeMediaDevices({
+        getDisplayMedia: () => Promise.resolve(new FakeStream([new FakeTrack('video'), audio])),
+      }),
+    );
+    audio.end();
+    const late = vi.fn();
+    const removed = vi.fn();
+
+    input.onEnded(late);
+    input.onEnded(removed)();
+    await Promise.resolve();
+
+    expect(late).toHaveBeenCalledTimes(1);
+    expect(removed).not.toHaveBeenCalled();
+  });
+
+  /**
    * 【テスト対象】AudioInput.stream
    * 【テスト内容】返されたストリームの型を使う側で利用できるか
    * 【期待結果】MediaStream として扱える（偽物を変換して渡せる）

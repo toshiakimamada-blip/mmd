@@ -244,7 +244,10 @@ export function createFakeEnvironment() {
       sockets.push(socket);
       return socket;
     },
-    openInput: vi.fn(() => Promise.reject(new Error('openInput is not set up'))),
+    // 取り込み直す動き。テストが mockResolvedValue などで決める。決めていなければ失敗する。
+    openInput: vi.fn<(source: AudioSource) => Promise<AudioInput>>(() =>
+      Promise.reject(new Error('openInput is not set up')),
+    ),
     senderOptions: { highWaterBytes: 1_000, pollIntervalMs: 10 },
   };
   return { environment, sockets, contexts, nodes, urls };
