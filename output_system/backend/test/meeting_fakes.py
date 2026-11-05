@@ -373,3 +373,13 @@ def group_members(group: int) -> list[int]:
         if int(fields[2]) == group and fields[0] != "Z":
             members.append(int(entry.name))
     return members
+
+
+def wait_for_slot_free(handle: "AppHandle", timeout: float = 10.0) -> bool:
+    """進行中の会議の枠が空く（セッションが終わる）まで待つ。空いたら True。"""
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if handle.app.state.meeting_manager.active_session is None:
+            return True
+        time.sleep(0.05)
+    return False
