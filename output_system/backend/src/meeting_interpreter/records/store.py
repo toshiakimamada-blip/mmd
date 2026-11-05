@@ -18,18 +18,32 @@
 - 別の接続が書き込んでも守れるよう、書き込みの確定は `BEGIN IMMEDIATE` で始める
   （database.py）。順番の読み取りから書き込みまでが、他の書き込みに割り込まれない。
 - 万一重なっても、主キー（会議番号, 順番）が 2 件目を断る。
+
+失敗の扱い
+- データベースの操作が失敗したら（ディスクがいっぱい・ロック・書き込みの失敗・破損など）、
+  確定を取り消す（database.py の `run`）。そして、原因によらず `RecordSaveError` にする。
+  エラーコードは RECORD_SAVE_FAILED。保存しようとした内容は、例外にも画面へ返す 4 項目にも
+  含めない。
+- 書き込みの関数（作成・追加・更新）が `RecordError` で終わるときは、エラーログを 1 件出す。
+  出す項目は、エラーコード・コンポーネント・会議番号・例外の種類・発生場所だけ。例外の文面と
+  会議の内容は出さない。
+- 読み出しの関数（get_meeting・list_subtitles）は、データベースの例外を変換しない。
+  読み出しの失敗は、保存の失敗とは別の扱いで、閲覧の機能が決める。
 """
 
+import functools
 import re
 import sqlite3
 import uuid
-from collections.abc import Callable
+from collections.abc import Awaitable, Callable
 from datetime import datetime
 from enum import StrEnum
 from typing import Final
 
+from ..errors import describe_origin
+from ..logs import log_error
 from .database import RecordDatabase
-from .errors import RecordValueError
+from .errors import COMPONENT, RecordError, RecordSaveError, RecordValueError
 from .models import AudioSource, Meeting, MeetingStatus, Subtitle
 from .schema import ERROR_CODE_MAX_CHARS, SUBTITLE_TEXT_MAX_CHARS, TITLE_MAX_CHARS
 from .times import from_epoch_millis, to_epoch_millis, utc_now
@@ -44,6 +58,42 @@ _MEETING_COLUMNS: Final = (
 
 class _MeetingMissing(Exception):
     """更新しようとした会議が、記録データベースに無かったときの内部の合図。"""
+
+
+def _log_record_error(error: RecordError) -> None:
+    """記録保存部の失敗を、エラーログに 1 件出す（異常のレベル）。
+
+    出すのは、エラーコード・コンポーネント・会議番号・例外の種類・発生場所だけ。
+    例外の種類と発生場所は、原因のデータベースの例外があればそれから、無ければ失敗の例外自身から
+    取る。例外の文面は出さない。
+    """
+    origin = error.__cause__ or error
+    _, location = describe_origin(origin)
+    log_error(
+        error.body.code,
+        COMPONENT,
+        meeting_id=error.meeting_id,
+        exception_type=type(origin).__name__,
+        location=location,
+    )
+
+
+def _log_record_errors[**P, R](method: Callable[P, Awaitable[R]]) -> Callable[P, Awaitable[R]]:
+    """書き込みの関数が RecordError で終わるときに、エラーログを 1 件出して、例外をそのまま上げる。
+
+    ログを出すのは記録保存部だけにする。呼び出し側（会議の続け方を決める部）が、この例外を
+    受けて続けるときも、失敗の記録が残るため。
+    """
+
+    @functools.wraps(method)
+    async def wrapper(*args: P.args, **kwargs: P.kwargs) -> R:
+        try:
+            return await method(*args, **kwargs)
+        except RecordError as error:
+            _log_record_error(error)
+            raise
+
+    return wrapper
 
 
 def _new_meeting_id() -> str:
@@ -155,6 +205,23 @@ class RecordStore:
         self._clock = clock
         self._new_meeting_id = new_meeting_id
 
+    async def _write[T](
+        self, work: Callable[[sqlite3.Connection], T], *, meeting_id: str | None = None
+    ) -> T:
+        """書き込みの操作を 1 回の確定として動かす。データベースの失敗は RecordSaveError にする。
+
+        失敗したときの確定の取り消しは、`RecordDatabase.run` が行う。ここでは、データベースの
+        例外を、内容を含まない共通のエラーに変える。データベースの例外は原因として残す。
+
+        Raises:
+            RecordSaveError: データベースの操作が失敗したとき。
+        """
+        try:
+            return await self._database.run(work, write=True)
+        except sqlite3.Error as cause:
+            raise RecordSaveError(meeting_id=meeting_id) from cause
+
+    @_log_record_errors
     async def create_meeting(self, *, title: str, audio_source: AudioSource | str) -> Meeting:
         """会議を作る（会議の開始）。状態は通訳中、開始日時はアプリサーバーの時計。
 
@@ -167,6 +234,7 @@ class RecordStore:
 
         Raises:
             RecordValueError: 値が桁の上限や区分コードに合わないとき。何も保存しない。
+            RecordSaveError: データベースの操作が失敗したとき。何も保存しない。
         """
         checked_title = _check_text("title", title, TITLE_MAX_CHARS)
         source = _coerce(AudioSource, "audio_source", audio_source)
@@ -179,7 +247,7 @@ class RecordStore:
                 (meeting_id, checked_title, started_ms, source.value, MeetingStatus.INTERPRETING),
             )
 
-        await self._database.run(work, write=True)
+        await self._write(work, meeting_id=meeting_id)
         return Meeting(
             meeting_id=meeting_id,
             title=str(checked_title),
@@ -201,6 +269,7 @@ class RecordStore:
         row = await self._database.run(work, write=False)
         return None if row is None else _meeting_from_row(row)
 
+    @_log_record_errors
     async def add_subtitle(
         self,
         meeting_id: str,
@@ -223,6 +292,8 @@ class RecordStore:
 
         Raises:
             RecordValueError: 値が桁の上限や日時の形に合わないとき。何も保存せず、順番も使わない。
+            RecordSaveError: データベースの操作が失敗したとき（会議が無いときを含む）。
+                何も保存せず、順番も使わない。
         """
         original = _check_text(
             "original_text", original_text, SUBTITLE_TEXT_MAX_CHARS, meeting_id=meeting_id
@@ -250,7 +321,7 @@ class RecordStore:
             )
             return sequence
 
-        sequence = await self._database.run(work, write=True)
+        sequence = await self._write(work, meeting_id=meeting_id)
         return Subtitle(
             meeting_id=meeting_id,
             sequence=sequence,
@@ -281,6 +352,7 @@ class RecordStore:
             for row in rows
         ]
 
+    @_log_record_errors
     async def update_meeting(
         self,
         meeting_id: str,
@@ -307,6 +379,7 @@ class RecordStore:
         Raises:
             RecordValueError: 値が区分コードや日時の形に合わないとき。会議番号に合う会議が
                 無いとき（項目は meeting_id）。何も更新しない。
+            RecordSaveError: データベースの操作が失敗したとき。何も更新しない。
         """
         new_status = _coerce(MeetingStatus, "status", status, meeting_id=meeting_id)
         ended_ms = (
@@ -332,7 +405,7 @@ class RecordStore:
             ).fetchone()
 
         try:
-            row = await self._database.run(work, write=True)
+            row = await self._write(work, meeting_id=meeting_id)
         except _MeetingMissing:
             # 会議番号が、記録データベースにある会議と合わない。何も更新していない。
             raise RecordValueError("meeting_id", meeting_id=meeting_id) from None
