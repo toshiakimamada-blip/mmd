@@ -147,7 +147,7 @@ output_system/
 - uvicorn を更新すると、起動と終了の知らせの文の形が変わることがある。変わった記録は文面なしで出る。`backend/test/meeting_interpreter/test_entrypoint_process.py` が、起動と終了の知らせが読める形で出ることを確かめる
 - Starlette の TestClient は uvicorn を通らない。WebSocket の部品が無くても、WebSocket のテストは通る。出荷するイメージの確認は `backend/test/container/` で行う
 - starlette の TestClient は httpx2 を使う（httpx は非推奨の警告が出る）
-- 出荷するアプリには、接続を受け付ける `/ws` の経路がまだ無い。CSP のもとでの WebSocket の接続は、確認用のサーバー（`backend/test/browser/serve_websocket_check.py`）で確かめる。出荷するアプリへ WebSocket を張ると、CSP を通ったうえで 403 になる（コンソールの文言が「CSP に違反」ではなく「handshake: Unexpected response code: 403」なら、CSP は通っている）
+- 出荷するアプリは、`/ws/audio/{会議番号}` と `/ws/events` を受け付ける。CSP のもとでの WebSocket の接続は、確認用のサーバー（`backend/test/browser/serve_websocket_check.py`）で確かめてある。画面から張るときは、実ブラウザーで CSP を通ることを確かめ直す（コンソールの文言が「handshake: Unexpected response code: 403」なら、CSP は通っていて、サーバーが断っている）
 - 開発用コンテナに Edge は入っていない。Microsoft の公式リポジトリの `microsoft-edge-stable` の .deb を、SHA-256 を `Packages` の値と突き合わせて別のフォルダーへ `dpkg -x` で展開し、playwright-cli の `--config`（`launchOptions.executablePath`、`chromiumSandbox: false`、`--no-sandbox`）で指す。システムへはインストールしない
 - コンテナを作り直したつもりで、古いイメージのまま起動していることがある。出荷するコンテナへの確認（`test/container/`）は、応答ヘッダーの有無で古いイメージに気づける
 - 追加の `conftest.py` を別のフォルダーに置かない。テストの共通の道具は `test/` 直下（`distribution_server.py`・`model_fakes.py`）に置く。`pytest_plugins` で fixture を登録し、テストのファイル名は全体で一意にする（`__init__.py` が無いため）
