@@ -82,6 +82,23 @@ export const ERROR_WORDINGS: Readonly<Record<string, ErrorWording>> = Object.fre
     message: '保存する内容が、決めた長さや値に合っていないため、会議記録に保存できませんでした。',
     action: RETRY_OR_REPORT,
   },
+  // --- 音声の取り込みの失敗（画面が、ブラウザーの共有・マイクの利用の結果から決める。サーバーは返さない） ---
+  AUDIO_NO_AUDIO_SHARED: {
+    message: '共有に音声が含まれていないため、音声を取り込めませんでした。',
+    action: `共有の確認で、画面全体を選び、音声の共有をオンにしてから、もう一度操作してください。${REPORT_IF_NOT_FIXED}`,
+  },
+  AUDIO_PERMISSION_DENIED: {
+    message: '共有、またはマイクの利用が許可されなかったため、音声を取り込めませんでした。',
+    action: `ブラウザーの確認で許可してから、もう一度操作してください。${REPORT_IF_NOT_FIXED}`,
+  },
+  AUDIO_MIC_NOT_FOUND: {
+    message: 'マイクが見つからないため、音声を取り込めませんでした。',
+    action: `マイクを PC につないでから、もう一度操作してください。${REPORT_IF_NOT_FIXED}`,
+  },
+  AUDIO_CAPTURE_FAILED: {
+    message: '音声を取り込めませんでした。',
+    action: `同じ音声を使っているほかのアプリを閉じてから、もう一度操作してください。${REPORT_IF_NOT_FIXED}`,
+  },
   // --- AI モデルの入手の失敗（準備状況が入手失敗のときの、原因の種類ごとの文言） ---
   MODEL_NETWORK_UNREACHABLE: {
     message: 'ネットワークにつながらないため、AI モデルを入手できませんでした。',

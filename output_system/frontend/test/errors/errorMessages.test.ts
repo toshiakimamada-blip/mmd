@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
 
+import { AUDIO_ERROR_CODES } from '../../src/audio/audioErrors';
 import { ERROR_WORDINGS, GENERIC_WORDINGS, toDisplayError } from '../../src/errors/errorMessages';
 import { ERROR_CATEGORIES, isErrorCode, type AppErrorBody } from '../../src/errors/errorTypes';
 
@@ -263,5 +264,18 @@ describe('toDisplayError', () => {
     } as unknown as AppErrorBody;
 
     expect(toDisplayError(body).message).toBe(GENERIC_WORDINGS.system_error.message);
+  });
+});
+
+describe('ERROR_WORDINGS for audio capture', () => {
+  /**
+   * 【テスト対象】ERROR_WORDINGS（音声の取り込みの失敗の種類）
+   * 【テスト内容】音声の取り込みの部品が返す種類（AUDIO_ERROR_CODES）が、すべて一覧にあるかを調べる
+   * 【期待結果】どの種類も、分類ごとの汎用の文言ではなく、種類ごとの文言を持つこと
+   */
+  it('should register a dedicated wording for every audio capture failure kind', () => {
+    for (const code of AUDIO_ERROR_CODES) {
+      expect(Object.keys(ERROR_WORDINGS), code).toContain(code);
+    }
   });
 });
