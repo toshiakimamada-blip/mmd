@@ -27,13 +27,15 @@ from .errors import (
     register_exception_handlers,
 )
 from .frontend import INDEX_FILE, FrontendFiles
-from .logs import STARTUP_LOGGER
+from .logs import STARTUP_LOGGER, log_error
 from .logs.asgi import TraceIdMiddleware
 from .models.conversion.service import TranslationConverter
 from .models.download import HttpsDownloader
 from .models.fetch import ModelFetcher
 from .models.manager import ModelManager
 from .models.store import ModelStore
+from .records.database import RecordDatabase
+from .records.errors import RecordSchemaError
 from .security_headers import SecurityHeadersMiddleware
 from .settings import Settings
 
@@ -119,17 +121,34 @@ def build_model_manager(settings: Settings) -> ModelManager:
 async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
     """アプリの起動と停止。
 
-    起動で、AI モデルの確認と入手を非同期で始める（アプリの起動を待たせない）。
-    停止で、実行中の入手を中止する（受け取った分は残り、次の起動で続きから入手する）。
-    起動の順序（記録データベースの確認 → 途中だった会議の復旧 → AI モデルの確認）は、
-    起動の順序を整える作業で、ここに足す。
+    起動で、記録データベースを開き（空なら版 1 の構造を作る）、AI モデルの確認と入手を
+    非同期で始める（アプリの起動を待たせない）。
+    停止で、実行中の入手を中止し（受け取った分は残り、次の起動で続きから入手する）、
+    記録データベースを閉じる。
+
+    記録データベースを開けないときは、起動を失敗させる。構造の版が新しい場合は、
+    原因を標準出力に出してから失敗させる。基本設計書の「開始できない状態」（会議と作成の機能を
+    開始せず、画面へ理由を返し続ける）は、暫定版では作らない。
+    起動の順序（記録データベースの確認 → 途中だった会議の復旧 → AI モデルの確認）のうち、
+    途中だった会議の復旧は、起動時の復旧の作業で、ここに足す。
     """
+    database: RecordDatabase = app.state.record_database
     manager: ModelManager = app.state.model_manager
-    manager.start()
     try:
-        yield
+        await database.open()
+    except RecordSchemaError as error:
+        # 版の数値だけの文面（会議の内容は入らない）。起動の知らせ用のロガーで、理由を残す。
+        log_error("RECORD_SCHEMA_UNSUPPORTED", "startup")
+        STARTUP_LOGGER.error(str(error))
+        raise
+    try:
+        manager.start()
+        try:
+            yield
+        finally:
+            await manager.shutdown()
     finally:
-        await manager.shutdown()
+        await database.close()
 
 
 def create_app(settings: Settings, *, model_manager: ModelManager | None = None) -> FastAPI:
@@ -154,6 +173,8 @@ def create_app(settings: Settings, *, model_manager: ModelManager | None = None)
     )
     app.state.settings = settings
     app.state.model_manager = model_manager or build_model_manager(settings)
+    # 記録データベースは、起動のとき（_lifespan）に開く。組み立てるだけでは、ディスクに触れない。
+    app.state.record_database = RecordDatabase(settings.records_dir)
 
     register_exception_handlers(app)
     # add_middleware は、あとから足したものほど外側になる。内側から順に足す。

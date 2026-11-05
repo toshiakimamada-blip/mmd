@@ -73,6 +73,15 @@ export const ERROR_WORDINGS: Readonly<Record<string, ErrorWording>> = Object.fre
     message: 'アプリの画面とは別の送り元からの要求のため、受け付けませんでした。',
     action: REOPEN_WITH_LOCALHOST,
   },
+  // --- 会議記録の保存（記録保存部が返す。保存できなかった内容は、文言にも入れない） ---
+  RECORD_SAVE_FAILED: {
+    message: '会議記録を保存できませんでした。',
+    action: `ディスクの空きを確かめて、もう一度操作してください。${REPORT_IF_NOT_FIXED}`,
+  },
+  RECORD_VALUE_INVALID: {
+    message: '保存する内容が、決めた長さや値に合っていないため、会議記録に保存できませんでした。',
+    action: RETRY_OR_REPORT,
+  },
   // --- AI モデルの入手の失敗（準備状況が入手失敗のときの、原因の種類ごとの文言） ---
   MODEL_NETWORK_UNREACHABLE: {
     message: 'ネットワークにつながらないため、AI モデルを入手できませんでした。',

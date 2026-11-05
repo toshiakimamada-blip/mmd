@@ -33,6 +33,7 @@ output_system/
 │   │   ├── interpreter/      # 通訳ワーカー（会議の間だけ動く別のプロセス）。protocol.py（メッセージの型とフレーム）、client.py（親側の起動・送受信・停止）、entry.py/__main__.py（子の入口。通信を断つ備え）、worker.py（待ち行列と字幕の組み立て）、segmenter.py/vad.py（発話の区切り）、transcriber.py、translator.py、engines.py/fake.py（差し替え口と偽のエンジン）、locations.py、settings.py。使い方・測定値は docs/interpreter.md
 │   │   ├── worker_ipc.py, worker_client.py # 2 つのワーカー共通の枠の読み書き・出力の書き込み・親側のプロセス管理（固まったワーカーの強制終了を含む）
 │   │   ├── generation/       # 生成ワーカー（要約と質問を作る別のプロセス）。protocol.py（メッセージの型）、client.py（親側）、entry.py/__main__.py（子の入口。通信を断つ備え）、worker.py（待ち行列・中断・割り当ての反映）、pipeline.py（ブロック・中間メモ・統合・作り直し）、prompts.py（指示の文面・出力の形）、results.py（出力の検証）、inputs.py（ブロック分けと質問の入力の組み立て。依頼を作る側が使う）、cpu.py、engines.py/llama.py/fake.py（差し替え口・本物・偽）、locations.py、settings.py。使い方・測定値は docs/generation.md
+│   │   ├── records/          # 記録保存部。database.py（接続・構造の版の確認・専用の実行器）、migrations.py（版の一覧と移行）、schema.py（版 1 の 5 つの表・桁の上限・区分コード）、models.py（Meeting・Subtitle・区分）、times.py（UTC のミリ秒の変換）、store.py（会議と字幕の保存と読み出し・失敗の変換とエラーログ）、errors.py（RecordSchemaError と RecordError 系）
 │   │   ├── models/           # モデル管理部。definition.py（定義の検証）、store.py（置き場・一致の確認）、download.py（唯一の外向きの通信）、hosts.py（通信を許すホスト）、fetch.py（確認→入手の流れ）、manager.py（準備状況）、failure.py（失敗の原因）
 │   │   │   └── conversion/   # 翻訳モデルの変換。アプリサーバー側: service.py（管理部への口）・process.py（起動と見届け）・receipt.py（控えと判定）・layout.py・protocol.py。変換プロセス側: worker.py・network_guard.py・sandbox.py・safe_torch.py
 │   │   └── api/{health,models}.py  # GET /api/health、GET /api/models/status、POST /api/models/retry
@@ -108,6 +109,10 @@ output_system/
 - CPU の割り当て（スレッド数と nice 値）は、`SetCpu` を覚えておき、処理のスレッドが次の生成の前に反映する。nice 値は、生成の呼び出しごとに新しいスレッドへ付ける（一般の利用者のプロセスは nice 値を上げられても下げられず、スレッドごとの値は子の計算のスレッドが引き継ぐため）。付けられないときは付けず、`CpuApplied` の読み直した値に現れる
 - 生成ワーカーへのメッセージの文字数の上限（質問の字幕・ブロック。`generation/protocol.py`）は、調整値 `generation_input_max_chars` の許す最大（`tuning.GENERATION_INPUT_MAX_CHARS_LIMIT`、100 万）に合わせる。同じ定数が調整値の範囲の最大でもあるため、ずれない。上限を調整値より小さくすると、字幕が調整値いっぱいまで溜まった会議の質問で、ワーカーが `PROTOCOL_ERROR` で終わる。ただし 100 万は実モデルでは動かない大きさ（文脈 約 86 万トークン、KV キャッシュだけで約 118GB の計算）。測定で値を決めたら、定数を現実的な値に下げる判断が要る
 - 質問の入力で長い要約を切るとき（`inputs._shorten_summary`）は、割り当てより長い項目だけを同じ長さに切り、「該当なし」のような短い項目は切らない。どの項目も空にしない（ワーカーは空の項目を `ProtocolError` で拒み、終了する）。比例して切る方式は、短い項目が空になったため不採用
+- 記録データベースは、名前付きボリューム（`MMD_RECORDS_DIR`）の `records.sqlite3` 1 ファイル。接続は 1 つで、操作は専用の実行器（スレッド 1 本）で 1 つずつ動かし、書き込みは `BEGIN IMMEDIATE` で始める（字幕の順番 = その会議の最大 + 1 が重ならず、欠番も出ない）。ジャーナルは `DELETE`、同期は `FULL`。WAL は、更新前の控えを `-wal` と `-shm` を気にせず作れるよう不採用（読み書きの並行は、接続 1 つのこのアプリでは使わない）
+- 日時は UTC のミリ秒の整数（ミリ秒未満は切り捨て）。時間帯の無い日時と 1970 年より前の日時は断る。会議番号は `uuid4` の 32 桁の 16 進数（連番だと、削除した会議の番号を再び使い、開いたままの画面が別の会議を表示する）
+- 書き込みの関数は、保存の前に桁の上限・区分コード・日時の形を確かめ、合わなければ `RecordValueError`（`RECORD_VALUE_INVALID`）。表の CHECK 制約は最後の防ぎ。データベースの失敗は原因によらず `RecordSaveError`（`RECORD_SAVE_FAILED`）にそろえる。エラーログは記録保存部が 1 件出し（`RecordError.log_level` が無しで、例外の受け皿は重ねて出さない）、項目はエラーコード・コンポーネント・会議番号・例外の種類・発生場所だけ。読み出し（`get_meeting`・`list_subtitles`）は変換しない
+- `update_meeting` は遷移規則を確かめない（会議管理部と作成ジョブ管理部の役目）。終了日時 `None` は「変えない」、`summary_failure_reason` の `None` は「空にする」。無い会議の更新は `RecordValueError`（項目 `meeting_id`）、無い会議への字幕の追加は外部キーの違反で `RecordSaveError`
 - Node.js は 24.21.0 に固定（24.22.0 は公開から 7 日未満のため見送り）。SHA-256 も Dockerfile で固定
 - コンテナは非 root（uid 10001 の app）。2 つのボリュームの置き場は、イメージの中で app が持ち主になる
 
@@ -151,6 +156,9 @@ output_system/
 - 文章生成の出力は、1 トークンずつ文法で制約するため、文法なしより遅い。測定は本物の入力と文法で行う
 - 英語の字幕を日本語で要約させると、presence penalty（モデルの配布元は量子化したモデルに 1.5 を勧める）が高いと言語が混ざることがある、と README にある。今のところ、日本語の指定で足りている。混ざったら、まず値を下げて試す
 - `ruff` の E501 を、英語の字幕の見本（`test/meeting_subtitles.py`）だけ許している（`pyproject.toml` の `per-file-ignores`）
+- テストの日時の期待値（Unix 時刻のミリ秒）を手で計算しない。1 日（86,400,000）ずれた定数を書いて、正しい実装のテストが落ちた。`date -u -d "2026-11-04 12:00:00" +%s` で確かめる
+- 保存の失敗の再現: ディスクがいっぱいは `PRAGMA max_page_count`（`database.run` の中で設定し、あとで戻す）、ロックは別の接続で `BEGIN IMMEDIATE` を持ち、`database.BUSY_TIMEOUT_MS` を `monkeypatch` で小さくしてから開く（既定は 5 秒待つ）。確定の取り消しは、本物の書き込みを済ませてから例外を起こす `RecordDatabase` の子で確かめる（`test_record_save_failure.py`）
+- Python 3.12 のため、ジェネリクスは `def f[T](...)`（`TypeVar` を使うと ruff の UP047）
 
 ## 実装済み機能
 - PBI #2: コンテナの起動、共通の枠と 4 画面の骨組み、`GET /api/health`、配信部、名前付きボリューム 2 つ、自動再起動
@@ -160,3 +168,4 @@ output_system/
 - PBI #23: 翻訳モデルの変換（別のプロセス、外へ通信しない 3 段の備え、安全な重みの読み込み）、変換後のハッシュ値の控えと変換し直しの判定、準備状況の「変換中」と失敗（翻訳モデルを変換できない）、入手のやり直しで変換だけをやり直す流れ。測定値（イメージ +1.33GB、変換のメモリの最大値 約 625MB）は `output_system/docs/models.md`
 - PBI #28: 通訳ワーカー（別のプロセス）。16kHz・モノラルの音声を無音と長さの上限（5 秒）で区切り、Whisper small.en で英語の文字に、FuguMT で日本語にして、段ごとの所要時間と先頭の音声が届いた日時つきの字幕を返す。失敗した区切りは飛ばし、翻訳の失敗は日本語訳なしで出す。処理が追いつかなくても音声を捨てず、届いた順に処理する。外へ通信しない備え 3 段。本物のモデルでの測定（字幕の遅れ 平均 5.3 秒・最大 7.6 秒、ワーカーのメモリ 最大 約 0.82GB）は `output_system/docs/interpreter.md`。会議管理部・画面・保存は含まない
 - PBI #34: 生成ワーカー（別のプロセス）。字幕（英語の原文）のブロックから、4 項目の日本語の要約（1 ブロックは直接、複数ブロックは中間メモを作って統合）と、英語と日本語の質問 5 問を作る。出力は文法で制約し、検証に失敗したら 1 回作り直す。ブロックの区切りで中断・再開できる。質問の入力を 3 つの場面で組み立てる。CPU の割り当て（スレッド数と nice 値）を通常と会議中で切り替えられる。外へ通信しない備え 3 段。実モデル（Qwen3-4B）での測定（4 スレッド）: 質問は作成 93〜127 秒（起動を含めて 124〜166 秒。目標 180 秒以内）、要約は 2 時間分で 2,124 秒（35.4 分。**目標の 30 分を超えた**）、常駐メモリの最大は 2 時間分の要約のあとで 3,803MB（利用時の 4.5GB には収まるが、**自動テスト時の 3.5GB を 0.21GB 超えた**。質問だけなら 3,516MB）。詳細は `output_system/docs/generation.md`。作成ジョブ管理部・保存は含まない
+- PBI #47: 記録データベース（`records.sqlite3`、構造の版 1、会議・字幕・要約・質問のまとまり・質問の 5 つの表）と記録保存部。会議の作成・字幕の追加（順番は同じ確定の中で振る）・状態と終了日時の更新・読み出し、保存の失敗の共通のエラー（`RECORD_SAVE_FAILED`・`RECORD_VALUE_INVALID`）と画面の文言、内容を含まないエラーログ。要約・質問のまとまり・質問の保存の関数、字幕の保存に失敗したときの会議の続け方、更新前の控え（暫定版では後回し）は含まない

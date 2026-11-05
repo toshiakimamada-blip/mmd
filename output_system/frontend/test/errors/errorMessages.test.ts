@@ -150,6 +150,44 @@ describe('ERROR_WORDINGS for AI model download', () => {
   });
 });
 
+describe('ERROR_WORDINGS for record storage', () => {
+  const RECORD_CODES = ['RECORD_SAVE_FAILED', 'RECORD_VALUE_INVALID'];
+
+  /**
+   * 【テスト対象】ERROR_WORDINGS（会議記録の保存の失敗）
+   * 【テスト内容】記録保存部が返す 2 つのコード（保存の失敗・保存する値の誤り）を調べる
+   * 【期待結果】どちらも一覧にあり、何が起きたかが会議記録に触れていること。
+   *            コードごとに文言が異なり、次に行う操作に、開発を担う AI へエラーコードを伝えることが
+   *            書かれていること（利用者は、原因を自分で直せない）
+   */
+  it('should register a wording for each code the record storage returns', () => {
+    const messages = RECORD_CODES.map((code) => {
+      expect(Object.keys(ERROR_WORDINGS), code).toContain(code);
+      expect(ERROR_WORDINGS[code].action, code).toContain('開発を担う AI');
+      return ERROR_WORDINGS[code].message;
+    });
+
+    expect(new Set(messages).size).toBe(RECORD_CODES.length);
+    for (const message of messages) {
+      expect(message).toContain('会議記録');
+    }
+  });
+
+  /**
+   * 【テスト対象】ERROR_WORDINGS（保存の失敗の案内）
+   * 【テスト内容】保存の失敗の次に行う操作を調べる
+   * 【期待結果】ディスクの空きを確かめること、もう一度操作することが書かれていること。
+   *            保存できなかった内容（字幕・タイトルなど）を、文言に入れる余地が無い固定の文であること
+   */
+  it('should tell the user to check the disk and try again after a failed save', () => {
+    const wording = ERROR_WORDINGS.RECORD_SAVE_FAILED;
+
+    expect(wording.message).toContain('保存できませんでした');
+    expect(wording.action).toContain('ディスクの空き');
+    expect(wording.action).toContain('もう一度');
+  });
+});
+
 describe('GENERIC_WORDINGS', () => {
   /**
    * 【テスト対象】GENERIC_WORDINGS
