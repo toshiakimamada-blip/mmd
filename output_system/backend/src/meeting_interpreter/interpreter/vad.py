@@ -20,7 +20,15 @@ class SileroSpeechDetector:
 
         faster-whisper は、使うときまで取り込まない
         （取り込むと、ONNX Runtime などが読み込まれるため）。
+
+        ONNX Runtime の Linux 版は、利用状況を送る部品（Microsoft の 1DS。送り先は
+        mobile.events.data.microsoft.com）を持つ。通訳ワーカーは、OS の仕組み（seccomp）で
+        外への通信を止めているが、部品そのものも止める。モデルを読み込む前に呼ぶ。
         """
+        import onnxruntime
+
+        onnxruntime.disable_telemetry_events()
+
         from faster_whisper.vad import get_vad_model
 
         self._model = get_vad_model()

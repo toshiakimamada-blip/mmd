@@ -78,3 +78,31 @@ def test_should_load_the_model_without_any_network_access():
     detector = SileroSpeechDetector()
 
     assert len(detector.probabilities(np.zeros(_windows(2), dtype=np.float32))) == 2
+
+
+def test_should_turn_off_the_onnx_runtime_telemetry_before_loading_the_model(monkeypatch):
+    """
+    【テスト対象】SileroSpeechDetector の読み込み（ONNX Runtime の利用状況の送信）
+    【テスト内容】ONNX Runtime の disable_telemetry_events と、モデルの読み込みの呼び出しの順を
+                記録して、検出を作る
+    【期待結果】モデルを読み込む前に、利用状況の送信を止める呼び出しが 1 回行われること
+    """
+    import onnxruntime
+    from faster_whisper import vad as faster_whisper_vad
+
+    calls: list[str] = []
+    real_get_vad_model = faster_whisper_vad.get_vad_model
+
+    def spy_disable() -> None:
+        calls.append("disable_telemetry_events")
+
+    def spy_get_vad_model():
+        calls.append("get_vad_model")
+        return real_get_vad_model()
+
+    monkeypatch.setattr(onnxruntime, "disable_telemetry_events", spy_disable)
+    monkeypatch.setattr(faster_whisper_vad, "get_vad_model", spy_get_vad_model)
+
+    SileroSpeechDetector()
+
+    assert calls == ["disable_telemetry_events", "get_vad_model"]

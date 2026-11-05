@@ -134,10 +134,15 @@ ENV UV_PROJECT_ENVIRONMENT=/opt/venv \
 WORKDIR /build
 
 # --locked: uv.lock と pyproject.toml がずれていたら失敗させる。ロックファイルの版だけを入れる。
-# --no-default-groups: テスト用の依存（dev）も、翻訳モデルの変換の部品（conversion）も入れない。
-#   アプリサーバーのメモリの上限は 0.5GB のため、変換の部品はこの環境に入れない（ADR-16）。
+# --no-default-groups: テスト用の依存（dev）も、翻訳モデルの変換の部品（conversion）も、文章生成の部品
+#   （generation）も入れない。アプリサーバーのメモリの上限は 0.5GB のため、変換の部品はこの環境に
+#   入れない（ADR-16）。
+# --group interpreter: 通訳ワーカー（会議の間だけ動く別のプロセス）の部品（faster-whisper など）を入れる。
+#   ワーカーは、アプリサーバーと同じ Python で `python -m meeting_interpreter.interpreter` として動く。
+#   アプリサーバー自身は、この部品を取り込まない（ワーカーのクライアントは numpy や AI の部品を
+#   取り込まない）ため、メモリは増えない。ディスクが増えるだけ。
 COPY backend/pyproject.toml backend/uv.lock backend/.python-version ./
-RUN /opt/uv-venv/bin/uv sync --locked --no-default-groups --no-install-project
+RUN /opt/uv-venv/bin/uv sync --locked --no-default-groups --group interpreter --no-install-project
 
 # 翻訳モデルの変換の部品（PyTorch の CPU 版、transformers、CTranslate2、SentencePiece）を、別の環境へ入れる。
 # 変換は、変換の間だけ動く別のプロセスが、この環境の Python で行う（MMD_CONVERSION_PYTHON が指す）。

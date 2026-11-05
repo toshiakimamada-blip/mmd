@@ -56,6 +56,7 @@ from ..logs.events import format_timestamp
 from ..records.errors import RecordError
 from ..records.models import Meeting, MeetingStatus
 from ..records.store import RecordStore
+from ..tuning import Tuning
 from ..worker_client import WorkerExited
 from .errors import COMPONENT, audio_already_connected, interpreter_unavailable, meeting_not_running
 from .transitions import Trigger, resolve_transition
@@ -101,27 +102,48 @@ class CaptureEvent(StrEnum):
     RESUMED = "capture.resumed"
 
 
+# 終了処理の依頼を書き始めるまで待つ秒数。依頼は数バイトで、ワーカーが読んでいれば、すぐ書ける。
+FINISH_WRITE_TIMEOUT_SECONDS: Final = 2.0
+# ワーカーを止めるとき、停止完了を待つ秒数。強制終了の猶予 1 秒が別に付く。
+STOP_TIMEOUT_SECONDS: Final = 2.0
+
+
 @dataclass(frozen=True, slots=True)
 class SessionPolicy:
-    """時間と回数の決め。回数の上限と待ち時間は、実装で確定する（基本設計書）。"""
+    """時間と回数の決め。回数の上限と待ち時間は、実装で確定する（基本設計書）。
+
+    既定値は、調整値（config/tuning.toml）が持つ。コードの中には持たない。
+    """
 
     # 通訳ワーカーが準備完了になるまで待つ秒数（AI モデルの読み込みを含む）。
-    worker_start_timeout_seconds: float = 180.0
+    worker_start_timeout_seconds: float
     # 起動の失敗または異常終了が、この回数だけ続いたら、起動し直しをやめて会議を中断にする。
     # 起動できたあと、stable_seconds 以上動き続けたワーカーが止まった場合は、数え直す。
-    max_failures: int = 3
+    max_failures: int
     # 起動し直す前に待つ秒数。
-    restart_wait_seconds: float = 1.0
+    restart_wait_seconds: float
     # この秒数以上動き続けたワーカーは、安定していたとみなす（失敗の数え直し）。
-    stable_seconds: float = 30.0
+    stable_seconds: float
     # 終了のとき、待っている音声をワーカーへ渡し切るまで待つ秒数。
-    flush_timeout_seconds: float = 15.0
-    # 終了処理の依頼を書き始めるまで待つ秒数。
-    finish_write_timeout_seconds: float = 2.0
+    flush_timeout_seconds: float
     # 終了処理の依頼のあと、この秒数のあいだ字幕が 1 件も届かなければ、固まったとみなす。
-    finish_idle_seconds: float = 30.0
+    finish_idle_seconds: float
+    # 終了処理の依頼を書き始めるまで待つ秒数。
+    finish_write_timeout_seconds: float = FINISH_WRITE_TIMEOUT_SECONDS
     # ワーカーを止めるとき、停止完了を待つ秒数。強制終了の猶予 1 秒が別に付く。
-    stop_timeout_seconds: float = 2.0
+    stop_timeout_seconds: float = STOP_TIMEOUT_SECONDS
+
+    @classmethod
+    def from_tuning(cls, tuning: Tuning) -> "SessionPolicy":
+        """調整値から作る。"""
+        return cls(
+            worker_start_timeout_seconds=tuning.interpreter_start_timeout_seconds,
+            max_failures=tuning.interpreter_max_failures,
+            restart_wait_seconds=tuning.interpreter_restart_wait_seconds,
+            stable_seconds=tuning.interpreter_stable_seconds,
+            flush_timeout_seconds=tuning.meeting_end_flush_timeout_seconds,
+            finish_idle_seconds=tuning.meeting_end_finish_idle_seconds,
+        )
 
 
 @dataclass(slots=True)
@@ -221,7 +243,7 @@ class MeetingSession:
         store: RecordStore,
         publisher: Publisher,
         launcher: InterpreterLauncher,
-        policy: SessionPolicy | None = None,
+        policy: SessionPolicy,
         clock: Callable[[], datetime] = lambda: datetime.now(UTC),
         on_meeting_ended: Callable[[Meeting], Awaitable[None]] | None = None,
         on_finished: Callable[["MeetingSession"], None] | None = None,
@@ -241,7 +263,7 @@ class MeetingSession:
         self._store = store
         self._publisher = publisher
         self._launcher = launcher
-        self._policy = policy or SessionPolicy()
+        self._policy = policy
         self._clock = clock
         self._on_meeting_ended = on_meeting_ended
         self._on_finished = on_finished

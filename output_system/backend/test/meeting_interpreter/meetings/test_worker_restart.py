@@ -4,6 +4,7 @@
 """
 
 import asyncio
+import dataclasses
 import json
 import os
 import signal
@@ -16,6 +17,7 @@ from websockets.exceptions import ConnectionClosed
 
 from interpreter_audio import tone
 from meeting_fakes import (
+    FAST,
     AppHandle,
     FakeEngineLauncher,
     frames,
@@ -30,7 +32,7 @@ from meeting_fakes import (
 )
 from meeting_interpreter.interpreter.client import InterpreterClient
 from meeting_interpreter.interpreter.protocol import FakeEngineOptions, Stopped
-from meeting_interpreter.meetings.session import MeetingSession, SessionPolicy
+from meeting_interpreter.meetings.session import MeetingSession
 from meeting_interpreter.records.models import AudioSource, Meeting, MeetingStatus
 from meeting_interpreter.settings import Settings
 
@@ -309,9 +311,7 @@ class TestWhenTheWorkerCannotBeRestarted:
         【期待結果】動き続けたワーカーが止まったときは数え直すので、4 回目まで起動し直され、
                     会議は通訳中のままであること
         """
-        policy = SessionPolicy(
-            worker_start_timeout_seconds=60.0, restart_wait_seconds=0.05, stable_seconds=0.0
-        )
+        policy = dataclasses.replace(FAST, stable_seconds=0.0)
         launcher = FakeEngineLauncher(settings)
         with running_app(make_app(settings, launcher, policy)) as handle:
             try:
@@ -347,7 +347,13 @@ class TestNetworkAttemptCheck:
             def publish(self, name, payload):
                 attempts_log.append((name, payload))
 
-        return MeetingSession(meeting, store=None, publisher=Nowhere(), launcher=None)  # type: ignore[arg-type]
+        return MeetingSession(
+            meeting,
+            store=None,  # type: ignore[arg-type]
+            publisher=Nowhere(),
+            launcher=None,  # type: ignore[arg-type]
+            policy=FAST,
+        )
 
     def test_should_log_an_error_when_the_worker_tried_to_reach_outside(self, capfd):
         """

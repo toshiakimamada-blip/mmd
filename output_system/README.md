@@ -10,7 +10,7 @@
 | `frontend/` | 画面。TypeScript と React を Vite でビルドします。ロックファイルは `package-lock.json` です |
 | `config/` | アプリに同梱する設定ファイル。調整値（`tuning.toml`）と、AI モデルの定義（`models.toml`。翻訳モデルの代わりの候補は `translation_alternatives.md`） |
 | `tools/` | 補助の道具。画面の依存を足すときに、固定した Node.js で実行する `with-pinned-node.sh` など |
-| `docs/` | 実装に付ける文書。エラーの扱いと、エラーコードの一覧は `docs/errors.md`。お知らせ帯とエラー表示の部品の使い方は `docs/notices.md`。AI モデルの入手と、翻訳モデルの変換（確かめた結果、部品、測定値）は `docs/models.md`。通訳ワーカー（音声から字幕を作る別のプロセス）の構成、測り方、字幕の遅れとメモリの測定値、外へ通信しない確認は `docs/interpreter.md`。生成ワーカー（字幕から要約と質問を作る別のプロセス）の構成、作り方、CPU の割り当て、作成時間とメモリの測定値は `docs/generation.md`。ブラウザーの音声の取り込み（画面共有とマイク、16kHz・モノラルへの変換、WebSocket での送信、停止の検知とやり直し、実ブラウザーでの確認）は `docs/audio-capture.md` |
+| `docs/` | 実装に付ける文書。エラーの扱いと、エラーコードの一覧は `docs/errors.md`。お知らせ帯とエラー表示の部品の使い方は `docs/notices.md`。AI モデルの入手と、翻訳モデルの変換（確かめた結果、部品、測定値）は `docs/models.md`。通訳ワーカー（音声から字幕を作る別のプロセス）の構成、測り方、字幕の遅れとメモリの測定値、外へ通信しない確認は `docs/interpreter.md`。生成ワーカー（字幕から要約と質問を作る別のプロセス）の構成、作り方、CPU の割り当て、作成時間とメモリの測定値は `docs/generation.md`。ブラウザーの音声の取り込み（画面共有とマイク、16kHz・モノラルへの変換、WebSocket での送信、停止の検知とやり直し、実ブラウザーでの確認）は `docs/audio-capture.md`。会議の開始と終了、音声の WebSocket、字幕の保存と通知、中断、通訳ワーカーの起動し直しは `docs/meetings.md` |
 
 テストは、各フォルダの `src/` と同じ階層の `test/` に置き、`src/` と同じ構造にします。起動したコンテナを相手にするテストだけは、`backend/test/container/` に置きます。ブラウザーで手動で確かめるための確認用のサーバーは、`backend/test/browser/` に置きます（pytest は集めません）。確認用のページは `frontend/test/browser/` に置きます（ビルドの対象は `frontend/index.html` だけで、出荷するアプリには含まれません）。
 
@@ -137,7 +137,7 @@ Starlette の `TestClient` は uvicorn を通らないため、部品が無く�
 | `GET /api/models/status` | 準備状況（`checking`・`downloading`・`converting`・`ready`・`failed`）。入手中は進み具合（`progress.downloaded_bytes` と `progress.total_bytes`）。入手失敗のときは原因の種類（`failure_kind`）とエラーコード（`error_code`） |
 | `POST /api/models/retry` | 入手のやり直し。入手失敗のときだけ受け付け（202）、それ以外は業務エラー `MODEL_RETRY_NOT_ALLOWED`（409）。入手は非同期で始まります |
 
-準備状況は、アプリサーバーのメモリの上だけで持ちます（記録データベースには置きません）。変化は、通知 `model.status_changed` として発行します。通知の送り先（画面への WebSocket）は別の作業で作るため、いまは `ModelStatusNotifier` の形の受け口だけがあります。原因の種類とエラーコードは [docs/errors.md](docs/errors.md) にあります。
+準備状況は、アプリサーバーのメモリの上だけで持ちます（記録データベースには置きません）。変化は、通知 `model.status_changed` として発行します。通知の送り先は、通知部（`/ws/events`。[docs/meetings.md](docs/meetings.md)）です。原因の種類とエラーコードは [docs/errors.md](docs/errors.md) にあります。
 
 入手の自動の再試行はしません。失敗したら止まり、利用者の「入手をやり直す」で再開します。
 
@@ -246,7 +246,7 @@ npm run check:dist        # ビルドした dist/ だけを、外部の URL へ�
 依存の版は、ロックファイルで固定します。追加と更新は、次のとおり行います。
 
 - Python: `backend/` で `uv add <パッケージ>` を実行し、`uv.lock` も一緒にコミットします。`uv.lock` の形式の版（`revision`）は、書いた uv の版で決まります。Dockerfile の `UV_VERSION` より新しい uv で書くと、`revision` が上がります。ロックし直すときは、`uvx --from uv==<UV_VERSION の値> uv lock` のように、同じ版の uv を使います
-- Python の依存グループ: `dev`（テスト用）、`conversion`（翻訳モデルの変換の部品。PyTorch など）、`interpreter`（通訳ワーカーの部品。faster-whisper など）、`generation`（生成ワーカーの部品。llama-cpp-python）は、開発環境（`uv sync`）には入りますが、イメージのアプリサーバーの環境には入れません（`--no-default-groups`）。変換の部品は、イメージの別の環境に入れます（[docs/models.md](docs/models.md)）。通訳ワーカーと生成ワーカーの部品は、イメージにはまだ入れていません（[docs/interpreter.md](docs/interpreter.md)、[docs/generation.md](docs/generation.md)）
+- Python の依存グループ: `dev`（テスト用）、`conversion`（翻訳モデルの変換の部品。PyTorch など）、`interpreter`（通訳ワーカーの部品。faster-whisper など）、`generation`（生成ワーカーの部品。llama-cpp-python）は、開発環境（`uv sync`）にはすべて入ります。イメージのアプリサーバーの環境には、`interpreter` だけを入れます（`--no-default-groups --group interpreter`）。通訳ワーカーは、アプリサーバーと同じ Python で動く別のプロセスです。アプリサーバー自身はこの部品を取り込みません。変換の部品は、イメージの別の環境に入れます（[docs/models.md](docs/models.md)）。生成ワーカーの部品は、イメージにはまだ入れていません（[docs/generation.md](docs/generation.md)）
 - 画面: `frontend/` で `../tools/with-pinned-node.sh npm install <パッケージ>` を実行し、`package-lock.json` も一緒にコミットします。素の `npm install` は、npm が 11.10 未満だと止まります（下の「公開から 7 日未満の版を使わない設定」を参照）
 - 依存は公式の配布元（PyPI と npm）から入手します。既知の脆弱性がある版は選びません
 

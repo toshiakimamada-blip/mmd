@@ -215,7 +215,7 @@ def create_app(
         publisher=notification_hub,
         launcher=interpreter_launcher or ProductionLauncher(settings),
         models_ready=lambda: app.state.model_manager.snapshot.status is ModelStatus.READY,
-        policy=meeting_policy,
+        policy=meeting_policy or SessionPolicy.from_tuning(settings.tuning),
         on_meeting_ended=on_meeting_ended,
     )
 

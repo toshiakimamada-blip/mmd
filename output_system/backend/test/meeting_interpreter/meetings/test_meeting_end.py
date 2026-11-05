@@ -308,6 +308,56 @@ class TestEndMeeting:
         assert read_meeting(settings, meeting_id)["ended_at"] is not None
 
 
+class TestEndWithoutSession:
+    """通訳中のまま、セッションが無い会議の終了。"""
+
+    def test_should_end_such_a_meeting_once_when_the_requests_arrive_together(
+        self, app_handle, settings, monkeypatch
+    ):
+        """
+        【テスト対象】POST /api/meetings/{会議番号}/end（セッションが無い会議への同時の要求）
+        【テスト内容】終了の保存が 1 回失敗して、通訳中のまま残った会議に、4 本のスレッドから
+                    同時に終了を求める
+        【期待結果】終了は 1 回だけ行われ、4 件とも同じ結果（完了、同じ終了日時）を受け取ること。
+                    状態の変化の通知も 1 回だけ
+        """
+        events = app_handle.events()
+        meeting_id = start_meeting(app_handle)
+        wait_for_worker(app_handle)
+        store = app_handle.app.state.meeting_manager._store  # noqa: SLF001
+        original_update = store.update_meeting
+
+        async def failing_update(*args, **kwargs):
+            raise RecordSaveError(meeting_id=meeting_id)
+
+        monkeypatch.setattr(store, "update_meeting", failing_update)
+        status, _ = app_handle.post(f"/api/meetings/{meeting_id}/end")
+        assert status == 500
+        monkeypatch.setattr(store, "update_meeting", original_update)
+
+        results: list[tuple[int, dict]] = []
+        barrier = threading.Barrier(4)
+
+        def end_it() -> None:
+            barrier.wait()
+            results.append(app_handle.post(f"/api/meetings/{meeting_id}/end"))
+
+        threads = [threading.Thread(target=end_it) for _ in range(4)]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join(timeout=60)
+
+        assert [status for status, _ in results] == [200] * 4
+        assert len({str(body) for _, body in results}) == 1
+        assert results[0][1]["status"] == "completed"
+        time.sleep(0.3)
+        ended = [
+            i for i in events.of_type("meeting.state_changed") if i["status"] != "interpreting"
+        ]
+        assert len(ended) == 1
+
+
 class TestEndWhenTheWorkerFreezes:
     """固まったワーカーでも、会議の終了は時間内に戻り、プロセスを残さない。"""
 

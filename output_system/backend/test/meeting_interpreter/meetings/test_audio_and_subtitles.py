@@ -13,6 +13,7 @@ from datetime import UTC, datetime
 
 import pytest
 from websockets.exceptions import ConnectionClosed, InvalidStatus
+from websockets.sync.client import connect
 
 from meeting_fakes import (
     FAST,
@@ -88,6 +89,26 @@ class TestAudioSocket:
         stored = read_subtitles(settings, meeting_id)
         assert [row["sequence"] for row in stored] == [1, 2, 3]
         assert [row["original_text"] for row in stored] == [i["original_text"] for i in created]
+
+    @pytest.mark.parametrize("path", ["/ws/audio/{meeting_id}", "/ws/events"])
+    @pytest.mark.parametrize("origin", ["http://evil.example", None])
+    def test_should_apply_the_access_restriction_to_the_new_sockets(self, app_handle, path, origin):
+        """
+        【テスト対象】接続制限（音声の WebSocket と通知の WebSocket）
+        【テスト内容】会議を開始したうえで、別のサイトの送り元、または送り元なしで、2 つの
+                    WebSocket につなぐ
+        【期待結果】どちらも HTTP の 403 で断られ、音声の接続の確保にも数えられないこと
+                    （そのあと、正しい送り元で音声の接続をつなげる）
+        """
+        meeting_id = start_meeting(app_handle)
+        url = f"ws://127.0.0.1:{app_handle.port}" + path.format(meeting_id=meeting_id)
+
+        with pytest.raises(InvalidStatus) as caught:
+            connect(url, origin=origin, legacy=True, proxy=None, open_timeout=10)
+
+        assert caught.value.response.status_code == 403
+        with app_handle.audio(meeting_id) as audio:
+            audio.send(b"\x00" * FRAME_BYTES)
 
     def test_should_refuse_a_connection_to_a_meeting_that_does_not_exist(self, app_handle):
         """

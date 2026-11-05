@@ -10,14 +10,10 @@ from collections.abc import Iterator
 
 import pytest
 
-from meeting_fakes import FakeEngineLauncher, read_meeting, ready_model_manager, running_app
+from meeting_fakes import FAST, FakeEngineLauncher, read_meeting, ready_model_manager, running_app
 from meeting_interpreter.app import create_app
-from meeting_interpreter.meetings.session import SessionPolicy
 from meeting_interpreter.records.errors import RecordSaveError
 from meeting_interpreter.settings import Settings
-
-# 速く確かめるための決め。
-FAST = SessionPolicy(worker_start_timeout_seconds=60.0, restart_wait_seconds=0.05)
 
 
 def _alive(pid: int | None) -> bool:

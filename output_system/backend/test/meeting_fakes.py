@@ -33,15 +33,24 @@ from meeting_interpreter.settings import Settings
 LOOPBACK = "127.0.0.1"
 
 # 速く確かめるための、会議のセッションの決め。
-FAST = SessionPolicy(worker_start_timeout_seconds=60.0, restart_wait_seconds=0.05)
+FAST = SessionPolicy(
+    worker_start_timeout_seconds=60.0,
+    max_failures=3,
+    restart_wait_seconds=0.05,
+    stable_seconds=30.0,
+    flush_timeout_seconds=15.0,
+    finish_idle_seconds=30.0,
+)
 
 # 固まったワーカーを確かめるための、短い決め。
 IMPATIENT = SessionPolicy(
     worker_start_timeout_seconds=60.0,
+    max_failures=3,
     restart_wait_seconds=0.05,
+    stable_seconds=30.0,
     flush_timeout_seconds=1.0,
-    finish_write_timeout_seconds=0.5,
     finish_idle_seconds=1.0,
+    finish_write_timeout_seconds=0.5,
     stop_timeout_seconds=0.5,
 )
 

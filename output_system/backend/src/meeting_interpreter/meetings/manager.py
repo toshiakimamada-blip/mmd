@@ -64,7 +64,7 @@ class MeetingManager:
         publisher: Publisher,
         launcher: InterpreterLauncher,
         models_ready: Callable[[], bool],
-        policy: SessionPolicy | None = None,
+        policy: SessionPolicy,
         clock: Callable[[], datetime] = lambda: datetime.now(UTC),
         on_meeting_ended: Callable[[Meeting], Awaitable[None]] | None = None,
         shutdown_wait_seconds: float = SHUTDOWN_WAIT_SECONDS,
@@ -75,7 +75,7 @@ class MeetingManager:
             publisher: 通知の送り先（通知部）。
             launcher: 通訳ワーカーの起動の入口。
             models_ready: AI モデルが準備完了かを返す。
-            policy: セッションの時間と回数の決め。
+            policy: セッションの時間と回数の決め（SessionPolicy.from_tuning で調整値から作る）。
             clock: アプリサーバーの時計。
             on_meeting_ended: 会議を終了し、状態が要約作成中になったあとに呼ぶ。要約を始める
                 呼び出しで、作成ジョブ管理部につなぐ口。つなぐまでは何もしない（字幕が 1 件以上の
@@ -93,6 +93,8 @@ class MeetingManager:
         # 進行中の枠。会議を作る前から埋めて、同時に届いた 2 件目の開始を断る。
         self._occupied = False
         self._session: MeetingSession | None = None
+        # セッションの無い会議を終了する処理を、1 つずつにする（同時に届いても、1 回分にするため）。
+        self._end_without_session_lock = asyncio.Lock()
         self._capture_listeners: list[Callable[[str, CaptureEvent], None]] = []
 
     # --- 参照 ---------------------------------------------------------------------------
@@ -191,7 +193,12 @@ class MeetingManager:
             raise meeting_not_found(meeting_id)
         if meeting.status is not MeetingStatus.INTERPRETING:
             return meeting  # 重複を防ぐ規約: 通訳中でなければ、何も変えず現在の状態を返す。
-        return await self._end_without_session(meeting)
+        async with self._end_without_session_lock:
+            # 待っている間に、ほかの要求が終了を済ませているかもしれない。読み直して確かめる。
+            current = await self._store.get_meeting(meeting_id)
+            if current is None or current.status is not MeetingStatus.INTERPRETING:
+                return current or meeting
+            return await self._end_without_session(current)
 
     async def _end_without_session(self, meeting: Meeting) -> Meeting:
         """通訳中のまま、セッションが無い会議を終了する。ワーカーは無いので、字幕の件数だけで決める。
