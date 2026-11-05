@@ -14,42 +14,23 @@ from datetime import UTC, datetime
 import pytest
 from websockets.exceptions import ConnectionClosed, InvalidStatus
 
-from interpreter_audio import silence, tone
 from meeting_fakes import (
+    FAST,
+    FRAME_BYTES,
     AppHandle,
     FakeEngineLauncher,
     read_subtitles,
     ready_model_manager,
     running_app,
+    speak,
+    start_meeting,
 )
 from meeting_interpreter.app import create_app
 from meeting_interpreter.interpreter.protocol import FakeEngineOptions
-from meeting_interpreter.meetings.session import CaptureEvent, SessionPolicy
+from meeting_interpreter.meetings.session import CaptureEvent
 from meeting_interpreter.notify.hub import NotificationHub
 from meeting_interpreter.records.errors import RecordSaveError
 from meeting_interpreter.settings import Settings
-
-FAST = SessionPolicy(worker_start_timeout_seconds=60.0, restart_wait_seconds=0.05)
-
-# 100 ミリ秒ぶんの音声（画面が送るフレームの大きさ）。
-FRAME_BYTES = 3200
-
-
-def frames(pcm: bytes) -> list[bytes]:
-    """音声を、100 ミリ秒ごとのフレームに分ける。"""
-    return [pcm[offset : offset + FRAME_BYTES] for offset in range(0, len(pcm), FRAME_BYTES)]
-
-
-def speak(connection, seconds: float, *, pause: float = 0.8) -> None:
-    """声（合成音）を seconds 秒送り、そのあとに無音を送って、発話の区切りを確定させる。"""
-    for frame in frames(tone(seconds) + silence(pause)):
-        connection.send(frame)
-
-
-def start_meeting(handle: AppHandle, title: str = "定例", source: str = "system_audio") -> str:
-    status, body = handle.post("/api/meetings", {"title": title, "audio_source": source})
-    assert status == 201, body
-    return body["meeting_id"]
 
 
 @pytest.fixture

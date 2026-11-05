@@ -15,6 +15,7 @@ import time
 from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import TypeVar
 
 import uvicorn
@@ -25,10 +26,27 @@ from meeting_interpreter.__main__ import WEBSOCKET_IMPLEMENTATION
 from meeting_interpreter.interpreter.client import InterpreterClient
 from meeting_interpreter.interpreter.protocol import FakeEngineOptions, Start
 from meeting_interpreter.interpreter.settings import InterpreterSettings
+from meeting_interpreter.meetings.session import SessionPolicy
 from meeting_interpreter.models.manager import ModelManager, ModelStatus, ModelStatusSnapshot
 from meeting_interpreter.settings import Settings
 
 LOOPBACK = "127.0.0.1"
+
+# 速く確かめるための、会議のセッションの決め。
+FAST = SessionPolicy(worker_start_timeout_seconds=60.0, restart_wait_seconds=0.05)
+
+# 固まったワーカーを確かめるための、短い決め。
+IMPATIENT = SessionPolicy(
+    worker_start_timeout_seconds=60.0,
+    restart_wait_seconds=0.05,
+    flush_timeout_seconds=1.0,
+    finish_write_timeout_seconds=0.5,
+    finish_idle_seconds=1.0,
+    stop_timeout_seconds=0.5,
+)
+
+# 100 ミリ秒ぶんの音声（画面が送るフレームの大きさ）。
+FRAME_BYTES = 3200
 
 T = TypeVar("T")
 
@@ -42,6 +60,7 @@ class FakeEngineLauncher:
         *,
         fake_for_attempt: Callable[[int], FakeEngineOptions] | None = None,
         client_class: type[InterpreterClient] = InterpreterClient,
+        client_for_attempt: Callable[[int], InterpreterClient] | None = None,
     ) -> None:
         """
         Args:
@@ -49,15 +68,22 @@ class FakeEngineLauncher:
             fake_for_attempt: 起動の回（1 から数える）を受け取り、偽のエンジンの動きを返す。
                 起動の失敗（load_fails）や、遅い処理を、回ごとに変えるために使う。
             client_class: ワーカーのクライアントの型。振る舞いを変えたい子クラスを渡せる。
+            client_for_attempt: 起動の回（1 から数える）を受け取り、クライアントを返す。
+                回ごとに、別のワーカー（壊れた出力を返すものなど）を使うために使う。
         """
         self._worker_settings = InterpreterSettings.from_tuning(settings.tuning)
         self._fake_for_attempt = fake_for_attempt or (lambda attempt: FakeEngineOptions())
         self._client_class = client_class
+        self._client_for_attempt = client_for_attempt
         self.clients: list[InterpreterClient] = []
         self.starts = 0
 
     def create_client(self) -> InterpreterClient:
-        client = self._client_class()
+        attempt = self.starts + 1
+        if self._client_for_attempt is not None:
+            client = self._client_for_attempt(attempt)
+        else:
+            client = self._client_class()
         self.clients.append(client)
         return client
 
@@ -284,3 +310,66 @@ def read_subtitles(settings: Settings, meeting_id: str) -> list[dict]:
     return _read_rows(
         settings, "SELECT * FROM subtitles WHERE meeting_id = ? ORDER BY sequence", (meeting_id,)
     )
+
+
+def make_app(settings: Settings, launcher, policy: SessionPolicy = FAST, **kwargs) -> FastAPI:
+    """準備完了のモデル管理部と、偽のエンジンの入口で、アプリ全体を組み立てる。"""
+    from meeting_interpreter.app import create_app
+
+    return create_app(
+        settings,
+        model_manager=ready_model_manager(settings),
+        interpreter_launcher=launcher,
+        meeting_policy=policy,
+        **kwargs,
+    )
+
+
+def frames(pcm: bytes) -> list[bytes]:
+    """音声を、100 ミリ秒ごとのフレームに分ける。"""
+    return [pcm[offset : offset + FRAME_BYTES] for offset in range(0, len(pcm), FRAME_BYTES)]
+
+
+def speak(connection: ClientConnection, seconds: float, *, pause: float = 0.8) -> None:
+    """声（合成音）を seconds 秒送り、そのあとに無音を送って、発話の区切りを確定させる。"""
+    from interpreter_audio import silence, tone
+
+    for frame in frames(tone(seconds) + silence(pause)):
+        connection.send(frame)
+
+
+def start_meeting(handle: "AppHandle", title: str = "定例", source: str = "system_audio") -> str:
+    """会議を開始して、会議番号を返す。"""
+    status, body = handle.post("/api/meetings", {"title": title, "audio_source": source})
+    assert status == 201, body
+    return body["meeting_id"]
+
+
+def wait_for_worker(handle: "AppHandle") -> int:
+    """進行中の会議の通訳ワーカーが準備できるまで待ち、そのプロセス番号を返す。"""
+    deadline = time.monotonic() + 30
+    while time.monotonic() < deadline:
+        session = handle.app.state.meeting_manager.active_session
+        if session is not None and session.worker_pid is not None:
+            return session.worker_pid
+        time.sleep(0.05)
+    raise AssertionError("通訳ワーカーが準備できませんでした")
+
+
+def group_members(group: int) -> list[int]:
+    """プロセスのグループに残っているプロセスの番号を、/proc から調べる。
+
+    終わって、引き取られていないプロセス（ゾンビ）は数えない。
+    """
+    members: list[int] = []
+    for entry in Path("/proc").iterdir():
+        if not entry.name.isdigit():
+            continue
+        try:
+            stat = (entry / "stat").read_text()
+        except OSError:
+            continue
+        fields = stat.rsplit(")", 1)[1].split()
+        if int(fields[2]) == group and fields[0] != "Z":
+            members.append(int(entry.name))
+    return members
