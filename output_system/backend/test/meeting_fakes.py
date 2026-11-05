@@ -6,6 +6,7 @@
 - AppHandle: 起動したアプリへ、HTTP と WebSocket でつなぐ小さなクライアント
 """
 
+import asyncio
 import http.client
 import json
 import socket
@@ -14,6 +15,7 @@ import time
 from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass, field
+from typing import TypeVar
 
 import uvicorn
 from fastapi import FastAPI
@@ -27,6 +29,8 @@ from meeting_interpreter.models.manager import ModelManager, ModelStatus, ModelS
 from meeting_interpreter.settings import Settings
 
 LOOPBACK = "127.0.0.1"
+
+T = TypeVar("T")
 
 
 class FakeEngineLauncher:
@@ -101,12 +105,17 @@ def running_app(app: FastAPI) -> Iterator["AppHandle"]:
         uvicorn.Config(app, ws=WEBSOCKET_IMPLEMENTATION, log_config=None, lifespan="on")
     )
     startup_errors: list[BaseException] = []
+    # サーバーのイベントループ。テストが、ループの上で関数を動かすために控える（AppHandle.call）。
+    loop = asyncio.new_event_loop()
 
     def run_server() -> None:
+        asyncio.set_event_loop(loop)
         try:
-            server.run(sockets=[listener])
+            loop.run_until_complete(server.serve(sockets=[listener]))
         except BaseException as exc:  # noqa: BLE001 (失敗の原因を、そのままテストへ伝える)
             startup_errors.append(exc)
+        finally:
+            loop.close()
 
     thread = threading.Thread(target=run_server, daemon=True)
     thread.start()
@@ -116,7 +125,7 @@ def running_app(app: FastAPI) -> Iterator["AppHandle"]:
                 break
             thread.join(timeout=0.05)
         assert server.started, f"uvicorn が起動しませんでした: {startup_errors!r}"
-        yield AppHandle(app=app, port=listener.getsockname()[1])
+        yield AppHandle(app=app, port=listener.getsockname()[1], loop=loop)
     finally:
         server.should_exit = True
         thread.join(timeout=30)
@@ -129,7 +138,19 @@ class AppHandle:
 
     app: FastAPI
     port: int
+    loop: asyncio.AbstractEventLoop
     _opened: list[object] = field(default_factory=list)
+
+    def call(self, function: Callable[[], T], timeout: float = 30.0) -> T:
+        """サーバーのイベントループの上で、関数を動かして、結果を返す。
+
+        イベントループの上でだけ呼べる部品（通知部の publish など）を、テストから呼ぶために使う。
+        """
+
+        async def run() -> T:
+            return function()
+
+        return asyncio.run_coroutine_threadsafe(run(), self.loop).result(timeout)
 
     @property
     def origin(self) -> str:
@@ -172,6 +193,8 @@ class AppHandle:
             f"ws://{LOOPBACK}:{self.port}/ws/audio/{meeting_id}",
             origin=self.origin,
             open_timeout=10,
+            legacy=True,
+            proxy=None,
         )
         self._opened.append(connection)
         return connection
@@ -190,7 +213,7 @@ class EventStream:
     def __init__(self, url: str, origin: str) -> None:
         self.received: list[dict] = []
         self._condition = threading.Condition()
-        self._connection = connect(url, origin=origin, open_timeout=10)
+        self._connection = connect(url, origin=origin, open_timeout=10, legacy=True, proxy=None)
         self._thread = threading.Thread(target=self._read, daemon=True)
         self._thread.start()
 
