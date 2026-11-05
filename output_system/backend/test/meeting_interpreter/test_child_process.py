@@ -613,6 +613,60 @@ class TestStartWorkerProcess:
 
         assert elapsed < 3.0
 
+    def test_should_write_with_a_timeout_when_the_descriptor_number_is_1024_or_more(self):
+        """
+        【テスト対象】WorkerProcess.write の timeout（記述子の番号が大きいとき）
+        【テスト内容】低い番号の記述子を使い切ってから子を起動し、標準入力の番号を 1024 以上にして、
+                    timeout つきで書く。標準入力を読まない子へは、timeout つきの書き込みが
+                    パイプの満杯で TimeoutError になる
+        【期待結果】番号が 1024 以上でも、読む子へは書け、読まない子へは TimeoutError になること
+                    （select.select だと ValueError になり、停止の依頼が省かれる）
+        """
+        import resource
+
+        from meeting_interpreter.child_process import start_worker_process
+
+        _, hard = resource.getrlimit(resource.RLIMIT_NOFILE)
+        needed = 1200
+        if hard != resource.RLIM_INFINITY and hard < needed + 100:
+            pytest.skip("記述子の上限が低く、1024 以上の番号を作れません")
+        soft, _ = resource.getrlimit(resource.RLIMIT_NOFILE)
+        if soft != resource.RLIM_INFINITY and soft < needed + 100:
+            resource.setrlimit(resource.RLIMIT_NOFILE, (needed + 100, hard))
+        holders = [os.open(os.devnull, os.O_RDONLY) for _ in range(needed)]
+        readers = None
+        try:
+            reading = start_worker_process(
+                [sys.executable, "-c", "import os, sys\nsys.stdin.buffer.read()\n"]
+            )
+            readers = reading
+            assert reading._process.stdin is not None
+            assert reading._process.stdin.fileno() >= 1024
+
+            reading.write(b"stop", timeout=2.0)  # 読む子には書ける
+
+            silent = start_worker_process([sys.executable, "-c", self.NEVER_READ])
+            try:
+                assert silent._process.stdin is not None
+                assert silent._process.stdin.fileno() >= 1024
+                fd = silent._process.stdin.fileno()
+                os.set_blocking(fd, False)
+                with contextlib.suppress(BlockingIOError):
+                    while True:
+                        os.write(fd, b"x" * 4096)
+                os.set_blocking(fd, True)
+                with pytest.raises(TimeoutError):
+                    silent.write(b"stop", timeout=0.3)
+            finally:
+                silent.stop(grace_seconds=0.2)
+                silent.close_output()
+        finally:
+            if readers is not None:
+                readers.stop(grace_seconds=0.2)
+                readers.close_output()
+            for holder in holders:
+                os.close(holder)
+
     def test_should_refuse_to_take_the_environment_directly(self):
         """
         【テスト対象】start_worker_process

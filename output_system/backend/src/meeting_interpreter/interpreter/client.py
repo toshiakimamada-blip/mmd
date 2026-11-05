@@ -90,12 +90,23 @@ class InterpreterClient(WorkerClient[OutputMessage]):
         """
         self._write(encode_input(Audio(pcm=pcm, received_at=received_at)))
 
-    def finish(self) -> None:
+    def finish(self, *, timeout_seconds: float | None = None) -> None:
         """終了処理を依頼する。ワーカーは、残りの音声を字幕にして、停止完了を返し、終わる。
 
         このあとは音声を送らない（ワーカーは標準入力を読まなくなり、送信が止まる）。
+
+        ワーカーが固まって標準入力を読まないと、依頼を書く待ちが戻らない。timeout_seconds を
+        渡すと、その秒数のうちに書き始められないとき TimeoutError にして戻る。戻らなかった
+        ときは、stop で必ず止める（会議の終了と中断はそうする）。
+
+        Args:
+            timeout_seconds: 依頼を書き始めるまで待つ秒数。None なら、書けるまで待つ。
+
+        Raises:
+            OSError: ワーカーが終わっていて送れないとき。
+                時間内に書き始められないとき（TimeoutError）。
         """
-        self._write(encode_input(Finish()))
+        self._write(encode_input(Finish()), timeout=timeout_seconds)
 
     # --- 継ぐ側が決める部分 ---------------------------------------------------------------
 
