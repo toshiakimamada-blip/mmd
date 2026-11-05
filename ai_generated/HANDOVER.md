@@ -7,7 +7,7 @@
 - 実行基盤: Docker コンテナ 1 つ（土台 ubuntu:24.04）。名前付きボリューム 2 つ（記録・モデル）
 - クールダウン: uv は `exclude-newer = "7 days"`（`backend/pyproject.toml`）、npm は `min-release-age=7`（`frontend/.npmrc`）
 - AI モデルの入手: 依存を足さず、標準ライブラリの HTTPS クライアント（urllib）で自前に行う
-- 通訳ワーカー: faster-whisper（Whisper small.en。Silero VAD の ONNX 形式が同梱。ONNX Runtime で動かす）、CTranslate2（FuguMT）、SentencePiece。依存グループ `interpreter`（`uv.lock` で固定。開発環境の `uv sync` の既定に入る）。PyTorch は使わない。**出荷するイメージには、まだ入れていない**（Dockerfile は `--no-default-groups`）
+- 通訳ワーカー: faster-whisper（Whisper small.en。Silero VAD の ONNX 形式が同梱。ONNX Runtime で動かす）、CTranslate2（FuguMT）、SentencePiece。依存グループ `interpreter`（`uv.lock` で固定。開発環境の `uv sync` の既定に入る）。PyTorch は使わない。出荷するイメージのアプリサーバーの環境には、このグループだけを入れた（Dockerfile は `--no-default-groups --group interpreter`。アプリサーバー自身は取り込まない）
 - 翻訳モデルの変換: 部品（PyTorch の CPU 版 wheel、transformers、CTranslate2、SentencePiece）は依存グループ `conversion`（`uv.lock` で固定）。開発環境の `uv sync` には入り、イメージではアプリサーバーの環境に入れず `/opt/conversion-venv` にだけ入れる（展開後 約 1.33GB）。llama.cpp は、生成ワーカーの部品（下）として入れた
 - 生成ワーカー: llama-cpp-python（llama.cpp の Python の結び付け。PyPI に wheel が無く、ソースから組み立てる。組み立ての指定は `pyproject.toml` の `[tool.uv.config-settings-package]`）で Qwen3-4B（Q4_K_M の GGUF）を動かす。依存グループ `generation`（`uv.lock` で固定。開発環境の `uv sync` の既定に入る）。**出荷するイメージには、まだ入れていない**
 
@@ -36,8 +36,10 @@ output_system/
 │   │   ├── records/          # 記録保存部。database.py（接続・構造の版の確認・専用の実行器）、migrations.py（版の一覧と移行）、schema.py（版 1 の 5 つの表・桁の上限・区分コード）、models.py（Meeting・Subtitle・区分）、times.py（UTC のミリ秒の変換）、store.py（会議と字幕の保存と読み出し・失敗の変換とエラーログ）、errors.py（RecordSchemaError と RecordError 系）
 │   │   ├── models/           # モデル管理部。definition.py（定義の検証）、store.py（置き場・一致の確認）、download.py（唯一の外向きの通信）、hosts.py（通信を許すホスト）、fetch.py（確認→入手の流れ）、manager.py（準備状況）、failure.py（失敗の原因）
 │   │   │   └── conversion/   # 翻訳モデルの変換。アプリサーバー側: service.py（管理部への口）・process.py（起動と見届け）・receipt.py（控えと判定）・layout.py・protocol.py。変換プロセス側: worker.py・network_guard.py・sandbox.py・safe_torch.py
-│   │   └── api/{health,models}.py  # GET /api/health、GET /api/models/status、POST /api/models/retry
-│   └── test/                 # src と同じ構造。test/container/ は起動したコンテナを相手にする（MMD_CONTAINER_URL のときだけ動く）。test/browser/ はブラウザーで手動で確かめる確認用のサーバー（pytest は集めない）。test/distribution_server.py（擬似の配布元、HTTPS）と test/model_fakes.py（小さな定義・偽の入手の部品）と test/interpreter_audio.py（合成音声・音声ファイルの読み込み）は共通の道具。test/measure/measure_interpreter.py は、本物のモデルで字幕の遅れとメモリを測る道具、test/measure/measure_generation.py は、生成ワーカーの作成時間とメモリを測る道具（どちらも pytest は集めない）。test/generation_fakes.py（偽の文章生成）と test/meeting_subtitles.py（英語の会議の字幕の見本。測定と動作確認用）も共通の道具
+│   │   ├── meetings/         # 会議管理部。transitions.py（遷移規則の表）、manager.py（開始・終了の窓口、進行中は 1 件）、session.py（会議 1 件の音声・字幕・終了・中断・ワーカーの起動し直し）、inputs.py、errors.py、workers.py（ワーカーの起動の入口。テストは偽のエンジンを渡す）。使い方は docs/meetings.md
+│   │   ├── notify/hub.py     # 通知部（/ws/events）
+│   │   └── api/{health,models,meetings,ws}.py  # /api/health、/api/models/*、POST /api/meetings と /end、/ws/audio/{会議番号} と /ws/events
+│   └── test/                 # src と同じ構造。test/container/ は起動したコンテナを相手にする（MMD_CONTAINER_URL のときだけ動く）。test/browser/ はブラウザーで手動で確かめる確認用のサーバー（pytest は集めない）。test/distribution_server.py（擬似の配布元、HTTPS）と test/model_fakes.py（小さな定義・偽の入手の部品）と test/interpreter_audio.py（合成音声・音声ファイルの読み込み）は共通の道具。test/measure/measure_interpreter.py は、本物のモデルで字幕の遅れとメモリを測る道具、test/measure/measure_generation.py は、生成ワーカーの作成時間とメモリを測る道具（どちらも pytest は集めない）。test/meeting_fakes.py は会議管理部のテストの道具（偽のエンジンの入口、本物の uvicorn を起動する running_app、記録の読み取り）。test/generation_fakes.py（偽の文章生成）と test/meeting_subtitles.py（英語の会議の字幕の見本。測定と動作確認用）も共通の道具
 ├── frontend/
 │   ├── src/{routes.ts,router.tsx,components/AppFrame.tsx,screens/*,styles/{frame,notices}.css}
 │   ├── scripts/              # ビルドした dist/ に外部の URL への参照が無いかの検査（npm run build の最後に走る）
@@ -47,7 +49,7 @@ output_system/
 │   └── test/                 # src と同じ構造。test/browser/capture-check/ は実ブラウザーで音声の取り込みを確かめる確認用のページ（ビルドの対象外。出荷しない）。test/audio/fakes.ts は偽のトラック・ストリーム・WebSocket・AudioContext・処理部
 ├── tools/with-pinned-node.sh # Dockerfile と同じ版の Node.js で、渡されたコマンド（npm install など）を実行する
 ├── config/                   # tuning.toml（調整値の仮置き）、models.toml（3 つの AI モデルの定義）、translation_alternatives.md（翻訳モデルの代わりの候補）
-├── docs/                     # errors.md（エラーの扱い・コード一覧）、notices.md（画面の部品の使い方）、models.md（入手・変換）、interpreter.md（通訳ワーカー・測定値）、generation.md（生成ワーカー・測定値）
+├── docs/                     # errors.md（エラーの扱い・コード一覧）、notices.md（画面の部品の使い方）、models.md（入手・変換）、interpreter.md（通訳ワーカー・測定値）、generation.md（生成ワーカー・測定値）、meetings.md（会議の開始と終了・通知・実機での確認）
 ```
 
 ## ビルド・起動方法
@@ -124,6 +126,13 @@ output_system/
 - 共有の取りやめと拒否は、ブラウザーが同じ `NotAllowedError` を返し、見分けがつかない。`AUDIO_PERMISSION_DENIED` の 1 つにそろえた
 - 16kHz への変換は、ハン窓つきの sinc フィルター（片側 16 ゼロ交差、遮断は出力の上限の 0.95 倍）で間引く。出力の位置は整数の計算で求め、長く続けてもずれない。入力の分け方（128 サンプルずつ、など）によらず出力は同じ
 
+- 会議のセッション（`meetings/session.py`）は、管理のタスク 1 つが、待ち行列 1 本（ワーカーのメッセージ・閉じる要求・音声を渡す側の失敗）を 1 つずつ処理する。ブロックする呼び出しは、出力を読む専用スレッド、音声を書く専用の実行器、`asyncio.to_thread` に分ける。ワーカーは起動し直すたびに世代の番号を付け、前の世代のメッセージは捨てる。会議の開始は、ワーカーの準備完了を待たず会議番号を返す（読み込みの間の音声はためる）
+- 進行中の会議の判定は、メモリ上のセッションで行う（記録の `interpreting` で数えない）。起動時の復旧（PBI 7.1）が暫定版で未実装のため、止まったあとに残った通訳中の会議が、新しい開始を永久に断ってしまう。セッションが無い通訳中の会議への終了の要求は、字幕の件数から状態を決めて保存し直す（終了の保存に失敗した会議を終われるように）
+- 終了と中断: 音声を渡し切る（`meeting_end_flush_timeout_seconds`）→ 終了処理の依頼（書けなければ即、強制終了）→ 字幕が届く間は待つ（字幕が `meeting_end_finish_idle_seconds` 届かなければ固まったとみなす）→ 最後の字幕のあとで終了日時と状態を 1 回の確定で保存 → ワーカーを止める → 要約を始める呼び出し（`on_meeting_ended`）。中断の終了日時は、接続が切れた日時。起動し直しは、失敗が `interpreter_max_failures` 回続いたらあきらめて中断（`interpreter_stable_seconds` 以上動いたワーカーが止まったら数え直す）。時間と回数は `config/tuning.toml`
+- 遷移規則の表は `meetings/transitions.py` の 1 か所（15 行）。状態を変えるのは `meetings/` と将来の `jobs/` だけ（`update_meeting` の呼び出し元を `test_state_change_boundary.py` が構文木で検査）。要約・削除・復旧の遷移は表にだけあり、使う部（作成ジョブ管理部など）はまだ無い
+- 通知は `{"type": "対象.出来事", ...}`: `subtitle.created`（保存が確定してから）、`meeting.state_changed`、`error.occurred`（`meeting_id`・`category`・`code`・`message`・`action`）、`model.status_changed`（モデル管理部の発行先は通知部）。送り待ちが 1,000 件を超えた画面だけ 1013 で閉じる。保存に失敗した字幕は通知せず順番も使わない
+- `WorkerClient`: `get` が停止完了か `WorkerExited` を返したあとは、`stop` が停止完了を待たずに片付ける。壊れた出力のときの `WorkerExited` は、子の終了を待たずに届く（子を止めるのは受け取った側）。`finish(timeout_seconds=)` で依頼を書く待ちを区切れる。`WorkerProcess.write` は `select.poll`（記述子 1024 以上でも動く）
+
 ## はまりポイント
 - `.gitignore` の `tools/`（gaido 管理）が `output_system/tools/` にも当たる。`!/output_system/tools/` で打ち消している
 - 環境変数 `COMPOSE_PROJECT_NAME` が設定済みのため、compose の `name:` は効かない。ボリュームは `name:` で固定名にしている
@@ -171,6 +180,9 @@ output_system/
 - 疑似入力の Chromium は、共有の取りやめも「音声なしの共有」も再現できない（確認は常に通り、音声が付く）。この 2 つの分類は Vitest だけで確かめた。実際の PC の音声は、利用者の Windows の Edge で確認する（ADR-13）
 - 前回の実行が止めた確認用サーバーが、ポート 3102 に残ることがある。`ps -eo pid,args | grep serve_audio_capture_check` で PID を調べて止める。残ったままだと、新しいサーバーは起動に失敗し、古い状態のサーバーが応答する
 - 変換の長時間のテストは、カバレッジの計測つきだと既定の 5 秒に届かないことがある（1 サンプルあたり約 90 回の積和）。入力は 20 秒分にとどめ、制限を広げてある
+- ONNX Runtime 1.31.0 の Linux 版は、Microsoft の利用状況の送信（1DS）を内蔵する。通訳ワーカーは seccomp でソケットを作れないため送れないが、起動のたびに標準出力へ警告が 1 行出る（JSON ではない行）。`onnxruntime.disable_telemetry_events()` を呼んでも残る（コンテナで確認）。更新で挙動が変わりうる
+- `websockets.sync.client.connect` は `legacy=True, proxy=None` を付ける（付けないと非推奨の警告と、環境のプロキシの使用）。会議管理部のテストは、音声の接続を開いている間に記録の状態を読む（`with` を出て接続を閉じると、会議が中断になる）
+- 共通の道具を `test/meeting_fakes.py` に集めた（`__init__.py` が無いため、テストのファイル同士の import はできない）。ワーカーを SIGSTOP で固める確認は、`os.killpg(pid, SIGSTOP)`。止めた後の後始末は SIGKILL
 
 ## 実装済み機能
 - PBI #2: コンテナの起動、共通の枠と 4 画面の骨組み、`GET /api/health`、配信部、名前付きボリューム 2 つ、自動再起動
@@ -182,3 +194,4 @@ output_system/
 - PBI #34: 生成ワーカー（別のプロセス）。字幕（英語の原文）のブロックから、4 項目の日本語の要約（1 ブロックは直接、複数ブロックは中間メモを作って統合）と、英語と日本語の質問 5 問を作る。出力は文法で制約し、検証に失敗したら 1 回作り直す。ブロックの区切りで中断・再開できる。質問の入力を 3 つの場面で組み立てる。CPU の割り当て（スレッド数と nice 値）を通常と会議中で切り替えられる。外へ通信しない備え 3 段。実モデル（Qwen3-4B）での測定（4 スレッド）: 質問は作成 93〜127 秒（起動を含めて 124〜166 秒。目標 180 秒以内）、要約は 2 時間分で 2,124 秒（35.4 分。**目標の 30 分を超えた**）、常駐メモリの最大は 2 時間分の要約のあとで 3,803MB（利用時の 4.5GB には収まるが、**自動テスト時の 3.5GB を 0.21GB 超えた**。質問だけなら 3,516MB）。詳細は `output_system/docs/generation.md`。作成ジョブ管理部・保存は含まない
 - PBI #47: 記録データベース（`records.sqlite3`、構造の版 1、会議・字幕・要約・質問のまとまり・質問の 5 つの表）と記録保存部。会議の作成・字幕の追加（順番は同じ確定の中で振る）・状態と終了日時の更新・読み出し、保存の失敗の共通のエラー（`RECORD_SAVE_FAILED`・`RECORD_VALUE_INVALID`）と画面の文言、内容を含まないエラーログ。要約・質問のまとまり・質問の保存の関数、字幕の保存に失敗したときの会議の続け方、更新前の控え（暫定版では後回し）は含まない
 - PBI #52: ブラウザーでの音声の取り込みと送信。画面共有（PC の音声。映像は破棄）とマイクから音声を得て、失敗の理由を 4 種類で返す。16kHz・モノラル・16 ビットの PCM に変換して、約 100 ミリ秒のフレームで `/ws/audio/{会議番号}` へ送る（詰まっても順序を保ち、欠落しない）。共有が止まったことを検知し、`capture.stopped` を送って呼び出し側へ通知し、同じ接続で取り込み直せる（`capture.resumed`）。Chromium 156 と Edge 155 の実ブラウザー（疑似入力）で確認済み。会議の開始の画面と、サーバー側で音声を受け取る経路は含まない。手順と結果は `output_system/docs/audio-capture.md`
+- PBI #57: 会議の開始（`POST /api/meetings`）と終了（`POST /api/meetings/{会議番号}/end`）、音声の WebSocket（`/ws/audio/{会議番号}`。届いた日時を付けて順に通訳ワーカーへ）、通知部（`/ws/events`）、字幕の「保存してから通知」、接続切れでの中断、通訳ワーカーの起動し直し、遷移規則の表。出荷するコンテナで本物のモデルを動かして確認した（`docs/meetings.md`）。画面の接続、字幕の状況・遅れの測定・警告（Epic 4）、要約を始める本体（Epic 5）、起動時の復旧（PBI 7.1）は含まない
