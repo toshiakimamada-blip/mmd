@@ -1,0 +1,42 @@
+<!doctype html>
+<html lang="ja">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>音声の取り込みの確認</title>
+    <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
+    <link rel="stylesheet" href="./check.css" />
+  </head>
+  <body>
+    <h1>音声の取り込みの確認</h1>
+    <p>
+      実ブラウザーで、音声の取り込み・変換・送信を確かめる、確認用のページです。出荷するアプリには含まれません。
+      手順は docs/audio-capture.md の「実ブラウザーでの確認」にあります。
+    </p>
+
+    <label>会議番号 <input id="meeting-id" type="text" size="36" /></label>
+
+    <div class="buttons">
+      <button id="start-system" type="button">PC の音声を取り込む</button>
+      <button id="start-microphone" type="button">マイクを取り込む</button>
+      <button id="simulate-end" type="button">共有の停止を再現する</button>
+      <button id="restart" type="button">取り込みをやり直す</button>
+      <button id="stop" type="button">取り込みを止める</button>
+      <button id="close" type="button">接続を閉じる</button>
+    </div>
+
+    <dl>
+      <dt>状態</dt>
+      <dd id="state" data-state="idle">idle</dd>
+      <dt>直前の結果</dt>
+      <dd id="result">まだ何もしていません</dd>
+      <dt>取り込み済みの音声のトラック</dt>
+      <dd id="tracks">-</dd>
+    </dl>
+
+    <h2>出来事</h2>
+    <ol id="events"></ol>
+
+    <script type="module" src="./main.ts"></script>
+  </body>
+</html>

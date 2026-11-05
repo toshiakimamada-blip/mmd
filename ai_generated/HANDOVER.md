@@ -42,8 +42,9 @@ output_system/
 │   ├── src/{routes.ts,router.tsx,components/AppFrame.tsx,screens/*,styles/{frame,notices}.css}
 │   ├── scripts/              # ビルドした dist/ に外部の URL への参照が無いかの検査（npm run build の最後に走る）
 │   ├── src/errors/           # エラーの型と、エラーコードごとの文言の一覧（errorMessages.ts）
+│   ├── src/audio/            # ブラウザーの音声の取り込み。audioInput.ts（画面共有・マイク）、audioErrors.ts（理由の種類）、pcmConversion.ts（16kHz・モノラル・16 ビットへの変換）、pcmCaptureWorklet.ts（AudioWorklet の処理部）、audioPipeline.ts、audioSender.ts（順序つきの送信）、audioCaptureSession.ts（会議 1 回ぶん。停止の検知・やり直し）、browserEnvironment.ts（実ブラウザーの部品の作り方）。使い方・確かめた結果は docs/audio-capture.md
 │   ├── src/components/notices/ # お知らせ帯・7 つのエラー表示パターン・確認の表示（使い方は docs/notices.md）
-│   └── test/                 # src と同じ構造
+│   └── test/                 # src と同じ構造。test/browser/capture-check/ は実ブラウザーで音声の取り込みを確かめる確認用のページ（ビルドの対象外。出荷しない）。test/audio/fakes.ts は偽のトラック・ストリーム・WebSocket・AudioContext・処理部
 ├── tools/with-pinned-node.sh # Dockerfile と同じ版の Node.js で、渡されたコマンド（npm install など）を実行する
 ├── config/                   # tuning.toml（調整値の仮置き）、models.toml（3 つの AI モデルの定義）、translation_alternatives.md（翻訳モデルの代わりの候補）
 ├── docs/                     # errors.md（エラーの扱い・コード一覧）、notices.md（画面の部品の使い方）、models.md（入手・変換）、interpreter.md（通訳ワーカー・測定値）、generation.md（生成ワーカー・測定値）
@@ -57,6 +58,7 @@ output_system/
 - ブラウザーでの WebSocket の確認（CSP のもとで接続できるか）: `backend/` で `uv run python test/browser/serve_websocket_check.py --port 3101 --app-hostname <開発用コンテナ名>` を起動し、`playwright-cli` で `http://localhost:3101/`・`http://127.0.0.1:3101/`・`http://<コンテナ名>:3101/` を開く。Edge は `--config` の `executablePath` で指す（README「ブラウザーでの WebSocket の確認」）
 - 本物のモデルを使う確認（通常の `pytest` では飛ばす）: コンテナのボリュームから `docker cp <コンテナ>:/var/lib/mmd/models/whisper-small-en` と `.../fugumt-en-ja` を `/tmp/mmd-models/` へ取り出し、`MMD_TEST_MODELS_DIR=/tmp/mmd-models MMD_TEST_SPEECH_FILE=<英語の音声> uv run pytest test/meeting_interpreter/interpreter/test_interpreter_real_models.py --no-cov`。測定は `uv run python test/measure/measure_interpreter.py --models-dir /tmp/mmd-models --speech <音声> --repeat 6`（引数は docs/interpreter.md）
 - 生成ワーカーの本物のモデルを使う確認: コンテナのボリュームから `docker cp <コンテナ>:/var/lib/mmd/models/qwen3-4b-q4-k-m` を `/tmp/mmd-models/` へ取り出し（約 2.5GB）、`MMD_TEST_MODELS_DIR=/tmp/mmd-models uv run pytest test/meeting_interpreter/generation/test_generation_real_model.py --no-cov`（約 4 分）。測定は `uv run python test/measure/measure_generation.py --models-dir /tmp/mmd-models --threads 4`（`--long-lines 1500` で 2 時間分、`--meeting --questions-only` で会議中の割り当ての質問だけ。引数は docs/generation.md）。2 時間分は約 45 分かかる。測っている間は、ほかの重い処理を動かさない
+- ブラウザーの音声の取り込みの確認: `docs/audio-capture.md` の「実ブラウザーでの確認」。確認用のページを `vite build` し、`backend/test/browser/serve_audio_capture_check.py` を起動して、ADR-13 の起動設定（`--use-fake-ui-for-media-stream`・`--use-fake-device-for-media-stream`・`--use-file-for-fake-audio-capture`・`--unsafely-treat-insecure-origin-as-secure`）の `playwright-cli`（通常版の Chromium または Edge を `--headless=new`）で開く
 - 社内の証明書: 既定でリポジトリ直下の `ssl-certificates/` を登録する。フォルダーが無い環境は `SSL_CERTS_DIR=<空のフォルダー>` を付ける
 - AI モデルの入手: コンテナを起動すると、自動で始まる（初回は約 3.1GB、10MB/s 前後で約 5 分）。`curl http://toshiakimamada-blip-mmd-output-system:3001/api/models/status` で見る。2 回目以降の起動は、確認（約 5 秒）だけで入手しない。モデル置き場のボリューム `toshiakimamada-blip-mmd-models` を消すと入手し直しになる
 
@@ -115,6 +117,12 @@ output_system/
 - `update_meeting` は遷移規則を確かめない（会議管理部と作成ジョブ管理部の役目）。終了日時 `None` は「変えない」、`summary_failure_reason` の `None` は「空にする」。無い会議の更新は `RecordValueError`（項目 `meeting_id`）、無い会議への字幕の追加は外部キーの違反で `RecordSaveError`
 - Node.js は 24.21.0 に固定（24.22.0 は公開から 7 日未満のため見送り）。SHA-256 も Dockerfile で固定
 - コンテナは非 root（uid 10001 の app）。2 つのボリュームの置き場は、イメージの中で app が持ち主になる
+- 音声の取り込みの部品は、ブラウザーの部品（WebSocket・AudioContext・AudioWorklet・画面共有）を `AudioCaptureEnvironment` から受け取る。テストは偽物に替える。アプリにテスト専用の入口は無い（ADR-13）
+- AudioWorklet の処理部は `?worker&url` で別のファイルにする。`blob:` は CSP が止め、`new URL(..., import.meta.url)` は TypeScript のまま出て読めないため不採用。いまの画面は取り込みの部品を読み込まないので、`dist/` には処理部が出ない（画面が読み込むと出る。確認用ページのビルドでは出ることを確認した）
+- 取り込みの状態は `capturing`・`interrupted`・`stopped`・`closed`。共有が止まった・マイクが外れたときは、残りの音声を送ったあとに `capture.stopped`（JSON のテキスト）を送る。接続は閉じず、`restart()` で同じ出どころ・同じ接続のまま取り込み直し、`capture.resumed` を送る。利用者の `stop()` では送らない。受ける側（会議管理部）は別の作業で作る
+- 画面共有の音声には、エコー除去・雑音抑制・音量の自動調整を求めない（再生中の声を削るため）。マイクはブラウザーの既定に任せる。映像は受け取った直後に止めてストリームから外す
+- 共有の取りやめと拒否は、ブラウザーが同じ `NotAllowedError` を返し、見分けがつかない。`AUDIO_PERMISSION_DENIED` の 1 つにそろえた
+- 16kHz への変換は、ハン窓つきの sinc フィルター（片側 16 ゼロ交差、遮断は出力の上限の 0.95 倍）で間引く。出力の位置は整数の計算で求め、長く続けてもずれない。入力の分け方（128 サンプルずつ、など）によらず出力は同じ
 
 ## はまりポイント
 - `.gitignore` の `tools/`（gaido 管理）が `output_system/tools/` にも当たる。`!/output_system/tools/` で打ち消している
@@ -159,6 +167,10 @@ output_system/
 - テストの日時の期待値（Unix 時刻のミリ秒）を手で計算しない。1 日（86,400,000）ずれた定数を書いて、正しい実装のテストが落ちた。`date -u -d "2026-11-04 12:00:00" +%s` で確かめる
 - 保存の失敗の再現: ディスクがいっぱいは `PRAGMA max_page_count`（`database.run` の中で設定し、あとで戻す）、ロックは別の接続で `BEGIN IMMEDIATE` を持ち、`database.BUSY_TIMEOUT_MS` を `monkeypatch` で小さくしてから開く（既定は 5 秒待つ）。確定の取り消しは、本物の書き込みを済ませてから例外を起こす `RecordDatabase` の子で確かめる（`test_record_save_failure.py`）
 - Python 3.12 のため、ジェネリクスは `def f[T](...)`（`TypeVar` を使うと ruff の UP047）
+- `track.stop()` は `ended` のイベントを起こさない（共有の停止・マイクの取り外しとは別）。テストと確認用ページは、`dispatchEvent(new Event('ended'))` を足して再現する
+- 疑似入力の Chromium は、共有の取りやめも「音声なしの共有」も再現できない（確認は常に通り、音声が付く）。この 2 つの分類は Vitest だけで確かめた。実際の PC の音声は、利用者の Windows の Edge で確認する（ADR-13）
+- 前回の実行が止めた確認用サーバーが、ポート 3102 に残ることがある。`ps -eo pid,args | grep serve_audio_capture_check` で PID を調べて止める。残ったままだと、新しいサーバーは起動に失敗し、古い状態のサーバーが応答する
+- 変換の長時間のテストは、カバレッジの計測つきだと既定の 5 秒に届かないことがある（1 サンプルあたり約 90 回の積和）。入力は 20 秒分にとどめ、制限を広げてある
 
 ## 実装済み機能
 - PBI #2: コンテナの起動、共通の枠と 4 画面の骨組み、`GET /api/health`、配信部、名前付きボリューム 2 つ、自動再起動
@@ -169,3 +181,4 @@ output_system/
 - PBI #28: 通訳ワーカー（別のプロセス）。16kHz・モノラルの音声を無音と長さの上限（5 秒）で区切り、Whisper small.en で英語の文字に、FuguMT で日本語にして、段ごとの所要時間と先頭の音声が届いた日時つきの字幕を返す。失敗した区切りは飛ばし、翻訳の失敗は日本語訳なしで出す。処理が追いつかなくても音声を捨てず、届いた順に処理する。外へ通信しない備え 3 段。本物のモデルでの測定（字幕の遅れ 平均 5.3 秒・最大 7.6 秒、ワーカーのメモリ 最大 約 0.82GB）は `output_system/docs/interpreter.md`。会議管理部・画面・保存は含まない
 - PBI #34: 生成ワーカー（別のプロセス）。字幕（英語の原文）のブロックから、4 項目の日本語の要約（1 ブロックは直接、複数ブロックは中間メモを作って統合）と、英語と日本語の質問 5 問を作る。出力は文法で制約し、検証に失敗したら 1 回作り直す。ブロックの区切りで中断・再開できる。質問の入力を 3 つの場面で組み立てる。CPU の割り当て（スレッド数と nice 値）を通常と会議中で切り替えられる。外へ通信しない備え 3 段。実モデル（Qwen3-4B）での測定（4 スレッド）: 質問は作成 93〜127 秒（起動を含めて 124〜166 秒。目標 180 秒以内）、要約は 2 時間分で 2,124 秒（35.4 分。**目標の 30 分を超えた**）、常駐メモリの最大は 2 時間分の要約のあとで 3,803MB（利用時の 4.5GB には収まるが、**自動テスト時の 3.5GB を 0.21GB 超えた**。質問だけなら 3,516MB）。詳細は `output_system/docs/generation.md`。作成ジョブ管理部・保存は含まない
 - PBI #47: 記録データベース（`records.sqlite3`、構造の版 1、会議・字幕・要約・質問のまとまり・質問の 5 つの表）と記録保存部。会議の作成・字幕の追加（順番は同じ確定の中で振る）・状態と終了日時の更新・読み出し、保存の失敗の共通のエラー（`RECORD_SAVE_FAILED`・`RECORD_VALUE_INVALID`）と画面の文言、内容を含まないエラーログ。要約・質問のまとまり・質問の保存の関数、字幕の保存に失敗したときの会議の続け方、更新前の控え（暫定版では後回し）は含まない
+- PBI #52: ブラウザーでの音声の取り込みと送信。画面共有（PC の音声。映像は破棄）とマイクから音声を得て、失敗の理由を 4 種類で返す。16kHz・モノラル・16 ビットの PCM に変換して、約 100 ミリ秒のフレームで `/ws/audio/{会議番号}` へ送る（詰まっても順序を保ち、欠落しない）。共有が止まったことを検知し、`capture.stopped` を送って呼び出し側へ通知し、同じ接続で取り込み直せる（`capture.resumed`）。Chromium 156 と Edge 155 の実ブラウザー（疑似入力）で確認済み。会議の開始の画面と、サーバー側で音声を受け取る経路は含まない。手順と結果は `output_system/docs/audio-capture.md`

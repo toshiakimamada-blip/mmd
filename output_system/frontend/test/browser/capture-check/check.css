@@ -1,0 +1,6 @@
+body { font-family: sans-serif; margin: 2rem; max-width: 60rem; }
+.buttons { margin: 1rem 0; display: flex; gap: 0.5rem; flex-wrap: wrap; }
+dt { font-weight: bold; margin-top: 0.5rem; }
+#state[data-state="capturing"] { color: #1a6b2f; }
+#state[data-state="closed"] { color: #b3261e; }
+#events { font-family: monospace; font-size: 0.9rem; }
