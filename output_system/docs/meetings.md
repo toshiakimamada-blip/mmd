@@ -57,6 +57,7 @@
 
 異常終了を検出したら、通訳ワーカーを起動し直して、会議を続けます。起動の間に届いた音声は、捨てずにためて、起動し直したワーカーへ順に渡します（ワーカーが受け取っていた分は失われます）。起動の失敗または異常終了が続けて 3 回に達したら、起動し直しをやめて、会議を中断にし、エラー `SYSTEM_INTERPRETER_UNAVAILABLE` を通知します。回数と待ち時間は `config/tuning.toml` の調整値です（`interpreter_max_failures`・`interpreter_restart_wait_seconds`・`interpreter_stable_seconds`）。
 
+- 頼んでいないのに止まったワーカーは、起動し直せる場合も、止まるたびにエラーログ `SYSTEM_INTERPRETER_EXITED` を 1 件出します（会議番号と、`exception_type` に止まり方。`killed_by_signal_9`（強制終了やメモリ不足）、`exit_code_1`（終了コード）、`protocol_error`（出力が壊れた）、`audio_write_failed`（音声を書けなかった）、`stopped_unrequested`（頼んでいない停止完了）など）。会議の内容は入れません。起動し直しをあきらめたときの `SYSTEM_INTERPRETER_UNAVAILABLE` とは別のログです。
 - 壊れた出力を書いて動き続けるワーカー（`WorkerExited(protocol_error=True)`）は、受け取った時点で子を止めます。
 - 停止完了に入っている「外へ通信を試みた回数」が 0 でなければ、エラーログ `SYSTEM_INTERPRETER_NETWORK_ATTEMPT` を出します（会議は続けます）。
 

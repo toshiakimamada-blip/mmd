@@ -32,9 +32,16 @@ from meeting_fakes import (
 )
 from meeting_interpreter.interpreter.client import InterpreterClient
 from meeting_interpreter.interpreter.protocol import FakeEngineOptions, Stopped
-from meeting_interpreter.meetings.session import MeetingSession
+from meeting_interpreter.meetings.session import MeetingSession, describe_worker_exit
 from meeting_interpreter.records.models import AudioSource, Meeting, MeetingStatus
 from meeting_interpreter.settings import Settings
+from meeting_interpreter.worker_client import WorkerExited
+
+
+def error_lines(captured: str, code: str) -> list[dict]:
+    """標準出力のログから、エラーログのうち error_code が code のものを集める。"""
+    lines = [json.loads(line) for line in captured.splitlines() if line.startswith('{"timestamp"')]
+    return [line for line in lines if line["log_type"] == "error" and line["error_code"] == code]
 
 
 def wait_for_worker_other_than(handle: AppHandle, old_pid: int, timeout: float = 30.0) -> int:
@@ -99,6 +106,40 @@ class TestRestartAfterTheWorkerStops:
         assert [item["sequence"] for item in created] == [1, 2]
         assert status_while_connected == "interpreting"
         assert [row["sequence"] for row in read_subtitles(settings, meeting_id)] == [1, 2]
+
+    def test_should_log_the_abnormal_exit_even_when_the_worker_is_restarted(
+        self, app_handle, settings, capfd
+    ):
+        """
+        【テスト対象】起動し直せた場合の、異常終了のエラーログ
+        【テスト内容】字幕を 1 件作ったあとで、ワーカーを強制終了（SIGKILL）して、起動し直させる
+        【期待結果】起動し直して会議が続いたうえで、エラーログに SYSTEM_INTERPRETER_EXITED が
+                    1 件出ること。会議番号とコンポーネント、終了の種類（シグナル 9 で終了）を持ち、
+                    会議のタイトルと字幕の本文は含まないこと。起動し直しをあきらめたときの
+                    SYSTEM_INTERPRETER_UNAVAILABLE は出ないこと
+        """
+        events = app_handle.events()
+        meeting_id = start_meeting(app_handle, title="極秘の定例")
+        old_pid = wait_for_worker(app_handle)
+        with app_handle.audio(meeting_id) as audio:
+            speak(audio, 1.0)
+            events.wait_for_count("subtitle.created", 1)
+            kill_worker(old_pid)
+            wait_for_worker_other_than(app_handle, old_pid)
+            status = read_meeting(settings, meeting_id)["status"]
+        captured = capfd.readouterr().out
+
+        assert status == "interpreting"
+        exits = error_lines(captured, "SYSTEM_INTERPRETER_EXITED")
+        assert len(exits) == 1
+        assert exits[0]["meeting_id"] == meeting_id
+        assert exits[0]["component"] == "meeting_manager"
+        assert exits[0]["level"] == "error"
+        assert exits[0]["exception_type"] == "killed_by_signal_9"
+        assert error_lines(captured, "SYSTEM_INTERPRETER_UNAVAILABLE") == []
+        original = events.of_type("subtitle.created")[0]["original_text"]
+        assert "極秘の定例" not in captured
+        assert original not in captured
 
     def test_should_not_lose_audio_that_arrives_while_the_worker_restarts(self, settings):
         """
@@ -169,14 +210,15 @@ class TestRestartAfterTheWorkerStops:
         assert [row["sequence"] for row in read_subtitles(settings, meeting_id)] == [1]
 
     def test_should_stop_the_child_and_restart_when_its_output_breaks_the_protocol(
-        self, settings, tmp_path
+        self, settings, tmp_path, capfd
     ):
         """
         【テスト対象】WorkerExited（protocol_error）を受けたときに、子を止める処理
         【テスト内容】1 回目のワーカーが、準備完了のあとで壊れた出力を書き、そのまま動き続ける。
                     2 回目以降は普通のワーカー
         【期待結果】壊れた出力を書いたワーカーのプロセスが、止められて残らないこと。
-                    起動し直されて会議が続き、新しい発話が字幕になること
+                    起動し直されて会議が続き、新しい発話が字幕になること。
+                    エラーログに SYSTEM_INTERPRETER_EXITED が、種類 protocol_error で 1 件出ること
         """
         script = tmp_path / "broken_worker.py"
         script.write_text(
@@ -215,6 +257,8 @@ class TestRestartAfterTheWorkerStops:
         assert group_members(broken_pid) == []
         assert created[0]["sequence"] == 1
         assert launcher.starts == 2
+        exits = error_lines(capfd.readouterr().out, "SYSTEM_INTERPRETER_EXITED")
+        assert [line["exception_type"] for line in exits] == ["protocol_error"]
 
 
 class TestWhenTheWorkerCannotBeRestarted:
@@ -326,6 +370,38 @@ class TestWhenTheWorkerCannotBeRestarted:
 
         assert launcher.starts == 5
         assert status == "interpreting"
+
+
+class TestDescribeWorkerExit:
+    """ワーカーの終わり方を、エラーログの exception_type に書ける 1 語にする。"""
+
+    @pytest.mark.parametrize(
+        ("exited", "expected"),
+        [
+            (WorkerExited(returncode=-9, protocol_error=False), "killed_by_signal_9"),
+            (WorkerExited(returncode=-11, protocol_error=False), "killed_by_signal_11"),
+            (WorkerExited(returncode=1, protocol_error=False), "exit_code_1"),
+            (WorkerExited(returncode=0, protocol_error=False), "exit_code_0"),
+            (WorkerExited(returncode=None, protocol_error=False), "exit_unknown"),
+            (WorkerExited(returncode=None, protocol_error=True), "protocol_error"),
+            (WorkerExited(returncode=-9, protocol_error=True), "protocol_error"),
+        ],
+    )
+    def test_should_name_how_the_worker_ended(self, exited, expected):
+        """
+        【テスト対象】describe_worker_exit
+        【テスト内容】シグナルで終わった・終了コードで終わった・まだ分からない・出力が壊れた、の各場合
+        【期待結果】出力が壊れた場合は protocol_error。そのほかは、シグナルまたは終了コードで
+                    決まる語。語は、エラーログの exception_type の形（英数字とアンダースコア）に
+                    合うこと
+        """
+        from meeting_interpreter.logs.fields import ERROR_LOG
+
+        word = describe_worker_exit(exited)
+
+        assert word == expected
+        spec = next(field for field in ERROR_LOG.fields if field.name == "exception_type")
+        assert spec.accepts(word)
 
 
 class TestNetworkAttemptCheck:

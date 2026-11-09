@@ -225,6 +225,23 @@ def _iso(moment: datetime) -> str:
     return format_timestamp(moment)
 
 
+def describe_worker_exit(exited: WorkerExited) -> str:
+    """通訳ワーカーの終わり方を、エラーログの exception_type に書ける 1 語にする。
+
+    出力が決めた形から外れて打ち切ったときは protocol_error。そのほかは、シグナルで終わったか
+    （killed_by_signal_9 など。強制終了やメモリ不足の終了）、終了コードで終わったか
+    （exit_code_1 など）。負の数や記号は、ログの項目に書けないため、語に直す。
+    会議の内容は入らない。
+    """
+    if exited.protocol_error:
+        return "protocol_error"
+    if exited.returncode is None:
+        return "exit_unknown"
+    if exited.returncode < 0:
+        return f"killed_by_signal_{-exited.returncode}"
+    return f"exit_code_{exited.returncode}"
+
+
 def error_payload(meeting_id: str, error: AppError) -> dict[str, object]:
     """エラーの通知（error.occurred）の項目。共通の形（4 項目）に、会議番号を添える。"""
     body = error.body
@@ -654,6 +671,7 @@ class MeetingSession:
                     # ワーカーが終わっている。出力の終わり（WorkerExited）が続けて届く。
                     # 届く前でも、書けない以上、通常の段階では先へ進めない。
                     if phase is _Phase.RUNNING:
+                        self._log_worker_crash("audio_write_failed")
                         await self._teardown(handle)
                         return _Served.CRASHED
                     await self._abandon(handle, phase)
@@ -680,6 +698,7 @@ class MeetingSession:
                 self._check_network_attempts(message)
                 if phase is _Phase.RUNNING:
                     # 頼んでいないのに止まった。ワーカーの異常として扱う。
+                    self._log_worker_crash("stopped_unrequested")
                     await self._teardown(handle)
                     return _Served.CRASHED
                 # 停止完了は、終了処理のあとに届く。会議を閉じる手順の中で、ワーカーを止める。
@@ -687,13 +706,34 @@ class MeetingSession:
             case WorkerExited():
                 # ワーカーの出力が終わった。壊れた出力のときは、ワーカーがまだ動いているので、
                 # 止める。止めるのを後回しにすると、動き続けるプロセスが残る。
+                if phase is _Phase.RUNNING:
+                    self._log_worker_crash(describe_worker_exit(message))
+                    await self._teardown(handle)
+                    return _Served.CRASHED
                 await self._teardown(handle)
-                return _Served.CRASHED if phase is _Phase.RUNNING else _Served.CLOSED
+                return _Served.CLOSED
             case WorkerError():
                 self._log_worker_error(message)
             case Silence() | Backlog():
                 pass  # 字幕の状況の更新（後続の作業）。
         return None
+
+    def _log_worker_crash(self, kind: str) -> None:
+        """頼んでいないのにワーカーが止まったことを、エラーログに出す。会議の内容は入れない。
+
+        起動し直せる場合も出す。強制終了やメモリ不足で止まったワーカーは、自分でエラーを返せないため、
+        ここで残さないと原因を追えない。起動し直しをあきらめたときの SYSTEM_INTERPRETER_UNAVAILABLE
+        とは別に、止まるたびに 1 件出る。
+
+        Args:
+            kind: 止まり方の語（describe_worker_exit など）。exception_type に書く。
+        """
+        log_error(
+            "SYSTEM_INTERPRETER_EXITED",
+            COMPONENT,
+            meeting_id=self.meeting_id,
+            exception_type=kind,
+        )
 
     def _log_worker_error(self, error: WorkerError) -> None:
         """ワーカーが返したエラーを、種類だけでエラーログに出す。会議の内容は入れない。"""
