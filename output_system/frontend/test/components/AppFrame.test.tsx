@@ -4,6 +4,7 @@ import { describe, expect, it, vi } from 'vitest';
 
 import { AppFrame } from '../../src/components/AppFrame';
 import { routes } from '../../src/router';
+import { FakeEventSocket } from '../events/fakeWebSocket';
 
 /** 指定した URL を開いた状態で、アプリの経路を描画する。 */
 function openUrl(url: string) {
@@ -11,6 +12,31 @@ function openUrl(url: string) {
   render(<RouterProvider router={router} />);
   return router;
 }
+
+/**
+ * 会議の開始から「会議中」へ移った状態の、開く位置。
+ * 「会議中」は、開始から移ってきたときの情報（画面の移動の状態）が無いと「会議の記録」へ移るため、
+ * 「会議中」を確かめるテストは、この位置で開く。
+ */
+const LIVE_ENTRY = {
+  pathname: '/meetings/abc123/live',
+  state: {
+    meeting: {
+      meeting_id: 'abc123',
+      title: '週次の定例',
+      started_at: '2026-11-05T01:00:00.000Z',
+      audio_source: 'system_audio',
+    },
+  },
+};
+
+/** 4 つの画面を開く位置。 */
+const SCREEN_ENTRIES = [
+  ['会議の一覧', '/'],
+  ['会議の準備', '/meetings/new'],
+  ['会議中', LIVE_ENTRY],
+  ['会議の記録', '/meetings/abc123'],
+] as const;
 
 /**
  * 【モジュール】src/components/AppFrame
@@ -43,10 +69,10 @@ describe('AppFrame', () => {
    * - ヘッダに、リンクとボタンが 1 つも無い
    * - 特に「会議中」には、ほかの画面へ移るリンクが無い（画面を離れると会議が中断になるため）
    */
-  it.each(['/', '/meetings/new', '/meetings/abc123/live', '/meetings/abc123'])(
+  it.each(SCREEN_ENTRIES)(
     'should not put links or buttons in the header of %s',
-    (url) => {
-      openUrl(url);
+    (_name, entry) => {
+      render(<RouterProvider router={createMemoryRouter(routes, { initialEntries: [entry] })} />);
 
       const banner = screen.getByRole('banner');
       expect(within(banner).queryAllByRole('link')).toHaveLength(0);
@@ -194,9 +220,9 @@ describe('AppFrame', () => {
   ])('should guide users of %s on every screen', (_name, userAgent) => {
     vi.spyOn(window.navigator, 'userAgent', 'get').mockReturnValue(userAgent);
 
-    for (const url of ['/', '/meetings/new', '/meetings/abc123/live', '/meetings/abc123']) {
+    for (const [url, entry] of SCREEN_ENTRIES) {
       const { container, unmount } = render(
-        <RouterProvider router={createMemoryRouter(routes, { initialEntries: [url] })} />,
+        <RouterProvider router={createMemoryRouter(routes, { initialEntries: [entry] })} />,
       );
 
       const guidance = screen.getByText(/Edge または Chrome で開いてください/);
@@ -228,5 +254,41 @@ describe('AppFrame', () => {
     });
 
     expect(screen.getAllByText(/Edge または Chrome で開いてください/)).toHaveLength(1);
+  });
+  /**
+   * 【テスト対象】AppFrame のつながらないことの表示
+   * 【テスト内容】「会議の一覧」を開き、通知の WebSocket が開通したあとで切れる。
+   *               切れたまま「会議の準備」へ画面を切り替え、つなぎ直しが開通する
+   * 【期待結果】
+   * - 切れている間、お知らせ帯に「アプリとつながっていません」が出る
+   * - 画面を切り替えても 1 つのまま残り、接続も作り直されない（枠が 1 本を使い回す）
+   * - つながると消える
+   */
+  it('should show the offline notice across screens while the app server is unreachable', async () => {
+    vi.useFakeTimers();
+    try {
+      FakeEventSocket.reset();
+      vi.stubGlobal('WebSocket', FakeEventSocket);
+      const router = openUrl('/');
+      act(() => FakeEventSocket.last.open());
+      expect(screen.queryByRole('alert')).not.toBeInTheDocument();
+
+      act(() => FakeEventSocket.last.drop());
+      expect(screen.getByRole('alert')).toHaveTextContent('アプリとつながっていません');
+
+      await act(async () => {
+        await router.navigate('/meetings/new');
+      });
+      expect(screen.getAllByRole('alert')).toHaveLength(1);
+      expect(FakeEventSocket.instances).toHaveLength(1);
+
+      act(() => {
+        vi.advanceTimersByTime(1000);
+      });
+      act(() => FakeEventSocket.last.open());
+      expect(screen.queryByRole('alert')).not.toBeInTheDocument();
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });

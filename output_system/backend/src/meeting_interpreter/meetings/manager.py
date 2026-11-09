@@ -28,7 +28,7 @@ from typing import Final
 from ..logs import log_error, log_processing
 from ..logs.events import format_timestamp
 from ..records.errors import RecordError
-from ..records.models import Meeting, MeetingStatus
+from ..records.models import Meeting, MeetingStatus, Subtitle
 from ..records.store import RecordStore
 from .errors import (
     COMPONENT,
@@ -246,6 +246,21 @@ class MeetingManager:
                     exception_type=type(error).__name__,
                 )
         return updated
+
+    # --- 字幕の読み出し -----------------------------------------------------------------
+
+    async def list_subtitles(self, meeting_id: str) -> list[Subtitle]:
+        """会議の字幕を、順番の昇順で返す。
+
+        字幕は、保存が確定してから通知する。そのため、通知を受けた画面が読み直すと、受け取った字幕は
+        必ず含まれる。画面は、再接続のあとに、通知が届かなかった間の抜けを、これで埋める。
+
+        Raises:
+            BusinessAppError: 会議が無い（MEETING_NOT_FOUND）。
+        """
+        if await self._store.get_meeting(meeting_id) is None:
+            raise meeting_not_found(meeting_id)
+        return await self._store.list_subtitles(meeting_id)
 
     # --- 音声の接続 ---------------------------------------------------------------------
 

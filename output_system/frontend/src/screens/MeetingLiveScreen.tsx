@@ -1,15 +1,26 @@
-import { SCREENS } from '../routes';
+import { useMemo } from 'react';
+import { Navigate, useLocation, useParams } from 'react-router';
+
+import { readLiveMeeting } from '../meetings/liveMeeting';
+import { screenPaths } from '../routes';
+import { LiveMeetingView } from './live/LiveMeetingView';
 
 /**
  * 会議中（S-03）の画面。
- * 骨組みの段階のため、画面の名前だけを表示する。中身は後続の作業で作る。
  *
- * この画面を離れると会議が中断になるため、ほかの画面へ移るリンクを置かない。
+ * 表示する会議の情報（タイトル・開始日時・音声の出どころ）は、会議の開始から移ってきたときの
+ * 画面の移動の状態から受け取る（meetings/liveMeeting.ts）。読み取れないとき（URL を直接開いた・
+ * 再読み込みした）は、その会議の音声を送る接続がすでに切れていて、会議は中断になっているため、
+ * 「会議の記録」へ移す。履歴は置き換える。
  */
 export function MeetingLiveScreen() {
-  return (
-    <section className="screen" data-screen={SCREENS.meetingLive.code}>
-      <h2 className="screen__name">{SCREENS.meetingLive.title}</h2>
-    </section>
-  );
+  const { meetingId = '' } = useParams();
+  const { state } = useLocation();
+  const meeting = useMemo(() => readLiveMeeting(state, meetingId), [state, meetingId]);
+
+  if (meeting === null) {
+    return <Navigate to={screenPaths.meetingRecord(meetingId)} replace />;
+  }
+  // 会議番号で作り直す。別の会議の字幕や、終了の途中の状態を、引き継がないため。
+  return <LiveMeetingView key={meeting.meetingId} meeting={meeting} />;
 }

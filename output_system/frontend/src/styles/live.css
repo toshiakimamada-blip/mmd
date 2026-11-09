@@ -1,0 +1,239 @@
+/*
+ * 「会議中」の画面（S-03）の見た目。
+ *
+ * 見た目の方針
+ * - 会議中に読み続けるのは字幕。状況の領域（タイトル・経過時間・終了のボタン）は、字幕の邪魔をしない
+ *   落ち着いた作りにして、ヘッダと同じ紺の線で字幕の領域と分ける。
+ * - 経過時間は、桁の幅がそろう数字（tabular-nums）にして、秒が変わっても幅がぶれないようにする。
+ * - 終了のボタンは、紺の枠だけにする。常に目に入る場所にあるため、塗りつぶすと押したくなる。
+ *   押せない間は、枠と文字を薄くして残す（操作の場所を見失わないため）。
+ * - 色は frame.css の変数を使う。文字と背景の明るさの差は AA（通常の文字で 4.5 対 1 以上）を満たす。
+ * - 文字の大きさと余白は rem で決め、ブラウザーの拡大に追従させる。アニメーションは使わない。
+ */
+
+.live {
+  display: flex;
+  flex-direction: column;
+  gap: 1.5rem;
+}
+
+/* 状況の領域: タイトル・経過時間・取り込み中の音声の出どころ・終了のボタン */
+.live__status {
+  display: flex;
+  flex-direction: column;
+  gap: 0.625rem;
+  padding-bottom: 1rem;
+  border-bottom: 2px solid var(--color-band);
+}
+
+.live__headline {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 0.75rem 1.5rem;
+}
+
+.live__title {
+  flex: 1 1 20rem;
+  min-width: 0;
+  margin: 0;
+  font-size: 1.5rem;
+  font-weight: 700;
+  line-height: 1.4;
+  /* 100 文字のタイトルや、区切りの無い長い文字列でも、領域からはみ出させない */
+  overflow-wrap: anywhere;
+}
+
+.live__end {
+  min-width: 9rem;
+  min-height: 2.75rem;
+  padding: 0 1.25rem;
+  border: 2px solid var(--color-band);
+  border-radius: 0.25rem;
+  background: #fff;
+  color: var(--color-band);
+  font: inherit;
+  font-weight: 700;
+  cursor: pointer;
+}
+
+.live__end:hover:not(:disabled) {
+  background: rgb(23 50 77 / 0.1);
+}
+
+.live__end:disabled {
+  border-color: #8794a1;
+  color: #5b6875;
+  cursor: not-allowed;
+}
+
+.live__facts {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.25rem 2rem;
+  margin: 0;
+}
+
+.live__fact {
+  display: flex;
+  align-items: baseline;
+  gap: 0.5rem;
+}
+
+.live__fact dt {
+  color: var(--color-ink-muted);
+  font-size: 0.875rem;
+  font-weight: 700;
+}
+
+.live__fact dd {
+  margin: 0;
+  font-weight: 700;
+}
+
+.live__elapsed {
+  font-size: 1.25rem;
+  font-variant-numeric: tabular-nums;
+}
+
+/* 終了している間の知らせ。空のときは高さを持たない */
+.live__ending {
+  margin: 0;
+  color: var(--color-ink-muted);
+  font-size: 0.9375rem;
+}
+
+.live__ending:empty {
+  display: none;
+}
+
+/* 領域の見出し（字幕・会議中の注意） */
+.live__section-title {
+  margin: 0 0 0.5rem;
+  font-size: 1rem;
+  font-weight: 700;
+  line-height: 1.5;
+}
+
+.live__empty {
+  margin: 0;
+  padding: 0.75rem 0;
+  color: var(--color-ink-muted);
+}
+
+/*
+ * 字幕の領域。会議中に読み続ける場所なので、領域の中でいちばん大きく、はっきり出す。
+ * - 日本語訳を大きく太く、英語の原文をその上に小さく淡く出す。目は日本語訳を追い、原文は聞こえた音の確認に使う
+ * - 話された時刻は左の列にそろえる。数字の幅がそろう書体にして、行の頭が揃うようにする
+ * - 領域は、画面の高さに応じた高さで、中をスクロールする。Tab で止まれる（矢印キーで過去へ戻れる）
+ * - 「最新の字幕へ戻る」は、領域の下端の中央に重ねる。過去を読んでいる間だけ出る
+ */
+.live-subtitles {
+  position: relative;
+}
+
+.live-subtitles__scroller {
+  height: clamp(18rem, 55vh, 44rem);
+  padding: 0.25rem 1rem;
+  overflow-y: auto;
+  border: 1px solid #c3ced8;
+  background: #fff;
+}
+
+.subtitle-list {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.subtitle {
+  display: grid;
+  grid-template-columns: 5rem minmax(0, 1fr);
+  gap: 0.75rem;
+  padding: 0.75rem 0;
+  border-top: 1px solid #e1e7ec;
+}
+
+.subtitle:first-child {
+  border-top: 0;
+}
+
+.subtitle__time {
+  padding-top: 0.125rem;
+  color: var(--color-ink-muted);
+  font-size: 0.9375rem;
+  font-variant-numeric: tabular-nums;
+}
+
+.subtitle__texts {
+  display: flex;
+  flex-direction: column;
+  gap: 0.125rem;
+  min-width: 0;
+}
+
+.subtitle__original {
+  margin: 0;
+  color: var(--color-ink-muted);
+  overflow-wrap: anywhere;
+}
+
+.subtitle__translation {
+  margin: 0;
+  font-size: 1.375rem;
+  font-weight: 700;
+  line-height: 1.6;
+  overflow-wrap: anywhere;
+}
+
+/* 訳を作れなかった字幕は、大きくせず、文字の色も変えて、訳が無いことが分かるようにする */
+.subtitle__translation--missing {
+  color: var(--notice-warning-ink);
+  font-size: 1rem;
+}
+
+.live-subtitles__jump {
+  position: absolute;
+  bottom: 1rem;
+  left: 50%;
+  min-height: 2.75rem;
+  padding: 0 1.25rem;
+  border: 2px solid var(--color-band-ink);
+  border-radius: 0.25rem;
+  background: var(--color-band);
+  color: var(--color-band-ink);
+  font: inherit;
+  font-weight: 700;
+  box-shadow: 0 2px 8px rgb(23 50 77 / 0.35);
+  cursor: pointer;
+  transform: translateX(-50%);
+}
+
+.live-subtitles__jump:hover {
+  background: #24486b;
+}
+
+.live-subtitles__jump:focus-visible {
+  outline-color: var(--color-caption);
+}
+
+/* 案内の領域 */
+.live__guidance {
+  padding-top: 1rem;
+  border-top: 1px solid #c3ced8;
+  color: var(--color-ink-muted);
+  font-size: 0.9375rem;
+}
+
+.live__guidance .live__section-title {
+  color: var(--color-ink);
+}
+
+.live__guidance-list {
+  display: flex;
+  flex-direction: column;
+  gap: 0.25rem;
+  margin: 0;
+  padding-left: 1.25rem;
+}

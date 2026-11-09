@@ -8,6 +8,7 @@
 |---|---|
 | `POST /api/meetings` | 会議を開始する（201）。本文は `{"title": "…", "audio_source": "system_audio" または "microphone"}`。`title` は省略、空、空白だけでもよい（開始日時から作った文字列になる） |
 | `POST /api/meetings/{会議番号}/end` | 会議を終了する（200）。本文は無し |
+| `GET /api/meetings/{会議番号}/subtitles` | 会議の字幕を、順番の昇順で返す（200）。会議が無ければ `MEETING_NOT_FOUND`（404）。通訳中の会議も取得できる |
 | `WebSocket /ws/audio/{会議番号}` | 画面からアプリサーバーへ、音声を送る。会議ごとに 1 本まで |
 | `WebSocket /ws/events` | アプリサーバーから画面へ、通知（JSON）を送る。複数の画面が接続できる |
 
@@ -21,6 +22,21 @@
   "ended_at": null,
   "audio_source": "system_audio",
   "status": "interpreting"
+}
+```
+
+字幕の一覧の応答の形は次のとおりです。項目は通知 `subtitle.created` と同じです（会議番号は URL が持つため、含みません）。画面は、再接続のあとに取得して、通知が届かなかった間の抜けを埋めます。字幕は保存してから通知するため、通知を受けた字幕は、取得にも必ず含まれます。
+
+```json
+{
+  "subtitles": [
+    {
+      "sequence": 1,
+      "original_text": "Good morning.",
+      "translated_text": "おはようございます。",
+      "spoken_at": "2026-11-05T01:23:45.678Z"
+    }
+  ]
 }
 ```
 
