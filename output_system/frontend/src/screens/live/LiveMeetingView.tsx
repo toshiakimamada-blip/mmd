@@ -5,11 +5,13 @@ import { ApiError } from '../../api/apiClient';
 import { endMeeting } from '../../api/meetingsApi';
 import { audioSourceLabel } from '../../audio/audioSource';
 import { ConfirmDialog, useNoticeActions } from '../../components/notices';
+import { LiveSubtitleView } from '../../components/subtitles/LiveSubtitleView';
 import { toDisplayError } from '../../errors/errorMessages';
 import { formatElapsed } from '../../meetings/formatElapsed';
 import { type LiveMeeting } from '../../meetings/liveMeeting';
 import { useElapsedMilliseconds } from '../../meetings/useElapsedMilliseconds';
 import { SCREENS, screenPaths } from '../../routes';
+import { useMeetingSubtitles } from '../../subtitles/useMeetingSubtitles';
 import { LiveGuidance } from './LiveGuidance';
 
 /** 会議の終了に失敗したときのお知らせの識別子。もう一度試すと、同じお知らせが置き換わる。 */
@@ -19,7 +21,7 @@ const END_FAILED_NOTICE_ID = 'end-meeting-failed';
  * 「会議中」の画面の中身（S-03）。
  *
  * - 状況の領域: タイトル・経過時間・取り込み中の音声の出どころ・会議を終了するボタン
- * - 字幕の領域
+ * - 字幕の領域: 話された順の字幕。最新の字幕まで自動で進む（過去へ戻っている間は進まない）
  * - 案内の領域
  * 質問の領域（質問を作る機能）は、この画面にはまだ無い。
  *
@@ -32,6 +34,7 @@ export function LiveMeetingView({ meeting }: { readonly meeting: LiveMeeting }) 
   const navigate = useNavigate();
   const { post, clear } = useNoticeActions();
   const elapsed = useElapsedMilliseconds(meeting.startedAt);
+  const subtitles = useMeetingSubtitles(meeting.meetingId);
   const subtitlesHeadingId = useId();
   // 終了の確認を出しているか。
   const [confirming, setConfirming] = useState(false);
@@ -103,7 +106,7 @@ export function LiveMeetingView({ meeting }: { readonly meeting: LiveMeeting }) 
         <h3 className="live__section-title" id={subtitlesHeadingId}>
           字幕
         </h3>
-        <p className="live__empty">字幕を待っています。英語の発言が始まると、ここに表示されます。</p>
+        <LiveSubtitleView subtitles={subtitles} />
       </section>
 
       <LiveGuidance />

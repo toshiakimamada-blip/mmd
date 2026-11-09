@@ -21,5 +21,6 @@ export function MeetingLiveScreen() {
   if (meeting === null) {
     return <Navigate to={screenPaths.meetingRecord(meetingId)} replace />;
   }
-  return <LiveMeetingView meeting={meeting} />;
+  // 会議番号で作り直す。別の会議の字幕や、終了の途中の状態を、引き継がないため。
+  return <LiveMeetingView key={meeting.meetingId} meeting={meeting} />;
 }

@@ -118,7 +118,104 @@
 
 .live__empty {
   margin: 0;
+  padding: 0.75rem 0;
   color: var(--color-ink-muted);
+}
+
+/*
+ * 字幕の領域。会議中に読み続ける場所なので、領域の中でいちばん大きく、はっきり出す。
+ * - 日本語訳を大きく太く、英語の原文をその上に小さく淡く出す。目は日本語訳を追い、原文は聞こえた音の確認に使う
+ * - 話された時刻は左の列にそろえる。数字の幅がそろう書体にして、行の頭が揃うようにする
+ * - 領域は、画面の高さに応じた高さで、中をスクロールする。Tab で止まれる（矢印キーで過去へ戻れる）
+ * - 「最新の字幕へ戻る」は、領域の下端の中央に重ねる。過去を読んでいる間だけ出る
+ */
+.live-subtitles {
+  position: relative;
+}
+
+.live-subtitles__scroller {
+  height: clamp(18rem, 55vh, 44rem);
+  padding: 0.25rem 1rem;
+  overflow-y: auto;
+  border: 1px solid #c3ced8;
+  background: #fff;
+}
+
+.subtitle-list {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.subtitle {
+  display: grid;
+  grid-template-columns: 5rem minmax(0, 1fr);
+  gap: 0.75rem;
+  padding: 0.75rem 0;
+  border-top: 1px solid #e1e7ec;
+}
+
+.subtitle:first-child {
+  border-top: 0;
+}
+
+.subtitle__time {
+  padding-top: 0.125rem;
+  color: var(--color-ink-muted);
+  font-size: 0.9375rem;
+  font-variant-numeric: tabular-nums;
+}
+
+.subtitle__texts {
+  display: flex;
+  flex-direction: column;
+  gap: 0.125rem;
+  min-width: 0;
+}
+
+.subtitle__original {
+  margin: 0;
+  color: var(--color-ink-muted);
+  overflow-wrap: anywhere;
+}
+
+.subtitle__translation {
+  margin: 0;
+  font-size: 1.375rem;
+  font-weight: 700;
+  line-height: 1.6;
+  overflow-wrap: anywhere;
+}
+
+/* 訳を作れなかった字幕は、大きくせず、文字の色も変えて、訳が無いことが分かるようにする */
+.subtitle__translation--missing {
+  color: var(--notice-warning-ink);
+  font-size: 1rem;
+}
+
+.live-subtitles__jump {
+  position: absolute;
+  bottom: 1rem;
+  left: 50%;
+  min-height: 2.75rem;
+  padding: 0 1.25rem;
+  border: 2px solid var(--color-band-ink);
+  border-radius: 0.25rem;
+  background: var(--color-band);
+  color: var(--color-band-ink);
+  font: inherit;
+  font-weight: 700;
+  box-shadow: 0 2px 8px rgb(23 50 77 / 0.35);
+  cursor: pointer;
+  transform: translateX(-50%);
+}
+
+.live-subtitles__jump:hover {
+  background: #24486b;
+}
+
+.live-subtitles__jump:focus-visible {
+  outline-color: var(--color-caption);
 }
 
 /* 案内の領域 */

@@ -1,7 +1,7 @@
 import { act, render, screen, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { RouterProvider, createMemoryRouter } from 'react-router';
-import { afterEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { routes } from '../../src/router';
 
@@ -26,16 +26,25 @@ function jsonResponse(body: unknown, status = 200): Response {
   });
 }
 
-/** 会議の終了の経路（POST /api/meetings/abc123/end）に答える fetch の偽物を、全体に差し込む。 */
+/**
+ * 会議の経路に答える fetch の偽物を、全体に差し込む。
+ * - 会議の終了（POST /api/meetings/abc123/end）: 引数の関数が答える
+ * - 字幕の一覧（GET /api/meetings/abc123/subtitles）: 字幕が 0 件と答える。字幕を確かめるテストは別のファイル
+ * 呼び出し回数の確認は、終了の経路だけを数える（endCalls）。
+ */
 function stubApi(end: () => Promise<Response> = () => Promise.resolve(jsonResponse(wireMeeting({ status: 'summarizing' })))) {
   const fetchMock = vi.fn((path: string, init?: RequestInit) => {
     if (path === '/api/meetings/abc123/end' && init?.method === 'POST') {
       return end();
     }
+    if (path === '/api/meetings/abc123/subtitles') {
+      return Promise.resolve(jsonResponse({ subtitles: [] }));
+    }
     return Promise.reject(new Error(`想定していない呼び出し: ${init?.method ?? 'GET'} ${path}`));
   });
   vi.stubGlobal('fetch', fetchMock);
-  return fetchMock;
+  const endCalls = () => fetchMock.mock.calls.filter(([path]) => String(path).endsWith('/end'));
+  return Object.assign(fetchMock, { endCalls });
 }
 
 /** 「会議中」を、会議の開始から移ってきた状態で開く。 */
@@ -46,6 +55,11 @@ function openLive(state: unknown = { meeting: wireMeeting() }, id = 'abc123') {
   render(<RouterProvider router={router} />);
   return router;
 }
+
+beforeEach(() => {
+  // 画面は、開くとすぐ字幕の一覧を取得する。終了を確かめないテストでも、答える相手を置いておく。
+  stubApi();
+});
 
 afterEach(() => {
   vi.useRealTimers();
@@ -221,7 +235,7 @@ describe('MeetingLiveScreen ending the meeting', () => {
     await user.click(within(dialog).getByRole('button', { name: '取りやめる' }));
 
     expect(screen.queryByRole('alertdialog')).not.toBeInTheDocument();
-    expect(fetchMock).not.toHaveBeenCalled();
+    expect(fetchMock.endCalls()).toHaveLength(0);
     expect(router.state.location.pathname).toBe('/meetings/abc123/live');
     expect(screen.getByRole('button', { name: '会議を終了する' })).toHaveFocus();
   });
@@ -242,8 +256,7 @@ describe('MeetingLiveScreen ending the meeting', () => {
     await user.click(screen.getByRole('button', { name: '会議を終了する' }));
     await user.click(within(screen.getByRole('alertdialog')).getByRole('button', { name: '終了する' }));
 
-    expect(fetchMock).toHaveBeenCalledTimes(1);
-    expect(fetchMock).toHaveBeenCalledWith('/api/meetings/abc123/end', { method: 'POST' });
+    expect(fetchMock.endCalls()).toEqual([['/api/meetings/abc123/end', { method: 'POST' }]]);
     expect(await screen.findByRole('heading', { level: 1, name: '会議の記録' })).toBeInTheDocument();
     expect(router.state.location.pathname).toBe('/meetings/abc123');
     expect(router.state.historyAction).toBe('REPLACE');
@@ -271,7 +284,7 @@ describe('MeetingLiveScreen ending the meeting', () => {
     expect(button).toBeDisabled();
     expect(screen.getByRole('status')).toHaveTextContent('会議を終了しています');
     await user.click(button);
-    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(fetchMock.endCalls()).toHaveLength(1);
 
     await act(async () => finish(jsonResponse(wireMeeting({ status: 'completed' }))));
     expect(await screen.findByRole('heading', { level: 1, name: '会議の記録' })).toBeInTheDocument();
@@ -336,7 +349,7 @@ describe('MeetingLiveScreen ending the meeting', () => {
 
     await user.keyboard('{Escape}');
     expect(screen.queryByRole('alertdialog')).not.toBeInTheDocument();
-    expect(fetchMock).not.toHaveBeenCalled();
+    expect(fetchMock.endCalls()).toHaveLength(0);
 
     await user.keyboard('{Enter}');
     await user.tab();
@@ -344,6 +357,6 @@ describe('MeetingLiveScreen ending the meeting', () => {
     await user.keyboard('{Enter}');
 
     expect(await screen.findByRole('heading', { level: 1, name: '会議の記録' })).toBeInTheDocument();
-    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(fetchMock.endCalls()).toHaveLength(1);
   });
 });

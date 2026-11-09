@@ -1,9 +1,13 @@
 """会議の開始と終了の経路。
 
-- POST /api/meetings                   会議を開始する（201）。会議を作り、通訳ワーカーの起動を始める
-- POST /api/meetings/{会議番号}/end    会議を終了する（200）。届いている音声を字幕にしてから閉じる
+- POST /api/meetings
+    会議を開始する（201）。会議を作り、通訳ワーカーの起動を始める
+- POST /api/meetings/{会議番号}/end
+    会議を終了する（200）。届いている音声を字幕にしてから閉じる
+- GET /api/meetings/{会議番号}/subtitles
+    会議の字幕を、順番の昇順で返す（200）。画面が、再接続のあとに読み直す
 
-どちらも、会議の内容（タイトルを含む）を URL に載せない。タイトルは本文で受け取る。
+どの経路も、会議の内容（タイトルを含む）を URL に載せない。タイトルは本文で受け取る。
 音声は /ws/audio/{会議番号}、字幕などの通知は /ws/events（api/ws.py）。
 """
 
@@ -14,7 +18,7 @@ from pydantic import BaseModel, ConfigDict
 
 from ..logs.events import format_timestamp
 from ..meetings.manager import MeetingManager
-from ..records.models import Meeting
+from ..records.models import Meeting, Subtitle
 
 router = APIRouter(tags=["meetings"])
 
@@ -56,6 +60,32 @@ def to_response(meeting: Meeting) -> MeetingResponse:
     )
 
 
+class SubtitleResponse(BaseModel):
+    """字幕 1 件。項目は、通知 subtitle.created と同じ（会議番号は一覧の URL が持つ）。"""
+
+    sequence: int
+    original_text: str
+    # 日本語訳。翻訳に失敗した字幕は null。
+    translated_text: str | None
+    spoken_at: str
+
+
+class SubtitleListResponse(BaseModel):
+    """会議の字幕の一覧。順番の昇順。"""
+
+    subtitles: list[SubtitleResponse]
+
+
+def to_subtitle_response(subtitle: Subtitle) -> SubtitleResponse:
+    """字幕を、画面へ返す形にする。日時は、UTC のミリ秒までの文字列。"""
+    return SubtitleResponse(
+        sequence=subtitle.sequence,
+        original_text=subtitle.original_text,
+        translated_text=subtitle.translated_text,
+        spoken_at=format_timestamp(subtitle.spoken_at),
+    )
+
+
 def _manager(request: Request) -> MeetingManager:
     """アプリが持つ会議管理部を返す。"""
     return request.app.state.meeting_manager  # type: ignore[no-any-return]
@@ -91,3 +121,17 @@ async def end_meeting(meeting_id: MeetingId, request: Request) -> MeetingRespons
         RecordError: 終了日時と状態を保存できなかったとき（500）。
     """
     return to_response(await _manager(request).end_meeting(meeting_id))
+
+
+@router.get("/meetings/{meeting_id}/subtitles", response_model=SubtitleListResponse)
+async def list_subtitles(meeting_id: MeetingId, request: Request) -> SubtitleListResponse:
+    """会議の字幕を、順番の昇順で返す。通訳中の会議も取得できる（それまでの字幕を返す）。
+
+    字幕は作成後に変更しない。画面は、通知 subtitle.created で字幕を足し、再接続のあとにこの一覧で
+    抜けを埋める。順番が同じ字幕は、画面が 1 回だけ表示する。
+
+    Raises:
+        BusinessAppError: 会議が無いとき（MEETING_NOT_FOUND、404）。
+    """
+    subtitles = await _manager(request).list_subtitles(meeting_id)
+    return SubtitleListResponse(subtitles=[to_subtitle_response(item) for item in subtitles])
