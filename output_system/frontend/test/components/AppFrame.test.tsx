@@ -4,6 +4,7 @@ import { describe, expect, it, vi } from 'vitest';
 
 import { AppFrame } from '../../src/components/AppFrame';
 import { routes } from '../../src/router';
+import { FakeEventSocket } from '../events/fakeWebSocket';
 
 /** 指定した URL を開いた状態で、アプリの経路を描画する。 */
 function openUrl(url: string) {
@@ -228,5 +229,41 @@ describe('AppFrame', () => {
     });
 
     expect(screen.getAllByText(/Edge または Chrome で開いてください/)).toHaveLength(1);
+  });
+  /**
+   * 【テスト対象】AppFrame のつながらないことの表示
+   * 【テスト内容】「会議の一覧」を開き、通知の WebSocket が開通したあとで切れる。
+   *               切れたまま「会議の準備」へ画面を切り替え、つなぎ直しが開通する
+   * 【期待結果】
+   * - 切れている間、お知らせ帯に「アプリとつながっていません」が出る
+   * - 画面を切り替えても 1 つのまま残り、接続も作り直されない（枠が 1 本を使い回す）
+   * - つながると消える
+   */
+  it('should show the offline notice across screens while the app server is unreachable', async () => {
+    vi.useFakeTimers();
+    try {
+      FakeEventSocket.reset();
+      vi.stubGlobal('WebSocket', FakeEventSocket);
+      const router = openUrl('/');
+      act(() => FakeEventSocket.last.open());
+      expect(screen.queryByRole('alert')).not.toBeInTheDocument();
+
+      act(() => FakeEventSocket.last.drop());
+      expect(screen.getByRole('alert')).toHaveTextContent('アプリとつながっていません');
+
+      await act(async () => {
+        await router.navigate('/meetings/new');
+      });
+      expect(screen.getAllByRole('alert')).toHaveLength(1);
+      expect(FakeEventSocket.instances).toHaveLength(1);
+
+      act(() => {
+        vi.advanceTimersByTime(1000);
+      });
+      act(() => FakeEventSocket.last.open());
+      expect(screen.queryByRole('alert')).not.toBeInTheDocument();
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });

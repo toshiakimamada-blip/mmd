@@ -13,10 +13,22 @@ export const SUPPORTED_USER_AGENT =
   'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) ' +
   'Chrome/126.0.0.0 Safari/537.36';
 
+/**
+ * つながらない WebSocket の偽物。つなぎ始めたまま、開通も切断もしない。
+ * 画面の枠（AppFrame）は、開くとすぐ通知の WebSocket（/ws/events）へつなぐ。jsdom の本物の WebSocket は、
+ * テストの中で実際にネットワークへつなごうとして、失敗とつなぎ直しの動きを持ち込んでしまう。
+ * 通知を確かめるテストは、vi.stubGlobal('WebSocket', FakeEventSocket)（test/events/fakeWebSocket.ts）で、
+ * 動きを操れる偽物に置き換える。
+ */
+class InertWebSocket extends EventTarget {
+  close(): void {}
+}
+
 beforeEach(() => {
   // 画面を使わないテスト(node 環境)には window が無い。
   if (typeof window !== 'undefined') {
     vi.spyOn(window.navigator, 'userAgent', 'get').mockReturnValue(SUPPORTED_USER_AGENT);
+    vi.stubGlobal('WebSocket', InertWebSocket);
   }
 });
 
@@ -26,4 +38,5 @@ afterEach(() => {
     cleanup();
   }
   vi.restoreAllMocks();
+  vi.unstubAllGlobals();
 });

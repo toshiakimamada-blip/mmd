@@ -2,6 +2,7 @@ import { useEffect, useRef } from 'react';
 import { Outlet, useMatches } from 'react-router';
 
 import { APP_NAME } from '../appInfo';
+import { EventsProvider } from '../events/EventsProvider';
 import { type ScreenDefinition } from '../routes';
 import { BrowserSupportNotice, NoticeBand, NoticeProvider } from './notices';
 
@@ -35,13 +36,18 @@ function useCurrentScreen(): ScreenDefinition {
 /**
  * すべての画面に共通の枠。
  *
- * お知らせの置き場（NoticeProvider）を 1 つだけ持つ。画面を切り替えても、この枠は作り直されないため、
- * 出ているお知らせは、画面を移っても残る。画面の部品は useNoticeActions で、お知らせを出す・消す。
+ * お知らせの置き場（NoticeProvider）と、通知の受信の置き場（EventsProvider）を 1 つずつ持つ。
+ * 画面を切り替えても、この枠は作り直されないため、出ているお知らせは画面を移っても残り、
+ * アプリサーバーとの接続（/ws/events）は 1 本を使い回す。
+ * 画面の部品は useNoticeActions でお知らせを出す・消し、useEvent で通知を購読する。
+ * 通知の置き場は、つながらないことの表示を出すため、お知らせの置き場の内側に置く。
  */
 export function AppFrame() {
   return (
     <NoticeProvider>
-      <AppFrameLayout />
+      <EventsProvider>
+        <AppFrameLayout />
+      </EventsProvider>
     </NoticeProvider>
   );
 }
