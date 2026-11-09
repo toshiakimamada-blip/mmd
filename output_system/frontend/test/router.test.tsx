@@ -39,7 +39,6 @@ describe('screen routing', () => {
   it.each([
     ['/', '会議の一覧'],
     ['/meetings/new', '会議の準備'],
-    ['/meetings/abc123/live', '会議中'],
     ['/meetings/abc123', '会議の記録'],
   ])('should show the screen for %s', (url, title) => {
     openUrl(url);
@@ -47,6 +46,40 @@ describe('screen routing', () => {
     expect(screen.getByRole('heading', { level: 1 })).toHaveTextContent(title);
     expect(screen.getByRole('main')).toHaveTextContent(title);
     expect(document.title).toBe(`${title} - 会議通訳`);
+  });
+
+  /**
+   * 【ユーザーストーリー】
+   * 利用者が、会議の開始から「会議中」へ移ると、「会議中」の画面が表示される。
+   * URL を直接開く・再読み込みすると、会議は中断になっているため、「会議の記録」が表示される
+   *
+   * 【前提条件】
+   * - 会議の開始の応答を、画面の移動の状態に載せて「会議中」へ移る（meetings/liveMeeting.ts）
+   *
+   * 【期待結果】
+   * - 状態があるとき、ヘッダの見出しが「会議中」になり、タブの題名が「会議中 - 会議通訳」になる
+   * - 状態が無いとき、見出しが「会議の記録」になる
+   */
+  it('should show the live screen only for a meeting that was just started', () => {
+    const meeting = {
+      meeting_id: 'abc123',
+      title: '週次の定例',
+      started_at: '2026-11-05T01:00:00.000Z',
+      audio_source: 'microphone',
+    };
+    const started = createMemoryRouter(routes, {
+      initialEntries: [{ pathname: '/meetings/abc123/live', state: { meeting } }],
+    });
+    const { unmount } = render(<RouterProvider router={started} />);
+
+    expect(screen.getByRole('heading', { level: 1 })).toHaveTextContent('会議中');
+    expect(screen.getByRole('main')).toHaveTextContent('会議中');
+    expect(document.title).toBe('会議中 - 会議通訳');
+    unmount();
+
+    openUrl('/meetings/abc123/live');
+
+    expect(screen.getByRole('heading', { level: 1 })).toHaveTextContent('会議の記録');
   });
 
   /**

@@ -14,6 +14,31 @@ function openUrl(url: string) {
 }
 
 /**
+ * 会議の開始から「会議中」へ移った状態の、開く位置。
+ * 「会議中」は、開始から移ってきたときの情報（画面の移動の状態）が無いと「会議の記録」へ移るため、
+ * 「会議中」を確かめるテストは、この位置で開く。
+ */
+const LIVE_ENTRY = {
+  pathname: '/meetings/abc123/live',
+  state: {
+    meeting: {
+      meeting_id: 'abc123',
+      title: '週次の定例',
+      started_at: '2026-11-05T01:00:00.000Z',
+      audio_source: 'system_audio',
+    },
+  },
+};
+
+/** 4 つの画面を開く位置。 */
+const SCREEN_ENTRIES = [
+  ['会議の一覧', '/'],
+  ['会議の準備', '/meetings/new'],
+  ['会議中', LIVE_ENTRY],
+  ['会議の記録', '/meetings/abc123'],
+] as const;
+
+/**
  * 【モジュール】src/components/AppFrame
  * すべての画面に共通の枠（ヘッダ・お知らせ帯の領域・画面ごとの領域）のテスト。
  */
@@ -44,10 +69,10 @@ describe('AppFrame', () => {
    * - ヘッダに、リンクとボタンが 1 つも無い
    * - 特に「会議中」には、ほかの画面へ移るリンクが無い（画面を離れると会議が中断になるため）
    */
-  it.each(['/', '/meetings/new', '/meetings/abc123/live', '/meetings/abc123'])(
+  it.each(SCREEN_ENTRIES)(
     'should not put links or buttons in the header of %s',
-    (url) => {
-      openUrl(url);
+    (_name, entry) => {
+      render(<RouterProvider router={createMemoryRouter(routes, { initialEntries: [entry] })} />);
 
       const banner = screen.getByRole('banner');
       expect(within(banner).queryAllByRole('link')).toHaveLength(0);
@@ -195,9 +220,9 @@ describe('AppFrame', () => {
   ])('should guide users of %s on every screen', (_name, userAgent) => {
     vi.spyOn(window.navigator, 'userAgent', 'get').mockReturnValue(userAgent);
 
-    for (const url of ['/', '/meetings/new', '/meetings/abc123/live', '/meetings/abc123']) {
+    for (const [url, entry] of SCREEN_ENTRIES) {
       const { container, unmount } = render(
-        <RouterProvider router={createMemoryRouter(routes, { initialEntries: [url] })} />,
+        <RouterProvider router={createMemoryRouter(routes, { initialEntries: [entry] })} />,
       );
 
       const guidance = screen.getByText(/Edge または Chrome で開いてください/);
