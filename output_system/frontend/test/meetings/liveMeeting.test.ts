@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 
 import { audioSourceLabel } from '../../src/audio/audioSource';
-import { readLiveMeeting } from '../../src/meetings/liveMeeting';
+import { readLiveMeeting, staleMeetingIdFrom } from '../../src/meetings/liveMeeting';
 
 /** 会議の開始の応答（POST /api/meetings）と同じ形。 */
 function wireMeeting(overrides: Record<string, unknown> = {}) {
@@ -69,5 +69,51 @@ describe('readLiveMeeting', () => {
     ['unknown audio source', { meeting: wireMeeting({ audio_source: 'speaker' }) }],
   ])('should return null for %s', (_name, state) => {
     expect(readLiveMeeting(state, 'abc123')).toBeNull();
+  });
+});
+
+/**
+ * 【モジュール】src/meetings/liveMeeting（再読み込みで残った状態）
+ * 再読み込みでは、ブラウザーの履歴の状態（直前の画面が載せた会議）が残る。
+ * その会議は、音声を送る接続が切れて中断になっているため、「会議中」に表示しない。
+ */
+describe('staleMeetingIdFrom', () => {
+  /** react-router がブラウザーの履歴へ書く形。state が usr に入る。 */
+  const historyState = { usr: { meeting: wireMeeting() }, key: 'k1', idx: 2 };
+
+  /**
+   * 【テスト対象】staleMeetingIdFrom
+   * 【テスト内容】再読み込み、または戻る・進むでページを読み込み、履歴の状態に会議が残っている
+   * 【期待結果】その会議番号を返すこと（開始から移ってきた状態とは区別する）
+   */
+  it.each(['reload', 'back_forward'])('should return the meeting left in the history after %s', (type) => {
+    expect(staleMeetingIdFrom(type, historyState)).toBe('abc123');
+  });
+
+  /**
+   * 【テスト対象】staleMeetingIdFrom（通常の読み込み）
+   * 【テスト内容】アドレスを入力して開いた、リンクから開いた場合や、状態が無い・読めない場合
+   * 【期待結果】どれも null を返すこと（会議の開始から移ってきた状態を、古いものと誤らない）
+   */
+  it.each([
+    ['navigate with a state', 'navigate', historyState],
+    ['reload without a state', 'reload', null],
+    ['reload with a state of another kind', 'reload', { usr: { other: 1 }, key: 'k', idx: 1 }],
+    ['reload with an unreadable state', 'reload', 'meeting'],
+    ['no navigation entry', undefined, historyState],
+  ])('should return null for %s', (_name, type, state) => {
+    expect(staleMeetingIdFrom(type, state)).toBeNull();
+  });
+
+  /**
+   * 【テスト対象】readLiveMeeting（古い状態の会議）
+   * 【テスト内容】再読み込みで残った会議と同じ会議番号の状態で、「会議中」を開く。別の会議番号の状態でも開く
+   * 【期待結果】残った会議は null（「会議の記録」へ移す）。別の会議（新しく開始した会議）は読めること
+   */
+  it('should not use the meeting that was left in the history by a reload', () => {
+    expect(readLiveMeeting({ meeting: wireMeeting() }, 'abc123', 'abc123')).toBeNull();
+    expect(
+      readLiveMeeting({ meeting: wireMeeting({ meeting_id: 'next' }) }, 'next', 'abc123'),
+    ).not.toBeNull();
   });
 });

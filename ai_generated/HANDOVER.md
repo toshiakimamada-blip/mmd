@@ -38,10 +38,13 @@ output_system/
 │   │   │   └── conversion/   # 翻訳モデルの変換。アプリサーバー側: service.py（管理部への口）・process.py（起動と見届け）・receipt.py（控えと判定）・layout.py・protocol.py。変換プロセス側: worker.py・network_guard.py・sandbox.py・safe_torch.py
 │   │   ├── meetings/         # 会議管理部。transitions.py（遷移規則の表）、manager.py（開始・終了の窓口、進行中は 1 件）、session.py（会議 1 件の音声・字幕・終了・中断・ワーカーの起動し直し）、inputs.py、errors.py、workers.py（ワーカーの起動の入口。テストは偽のエンジンを渡す）。使い方は docs/meetings.md
 │   │   ├── notify/hub.py     # 通知部（/ws/events）
-│   │   └── api/{health,models,meetings,ws}.py  # /api/health、/api/models/*、POST /api/meetings と /end、/ws/audio/{会議番号} と /ws/events
+│   │   └── api/{health,models,meetings,ws}.py  # /api/health、/api/models/*、POST /api/meetings と /end、GET /api/meetings/{会議番号}/subtitles、/ws/audio/{会議番号} と /ws/events
 │   └── test/                 # src と同じ構造。test/container/ は起動したコンテナを相手にする（MMD_CONTAINER_URL のときだけ動く）。test/browser/ はブラウザーで手動で確かめる確認用のサーバー（pytest は集めない）。test/distribution_server.py（擬似の配布元、HTTPS）と test/model_fakes.py（小さな定義・偽の入手の部品）と test/interpreter_audio.py（合成音声・音声ファイルの読み込み）は共通の道具。test/measure/measure_interpreter.py は、本物のモデルで字幕の遅れとメモリを測る道具、test/measure/measure_generation.py は、生成ワーカーの作成時間とメモリを測る道具（どちらも pytest は集めない）。test/meeting_fakes.py は会議管理部のテストの道具（偽のエンジンの入口、本物の uvicorn を起動する running_app、記録の読み取り）。test/generation_fakes.py（偽の文章生成）と test/meeting_subtitles.py（英語の会議の字幕の見本。測定と動作確認用）も共通の道具
 ├── frontend/
-│   ├── src/{routes.ts,router.tsx,components/AppFrame.tsx,screens/*,styles/{frame,notices}.css}
+│   ├── src/{routes.ts,router.tsx,components/AppFrame.tsx,screens/*,styles/{frame,notices,live}.css}
+│   ├── src/events/           # 通知の受信と再接続。EventConnection.ts（/ws/events への接続・つなぎ直し）、EventsProvider.tsx（useEvent・useReloadOnConnect。AppFrame が置く）、eventTypes.ts（通知の型と読み替え）。使い方は docs/events.md
+│   ├── src/{api,meetings,subtitles}/ # api: apiClient.ts（ApiError・requestJson）と meetingsApi.ts。meetings: liveMeeting.ts（「会議中」が受け取る会議）・経過時間。subtitles: 字幕の型・mergeSubtitles・useMeetingSubtitles・formatClockTime
+│   ├── src/screens/live/ + src/components/subtitles/ # 「会議中」の中身と字幕の行・一覧・追いかける領域（SubtitleRow は「会議の記録」でも使い回す）。docs/live-screen.md
 │   ├── scripts/              # ビルドした dist/ に外部の URL への参照が無いかの検査（npm run build の最後に走る）
 │   ├── src/errors/           # エラーの型と、エラーコードごとの文言の一覧（errorMessages.ts）
 │   ├── src/audio/            # ブラウザーの音声の取り込み。audioInput.ts（画面共有・マイク）、audioErrors.ts（理由の種類）、pcmConversion.ts（16kHz・モノラル・16 ビットへの変換）、pcmCaptureWorklet.ts（AudioWorklet の処理部）、audioPipeline.ts、audioSender.ts（順序つきの送信）、audioCaptureSession.ts（会議 1 回ぶん。停止の検知・やり直し）、browserEnvironment.ts（実ブラウザーの部品の作り方）。使い方・確かめた結果は docs/audio-capture.md
@@ -49,7 +52,7 @@ output_system/
 │   └── test/                 # src と同じ構造。test/browser/capture-check/ は実ブラウザーで音声の取り込みを確かめる確認用のページ（ビルドの対象外。出荷しない）。test/audio/fakes.ts は偽のトラック・ストリーム・WebSocket・AudioContext・処理部
 ├── tools/with-pinned-node.sh # Dockerfile と同じ版の Node.js で、渡されたコマンド（npm install など）を実行する
 ├── config/                   # tuning.toml（調整値の仮置き）、models.toml（3 つの AI モデルの定義）、translation_alternatives.md（翻訳モデルの代わりの候補）
-├── docs/                     # errors.md（エラーの扱い・コード一覧）、notices.md（画面の部品の使い方）、models.md（入手・変換）、interpreter.md（通訳ワーカー・測定値）、generation.md（生成ワーカー・測定値）、meetings.md（会議の開始と終了・通知・実機での確認）
+├── docs/                     # errors.md（エラーの扱い・コード一覧）、notices.md（画面の部品の使い方）、models.md（入手・変換）、interpreter.md（通訳ワーカー・測定値）、generation.md（生成ワーカー・測定値）、meetings.md（会議の開始と終了・通知・実機での確認）、events.md（通知の受信と再接続）、live-screen.md（「会議中」の画面と確認）
 ```
 
 ## ビルド・起動方法
@@ -125,13 +128,16 @@ output_system/
 - 画面共有の音声には、エコー除去・雑音抑制・音量の自動調整を求めない（再生中の声を削るため）。マイクはブラウザーの既定に任せる。映像は受け取った直後に止めてストリームから外す
 - 共有の取りやめと拒否は、ブラウザーが同じ `NotAllowedError` を返し、見分けがつかない。`AUDIO_PERMISSION_DENIED` の 1 つにそろえた
 - 16kHz への変換は、ハン窓つきの sinc フィルター（片側 16 ゼロ交差、遮断は出力の上限の 0.95 倍）で間引く。出力の位置は整数の計算で求め、長く続けてもずれない。入力の分け方（128 サンプルずつ、など）によらず出力は同じ
-
 - 会議のセッション（`meetings/session.py`）は、管理のタスク 1 つが、待ち行列 1 本（ワーカーのメッセージ・閉じる要求・音声を渡す側の失敗）を 1 つずつ処理する。ブロックする呼び出しは、出力を読む専用スレッド、音声を書く専用の実行器、`asyncio.to_thread` に分ける。ワーカーは起動し直すたびに世代の番号を付け、前の世代のメッセージは捨てる。会議の開始は、ワーカーの準備完了を待たず会議番号を返す（読み込みの間の音声はためる）
 - 進行中の会議の判定は、メモリ上のセッションで行う（記録の `interpreting` で数えない）。起動時の復旧（PBI 7.1）が暫定版で未実装のため、止まったあとに残った通訳中の会議が、新しい開始を永久に断ってしまう。セッションが無い通訳中の会議への終了の要求は、字幕の件数から状態を決めて保存し直す（終了の保存に失敗した会議を終われるように）
 - 終了と中断: 音声を渡し切る（`meeting_end_flush_timeout_seconds`）→ 終了処理の依頼（書けなければ即、強制終了）→ 字幕が届く間は待つ（字幕が `meeting_end_finish_idle_seconds` 届かなければ固まったとみなす）→ 最後の字幕のあとで終了日時と状態を 1 回の確定で保存 → ワーカーを止める → 要約を始める呼び出し（`on_meeting_ended`）。中断の終了日時は、接続が切れた日時。起動し直しは、失敗が `interpreter_max_failures` 回続いたらあきらめて中断（`interpreter_stable_seconds` 以上動いたワーカーが止まったら数え直す）。時間と回数は `config/tuning.toml`。開始から `audio_connect_timeout_seconds`（30 秒）のうちに音声の WebSocket が 1 本も張られなければ、接続切れと同じ手順で中断にする（タブを閉じた会議が、ワーカーを載せたまま新しい開始を断り続けるのを防ぐ）。頼んでいないのに止まったワーカーは、起動し直せる場合も、エラーログ `SYSTEM_INTERPRETER_EXITED`（`exception_type` に止まり方）を出す
 - 遷移規則の表は `meetings/transitions.py` の 1 か所（15 行）。状態を変えるのは `meetings/` と将来の `jobs/` だけ（`update_meeting` の呼び出し元を `test_state_change_boundary.py` が構文木で検査）。要約・削除・復旧の遷移は表にだけあり、使う部（作成ジョブ管理部など）はまだ無い
 - 通知は `{"type": "対象.出来事", ...}`: `subtitle.created`（保存が確定してから）、`meeting.state_changed`、`error.occurred`（`meeting_id`・`category`・`code`・`message`・`action`）、`model.status_changed`（モデル管理部の発行先は通知部）。送り待ちが 1,000 件を超えた画面だけ 1013 で閉じる。保存に失敗した字幕は通知せず順番も使わない
 - `WorkerClient`: `get` が停止完了か `WorkerExited` を返したあとは、`stop` が停止完了を待たずに片付ける。壊れた出力のときの `WorkerExited` は、子の終了を待たずに届く（子を止めるのは受け取った側）。`finish(timeout_seconds=)` で依頼を書く待ちを区切れる。`WorkerProcess.write` は `select.poll`（記述子 1024 以上でも動く）
+
+- 通知の受信は `AppFrame` の `EventsProvider` が 1 本持つ。`useEvent(種類, 関数)` で購読し、型は `eventTypes.ts` に足す（いまは `subtitle.created` だけ）。切れるとお知らせ帯に offline を出し、1・2・4・8・10 秒の間隔でつなぎ直す。`useReloadOnConnect(関数)` は開通のたびに呼ぶ（登録した時点で開通済みなら呼ばない。開いた時点の読み込みは画面が行う）。通知の重複は、受け取る側が順番で除く（`mergeSubtitles`）
+- 「会議中」は、開始の応答を `location.state.meeting` から受け取る。読めない・会議番号が違う・再読み込みで履歴に残った古い会議（`staleMeetingIdFrom`）なら、「会議の記録」へ置き換えて移す。#68 は `navigate(screenPaths.meetingLive(id), { replace: true, state: { meeting: 応答 } })` で移ること。**「会議を終了する」は終了の API を呼んで記録へ移るだけで、音声の取り込み（`AudioCaptureSession`）を止めない。#68 が、開始の流れの側で `stop()` と `close()` を呼ぶこと**。会議の中断（`meeting.state_changed` の `interrupted`）で記録へ移る動きは、まだ無い
+- 字幕の領域は、最下部から 24px 以内かで追いかけているかを決める。字幕の取得は `cache: 'no-store'`（会議の内容を HTTP キャッシュに残さない）。失敗は `ApiError` にそろえ、画面は `toDisplayError` で文言を引く。経過時間は、秒の切り替わりで更新し（`setInterval` だと秒がとぶ）、タブが見えたときに直す
 
 ## はまりポイント
 - `.gitignore` の `tools/`（gaido 管理）が `output_system/tools/` にも当たる。`!/output_system/tools/` で打ち消している
@@ -141,6 +147,9 @@ output_system/
 - 開発用コンテナの Node 22 系に同梱の npm 10 系は、`min-release-age` を黙って無視する。`frontend/.npmrc` の `engine-strict=true` で、古い npm の `npm install`・`ci`・`update` は失敗する。依存を足すときは `frontend/` で `../tools/with-pinned-node.sh npm install <パッケージ>` を使う（Dockerfile と同じ Node 24.21.0 を SHA-256 の確認つきで `~/.cache/mmd-node` に入れる）。足したあとは公開日が 7 日以上前かを確かめる
 - jsdom の既定のユーザーエージェントは Chrome でも Edge でもなく、そのままだと全画面に「Edge または Chrome で開いてください」の警告が出る。`frontend/test/setup.ts` が、各テストの前に Chrome のものへ差し替える。ブラウザーを切り替えるテストは `vi.spyOn(window.navigator, 'userAgent', 'get')` で上書きする
 - `ConfirmDialog` のフォーカスの閉じ込めは、`inert` に加えて、document の keydown（Tab・Shift+Tab・Esc）でも行う。`inert` だけだと、端のボタンから先へ進んだ Tab が、ブラウザーのアドレス欄などへ出るため
+- 画面のテストは全体で `WebSocket` を、つながらない偽物に置き換えている（`test/setup.ts`）。通知を確かめるテストは `test/events/fakeWebSocket.ts` の `FakeEventSocket` を `vi.stubGlobal` で渡す。「会議中」のテストは、`createMemoryRouter` の `initialEntries` に `{ pathname, state: { meeting } }` を渡す
+- react-hooks の `set-state-in-effect` は、effect から呼ぶ関数が `await` のあとで setState すると報告する。`.then` に渡す形にすると通る。jsdom には画面の配置が無いので、スクロールの確認は `Element.prototype` の `scrollHeight`・`clientHeight`・`scrollTop` を置き換える
+- 「会議の準備」が無い間は、実ブラウザーで `history.pushState({ usr: { meeting }, key, idx: 1 }, '', URL)` と `popstate` の発行で「会議中」を開く（docs/live-screen.md）。playwright-cli の Chromium が 1247 を求め、入っているのが 1248 のときは、設定の `executablePath` で指す
 - `frontend/test/lint/noDangerousHtml.test.ts` は ESLint を起動するため、機械が忙しいと既定の 5 秒の制限に届かないことが 1 度あった（再実行で通る）
 - pytest は、ルートのロガーに取り込み用の出力先を付ける。この出力先は、文の形と引数が合わない記録でテストを失敗させる。形の食い違いを確かめるテストは、`test_output.py` の `isolated_logger`（親へ流さないロガー）を使う
 - uvicorn の `Config(...)` は、`log_config=None` を渡さないと、既定のログの設定をプロセス全体へ書き込む。ほかのテストの出力が変わるため、テストでも `log_config=None` を渡す
@@ -158,7 +167,6 @@ output_system/
 - Whisper の CTranslate2 形式は、SYSTRAN（faster-whisper の開発元）の配布。OpenAI の配布ではなく、公式の配布元として扱ってよいかは利用者に確認中（PBI のコメント）。OpenAI の HF 側のライセンス表示は Apache 2.0 で、SYSTRAN 側の MIT と食い違う
 - 社内の通信を検査する証明書の下での入手は、実機では未確認。このコンテナの経路では HF の証明書は検査されていない（発行元は Amazon）。仕組みは `SSL_CERT_FILE` を使う自動テストで確認した
 - Docker に buildx が無く、`docker build` は旧ビルダーになる。追加の文脈（`certs`）は `docker compose build` で渡す
-
 - `uv sync`（既定の依存グループ）に `interpreter` を入れていなかったため、素の `uv sync --locked` が faster-whisper・onnxruntime・av を外し、通訳ワーカーのテストが落ちた。`default-groups` に足した（`uv.lock` の `default-groups` の 1 行も変わる。`uv lock --check` で確かめる）
 - `ruff` の E501 は、日本語の文字を幅 2 で数える。日本語の長い文字列は、100 桁に収まるよう分ける
 - 本物のモデルでの測定は、約 90 秒かかり、CPU を使い切る。ほかの重い処理（pytest 全体など）と同時に走らせると、遅れの値が悪くなる。ファイルのキャッシュが効いた状態の値のため、初回の読み込みは別に測る
@@ -197,3 +205,4 @@ output_system/
 - PBI #47: 記録データベース（`records.sqlite3`、構造の版 1、会議・字幕・要約・質問のまとまり・質問の 5 つの表）と記録保存部。会議の作成・字幕の追加（順番は同じ確定の中で振る）・状態と終了日時の更新・読み出し、保存の失敗の共通のエラー（`RECORD_SAVE_FAILED`・`RECORD_VALUE_INVALID`）と画面の文言、内容を含まないエラーログ。要約・質問のまとまり・質問の保存の関数、字幕の保存に失敗したときの会議の続け方、更新前の控え（暫定版では後回し）は含まない
 - PBI #52: ブラウザーでの音声の取り込みと送信。画面共有（PC の音声。映像は破棄）とマイクから音声を得て、失敗の理由を 4 種類で返す。16kHz・モノラル・16 ビットの PCM に変換して、約 100 ミリ秒のフレームで `/ws/audio/{会議番号}` へ送る（詰まっても順序を保ち、欠落しない）。共有が止まったことを検知し、`capture.stopped` を送って呼び出し側へ通知し、同じ接続で取り込み直せる（`capture.resumed`）。Chromium 156 と Edge 155 の実ブラウザー（疑似入力）で確認済み。会議の開始の画面と、サーバー側で音声を受け取る経路は含まない。手順と結果は `output_system/docs/audio-capture.md`
 - PBI #57: 会議の開始（`POST /api/meetings`）と終了（`POST /api/meetings/{会議番号}/end`）、音声の WebSocket（`/ws/audio/{会議番号}`。届いた日時を付けて順に通訳ワーカーへ）、通知部（`/ws/events`）、字幕の「保存してから通知」、接続切れでの中断、通訳ワーカーの起動し直し、遷移規則の表。出荷するコンテナで本物のモデルを動かして確認した（`docs/meetings.md`）。画面の接続、字幕の状況・遅れの測定・警告（Epic 4）、要約を始める本体（Epic 5）、起動時の復旧（PBI 7.1）は含まない
+- PBI #64: 通知の受信と再接続（`/ws/events`、切断でお知らせ帯、開通のたびの読み直し）、「会議中」の画面（タイトル・経過時間・音声の出どころ・案内・終了の確認と終了）、字幕の一覧（通知で追加・順番で重複を除く・最新まで自動で進む・過去へ戻っている間は進まず「最新の字幕へ戻る」・再接続のあとの読み直し）、`GET /api/meetings/{会議番号}/subtitles`。出荷するコンテナで本物のモデルを動かして確認した（`docs/live-screen.md`）。質問の領域・字幕の状況・遅れの警告・取り込み停止の選択は含まない
