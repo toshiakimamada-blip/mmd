@@ -3,6 +3,7 @@
 通訳ワーカーは、偽のエンジンで動く本物の別のプロセス。アプリは本物の uvicorn で動かす。
 """
 
+import dataclasses
 import time
 from collections.abc import Iterator
 from datetime import UTC, datetime
@@ -11,6 +12,7 @@ import pytest
 
 from interpreter_audio import tone
 from meeting_fakes import (
+    FAST,
     AppHandle,
     FakeEngineLauncher,
     frames,
@@ -245,6 +247,111 @@ class TestInterruptOnDisconnect:
                 handle.close_all()
 
         assert meeting["ended_at"] is not None
+        assert [row["sequence"] for row in read_subtitles(settings, meeting_id)] == [1]
+
+
+class TestInterruptWhenAudioNeverConnects:
+    """開始のあと、音声の WebSocket が一度も張られない会議は、一定時間で中断にして枠を空ける。"""
+
+    # 待ち時間を短くした決め。通常は調整値 audio_connect_timeout_seconds（30 秒）。
+    SHORT_WAIT = dataclasses.replace(FAST, audio_connect_timeout_seconds=1.0)
+
+    def test_should_interrupt_the_meeting_and_free_the_slot_when_audio_never_connects(
+        self, settings, launcher
+    ):
+        """
+        【テスト対象】音声の接続が来ない会議の中断（開始から待ち時間のあと）
+        【テスト内容】会議を開始し、音声の WebSocket を張らないまま待ち時間（1 秒）を過ぎる。
+                    そのあと、新しい会議を開始する
+        【期待結果】待ち時間のあとで状態が中断になり、終了日時が開始から待ち時間ほどあとの
+                    日時であること。会議の状態の変化（中断）が通知され、エラー通知は無いこと。
+                    通訳ワーカーのプロセスが残らず、進行中の枠が空いて、新しい会議を開始できること
+        """
+        with running_app(make_app(settings, launcher, self.SHORT_WAIT)) as handle:
+            try:
+                events = handle.events()
+                meeting_id = start_meeting(handle)
+                pid = wait_for_worker(handle)
+                still_running = read_meeting(settings, meeting_id)["status"]
+
+                meeting = wait_for_status(settings, meeting_id, "interrupted")
+                events.wait_for(
+                    lambda received: any(
+                        i["type"] == "meeting.state_changed" and i["status"] == "interrupted"
+                        for i in received
+                    )
+                )
+                slot_free = wait_for_slot_free(handle)
+                deadline = time.monotonic() + 10
+                while group_members(pid) and time.monotonic() < deadline:
+                    time.sleep(0.05)
+                alive_after = group_members(pid)
+                status, _ = handle.post(
+                    "/api/meetings", {"title": "次", "audio_source": "microphone"}
+                )
+            finally:
+                handle.close_all()
+
+        waited = (meeting["ended_at"] - meeting["started_at"]) / 1000
+        assert still_running == "interpreting"
+        assert 0.9 <= waited < 5.0
+        assert read_subtitles(settings, meeting_id) == []
+        assert events.of_type("error.occurred") == []
+        assert slot_free
+        assert alive_after == []
+        assert status == 201
+
+    def test_should_interrupt_even_when_the_worker_is_still_starting(self, settings):
+        """
+        【テスト対象】待ち時間のあとの中断（通訳ワーカーの起動の途中）
+        【テスト内容】起動に 2 秒かかるワーカーで、音声を張らないまま待ち時間（1 秒）を過ぎる
+        【期待結果】起動が済んだあとで、字幕 0 件のまま中断になり、進行中の枠が空くこと
+                    （枠は、通訳ワーカーを止めてから空く）。起動し直しは起きないこと
+        """
+
+        class SlowToStart(InterpreterClient):
+            def start(self, start, *, timeout_seconds):
+                time.sleep(2.0)
+                return super().start(start, timeout_seconds=timeout_seconds)
+
+        launcher = FakeEngineLauncher(settings, client_class=SlowToStart)
+        with running_app(make_app(settings, launcher, self.SHORT_WAIT)) as handle:
+            try:
+                meeting_id = start_meeting(handle)
+                meeting = wait_for_status(settings, meeting_id, "interrupted")
+                slot_free = wait_for_slot_free(handle)
+            finally:
+                handle.close_all()
+
+        assert meeting["ended_at"] is not None
+        assert read_subtitles(settings, meeting_id) == []
+        assert slot_free
+        assert launcher.starts == 1
+
+    def test_should_not_interrupt_a_meeting_whose_audio_connected_in_time(self, settings, launcher):
+        """
+        【テスト対象】待ち時間の取り消し（待ち時間のうちに音声が張られた会議）
+        【テスト内容】開始の直後に音声の WebSocket を張り、待ち時間（1 秒）の 2 倍以上
+                    つないだままにする
+        【期待結果】状態は通訳中のままで、字幕が作られること。接続を切ると、ふつうの接続切れとして
+                    中断になること
+        """
+        with running_app(make_app(settings, launcher, self.SHORT_WAIT)) as handle:
+            try:
+                events = handle.events()
+                meeting_id = start_meeting(handle)
+                audio = handle.audio(meeting_id)
+                time.sleep(2.5)
+                speak(audio, 1.0)
+                events.wait_for_count("subtitle.created", 1)
+                while_connected = read_meeting(settings, meeting_id)["status"]
+
+                audio.close()
+                wait_for_status(settings, meeting_id, "interrupted")
+            finally:
+                handle.close_all()
+
+        assert while_connected == "interpreting"
         assert [row["sequence"] for row in read_subtitles(settings, meeting_id)] == [1]
 
 

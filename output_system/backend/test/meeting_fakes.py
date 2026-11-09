@@ -40,6 +40,7 @@ FAST = SessionPolicy(
     stable_seconds=30.0,
     flush_timeout_seconds=15.0,
     finish_idle_seconds=30.0,
+    audio_connect_timeout_seconds=600.0,
 )
 
 # 固まったワーカーを確かめるための、短い決め。
@@ -50,6 +51,7 @@ IMPATIENT = SessionPolicy(
     stable_seconds=30.0,
     flush_timeout_seconds=1.0,
     finish_idle_seconds=1.0,
+    audio_connect_timeout_seconds=600.0,
     finish_write_timeout_seconds=0.5,
     stop_timeout_seconds=0.5,
 )

@@ -128,6 +128,9 @@ class SessionPolicy:
     flush_timeout_seconds: float
     # 終了処理の依頼のあと、この秒数のあいだ字幕が 1 件も届かなければ、固まったとみなす。
     finish_idle_seconds: float
+    # 会議の開始から、音声の WebSocket が 1 本も張られないまま、この秒数がたったら、
+    # 画面との接続が切れたとみなして、会議を中断にする。
+    audio_connect_timeout_seconds: float
     # 終了処理の依頼を書き始めるまで待つ秒数。
     finish_write_timeout_seconds: float = FINISH_WRITE_TIMEOUT_SECONDS
     # ワーカーを止めるとき、停止完了を待つ秒数。強制終了の猶予 1 秒が別に付く。
@@ -143,6 +146,7 @@ class SessionPolicy:
             stable_seconds=tuning.interpreter_stable_seconds,
             flush_timeout_seconds=tuning.meeting_end_flush_timeout_seconds,
             finish_idle_seconds=tuning.meeting_end_finish_idle_seconds,
+            audio_connect_timeout_seconds=tuning.audio_connect_timeout_seconds,
         )
 
 
@@ -273,6 +277,9 @@ class MeetingSession:
         self._audio_ready = asyncio.Event()
         self._accepting = True
         self._audio_connected = False
+        # 音声の接続が 1 本も張られないまま待ち時間が過ぎたかを見張るタイマー。start で始め、
+        # 音声が張られたとき、閉じる手順に入ったとき、セッションが終わったときに止める。
+        self._audio_connect_timer: asyncio.TimerHandle | None = None
         self._close_reason: CloseReason | None = None
         self._closed_at: datetime | None = None
         self._result: asyncio.Future[Meeting] = asyncio.get_running_loop().create_future()
@@ -309,8 +316,17 @@ class MeetingSession:
         return self._close_reason is not None
 
     def start(self) -> None:
-        """管理のタスクを始める。通訳ワーカーの起動も、このタスクが行う。"""
+        """管理のタスクを始める。通訳ワーカーの起動も、このタスクが行う。
+
+        あわせて、音声の接続を待つ時間の見張りを始める。開始の応答を受け取った画面が音声をつながない
+        （タブを閉じた、接続に失敗した）と、release_audio_connection が呼ばれず、会議が通訳中のまま
+        残って、進行中の枠が空かなくなる。待ち時間のうちに 1 本も張られなければ、画面との接続が
+        切れたときと同じ手順で閉じる。
+        """
         self._task = asyncio.create_task(self._run(), name=f"meeting-{self.meeting_id}")
+        self._audio_connect_timer = asyncio.get_running_loop().call_later(
+            self._policy.audio_connect_timeout_seconds, self._on_audio_connect_timeout
+        )
 
     def add_capture_listener(self, listener: Callable[[str, CaptureEvent], None]) -> None:
         """音声の取り込みの知らせ（capture.stopped・capture.resumed）の受け取り先を足す。
@@ -331,6 +347,7 @@ class MeetingSession:
         if self._audio_connected:
             raise audio_already_connected(self.meeting_id)
         self._audio_connected = True
+        self._cancel_audio_connect_timer()
 
     def release_audio_connection(self) -> None:
         """音声の接続が切れた。会議が閉じる手順に入っていなければ、画面との接続が切れたとみなして、
@@ -406,8 +423,27 @@ class MeetingSession:
         self._close_reason = reason
         self._closed_at = self._clock()
         self._accepting = False
+        self._cancel_audio_connect_timer()
         self._audio_ready.set()
         self._events.put_nowait(_CloseRequested())
+
+    def _on_audio_connect_timeout(self) -> None:
+        """音声の接続が 1 本も張られないまま待ち時間が過ぎた。中断として閉じる。
+
+        終了日時は、待ち時間が過ぎた日時になる。処理ログに残して、ふつうの接続切れと見分ける。
+        """
+        self._audio_connect_timer = None
+        if self._close_reason is not None or self._audio_connected:
+            return
+        log_processing("audio_connect_timeout", meeting_id=self.meeting_id)
+        self._request_close(CloseReason.CONNECTION_LOST)
+
+    def _cancel_audio_connect_timer(self) -> None:
+        """音声の接続を待つ見張りを止める。何回呼んでもよい。"""
+        timer = self._audio_connect_timer
+        if timer is not None:
+            timer.cancel()
+            self._audio_connect_timer = None
 
     # --- 管理のタスク -------------------------------------------------------------------
 
@@ -434,6 +470,7 @@ class MeetingSession:
                 self._result.set_exception(error)
         finally:
             self._accepting = False
+            self._cancel_audio_connect_timer()
             handle = self._handle
             if handle is not None and not handle.torn_down:
                 await self._teardown(handle)

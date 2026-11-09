@@ -123,6 +123,9 @@ class Tuning:
     # 会議の終了と中断で、終了処理の依頼のあと、字幕が 1 件も届かないまま、この秒数がたったら、
     # 通訳ワーカーが固まったとみなして止める。
     meeting_end_finish_idle_seconds: float = _limits(1.0, 600.0)
+    # 会議の開始から、音声の WebSocket が 1 本も張られないまま、この秒数がたったら、
+    # 画面との接続が切れたとみなして、会議を中断にする（通訳ワーカーを止めて、進行中の枠を空ける）。
+    audio_connect_timeout_seconds: float = _limits(5.0, 600.0)
     # 翻訳モデルを実行基盤の形式へ変換するときの量子化。選べる値は TRANSLATION_QUANTIZATIONS。
     # 変換後のファイルの大きさと、翻訳の速さと質に効く。変えると、変換し直しになる。
     translation_quantization: str = _choices(*TRANSLATION_QUANTIZATIONS)

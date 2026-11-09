@@ -51,6 +51,8 @@
 
 処理ログは、終了を `meeting_ended`、中断を `meeting_interrupted` で出します（会議番号・かかった時間・字幕の件数つき）。
 
+開始のあと、音声の WebSocket が 1 本も張られない場合も、接続が切れたときと同じ手順で中断にします。待ち時間は、会議を開始してから `audio_connect_timeout_seconds`（30 秒）です。タブを閉じた、接続に失敗した、などで音声がつながらない会議が、通訳ワーカーを載せたまま残り、新しい開始を断り続けることを防ぎます。終了日時は、待ち時間が過ぎた日時です。このときは、処理ログに `audio_connect_timeout` も出ます。待ち時間のうちに音声が張られた会議は、この見張りの対象から外れます。
+
 ### 通訳ワーカーが止まったとき
 
 異常終了を検出したら、通訳ワーカーを起動し直して、会議を続けます。起動の間に届いた音声は、捨てずにためて、起動し直したワーカーへ順に渡します（ワーカーが受け取っていた分は失われます）。起動の失敗または異常終了が続けて 3 回に達したら、起動し直しをやめて、会議を中断にし、エラー `SYSTEM_INTERPRETER_UNAVAILABLE` を通知します。回数と待ち時間は `config/tuning.toml` の調整値です（`interpreter_max_failures`・`interpreter_restart_wait_seconds`・`interpreter_stable_seconds`）。
