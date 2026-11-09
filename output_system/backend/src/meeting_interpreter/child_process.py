@@ -26,6 +26,7 @@ AI の実行基盤（Hugging Face の部品、llama.cpp など）は、次の 2 
   中止の合図と時間切れで、プロセスのグループごと止める（孫のプロセスを残さない）。
 """
 
+import math
 import os
 import select
 import signal
@@ -195,6 +196,22 @@ def _stop(process: "subprocess.Popen[bytes]", grace_seconds: float) -> None:
     process.wait()
 
 
+def _wait_writable(fd: int, deadline: float) -> bool:
+    """ファイル記述子へ書き始められるまで、deadline（単調増加時計）まで待つ。
+
+    書けるとき、または書こうとすると失敗が分かるとき（相手が閉じた・記述子が無効）は True。
+    時間内にどちらにもならなければ False。
+
+    select.select は使わない。記述子の番号が 1024 以上だと ValueError になる
+    （会議の間に開く記述子が増えると起こる）ため、番号の上限が無い poll で待つ。
+    """
+    poller = select.poll()
+    poller.register(fd, select.POLLOUT)
+    # poll の単位はミリ秒。切り捨てると待ち足りないため、切り上げる。
+    remaining_ms = max(math.ceil((deadline - time.monotonic()) * 1000), 0)
+    return bool(poller.poll(remaining_ms))
+
+
 class WorkerProcess:
     """会議の間ずっと動く子のプロセス。標準入力へ書き、出力のパイプを持ち、止められる。
 
@@ -239,12 +256,8 @@ class WorkerProcess:
             raise TimeoutError("子の標準入力へ、別の書き込みが終わりません")
         try:
             try:
-                if deadline is not None:
-                    _, writable, _ = select.select(
-                        [], [stdin.fileno()], [], max(deadline - time.monotonic(), 0.0)
-                    )
-                    if not writable:
-                        raise TimeoutError("子が標準入力を読みません")
+                if deadline is not None and not _wait_writable(stdin.fileno(), deadline):
+                    raise TimeoutError("子が標準入力を読みません")
                 stdin.write(data)
                 stdin.flush()
             except ValueError:

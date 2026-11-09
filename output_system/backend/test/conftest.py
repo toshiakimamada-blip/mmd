@@ -17,7 +17,7 @@ from meeting_interpreter.app import create_app
 from meeting_interpreter.child_process import OFFLINE_ENVIRONMENT
 from meeting_interpreter.models.definition import MODELS_FILE_NAME, load_model_catalog
 from meeting_interpreter.models.fetch import ModelFetcher
-from meeting_interpreter.models.manager import ModelManager
+from meeting_interpreter.models.manager import ModelManager, ModelStatusNotifier
 from meeting_interpreter.models.store import ModelStore
 from meeting_interpreter.settings import Settings
 from meeting_interpreter.tuning import TUNING_FILE_NAME, load_tuning
@@ -148,10 +148,10 @@ def idle_model_manager(monkeypatch: pytest.MonkeyPatch) -> None:
     入手を確かめるテストは、create_app に model_manager を渡して、通信しない部品で動かす。
     """
 
-    def build(settings: Settings) -> ModelManager:
+    def build(settings: Settings, notifier: ModelStatusNotifier | None = None) -> ModelManager:
         store = ModelStore(settings.models_dir)
         return IdleModelManager(
-            settings.model_catalog, store, ModelFetcher(store, FakeDownloader())
+            settings.model_catalog, store, ModelFetcher(store, FakeDownloader()), notifier=notifier
         )
 
     monkeypatch.setattr(app_module, "build_model_manager", build)

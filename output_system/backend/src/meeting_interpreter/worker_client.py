@@ -33,6 +33,9 @@ from .worker_ipc import FrameReader, ProtocolError
 # 停止のとき、停止完了を待つ秒数の既定。
 DEFAULT_STOP_TIMEOUT_SECONDS: Final = 10.0
 
+# 停止完了を待つ間に、ワーカーの出力が終わったかを確かめる間隔（秒）。
+_ENDED_CHECK_SECONDS: Final = 0.05
+
 # このファイルは <src>/meeting_interpreter/worker_client.py にある。
 # 1 つ上がアプリのソースの根。ワーカーがアプリのコードを読めるように、子の PYTHONPATH に入れる。
 _SOURCE_ROOT: Final = Path(__file__).resolve().parents[1]
@@ -85,6 +88,9 @@ class WorkerClient[Output]:
         self._reader: threading.Thread | None = None
         self._messages: queue.Queue[Output | WorkerExited] = queue.Queue()
         self._started = False
+        # 呼び出し側が、停止完了か WorkerExited を受け取ったか。受け取ったあとは、ワーカーから
+        # 返るメッセージが無いため、stop は停止完了を待たずに、プロセスを片付ける。
+        self._ended = False
 
     # --- 継ぐ側が決める ---------------------------------------------------------------
 
@@ -156,10 +162,13 @@ class WorkerClient[Output]:
         """
         try:
             if timeout is not None and timeout <= 0:
-                return self._messages.get_nowait()
-            return self._messages.get(timeout=timeout)
+                item = self._messages.get_nowait()
+            else:
+                item = self._messages.get(timeout=timeout)
         except queue.Empty:
             return None
+        self._note_if_ended(item)
+        return item
 
     def wait_exit(self, timeout_seconds: float) -> int | None:
         """ワーカーのプロセスが終わるのを待つ。終わっていなければ None。"""
@@ -174,6 +183,9 @@ class WorkerClient[Output]:
         timeout_seconds までにする。ワーカーが標準入力を読まなくなって、送信が止まっていても同じ。
         時間内に終わらなければ、プロセスのグループごと強制終了する（猶予は 1 秒）。
         どちらの場合も、戻るときに、ワーカーのプロセスは残っていない。
+
+        すでに get で、停止完了か WorkerExited を受け取っていたときは、これ以上メッセージが
+        来ないため、待たずにプロセスを片付ける（timeout_seconds いっぱい待たない）。
 
         Args:
             timeout_seconds: 停止の依頼と停止完了を待つ秒数。
@@ -196,19 +208,38 @@ class WorkerClient[Output]:
 
     # --- 内部 -----------------------------------------------------------------------
 
-    def _write(self, data: bytes) -> None:
+    def _write(self, data: bytes, *, timeout: float | None = None) -> None:
+        """ワーカーの標準入力へ書く。timeout を渡すと、その秒数のうちに書き始められないとき
+        TimeoutError（OSError の一種）にする。timeout つきで書くデータは 4096 バイト以下にする
+        （WorkerProcess.write の決まり）。
+        """
         if self._worker is None:
             raise OSError("ワーカーは起動していません")
-        self._worker.write(data)
+        self._worker.write(data, timeout=timeout)
+
+    def _note_if_ended(self, item: Output | WorkerExited) -> None:
+        """停止完了か WorkerExited なら、ワーカーの出力が終わったと覚える。"""
+        if isinstance(item, WorkerExited) or self._is_stopped(item):
+            self._ended = True
 
     def _wait_for_stopped(self, timeout_seconds: float) -> Output | None:
-        """停止完了が来るか、出力が終わるか、時間が切れるまで、メッセージを読み捨てて待つ。"""
+        """停止完了が来るか、出力が終わるか、時間が切れるまで、メッセージを読み捨てて待つ。
+
+        別のスレッドが get でメッセージを取り、停止完了か WorkerExited がそちらへ渡ったときは、
+        ここには届かない。そのため、短い間隔で「終わりを見たか」を確かめ、時間いっぱい待たない。
+        """
         deadline = time.monotonic() + timeout_seconds
         while True:
-            try:
-                item = self._messages.get(timeout=max(deadline - time.monotonic(), 0.0))
-            except queue.Empty:
+            if self._ended:
                 return None
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                return None
+            try:
+                item = self._messages.get(timeout=min(remaining, _ENDED_CHECK_SECONDS))
+            except queue.Empty:
+                continue
+            self._note_if_ended(item)
             if isinstance(item, WorkerExited):
                 return None
             if self._is_stopped(item):
@@ -246,6 +277,7 @@ class WorkerClient[Output]:
         except Exception:
             # 想定外の例外でも、スレッドを黙って終わらせない（WorkerExited を必ず届ける）。
             protocol_error = True
-        self._messages.put(
-            WorkerExited(returncode=worker.wait(timeout=5), protocol_error=protocol_error)
-        )
+        # 出力が壊れたときは、子がまだ動いていることがある。終わるのを待たずに知らせる
+        # （終わりの確認で 5 秒止めない。子を止めるのは、受け取った側）。
+        returncode = worker.poll() if protocol_error else worker.wait(timeout=5)
+        self._messages.put(WorkerExited(returncode=returncode, protocol_error=protocol_error))

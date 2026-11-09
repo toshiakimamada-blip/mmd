@@ -109,6 +109,23 @@ class Tuning:
     translation_beam_size: int = _limits(1, 10)
     # 処理を待つ音声の長さ（秒）がこの値を超えたら、警告のログを出す。音声は捨てず、メモリに溜める。
     interpreter_backlog_warning_seconds: float = _limits(10.0, 7200.0)
+    # 通訳ワーカーが準備完了になるまで待つ秒数（AI モデルの読み込みを含む）。
+    interpreter_start_timeout_seconds: float = _limits(10.0, 1800.0)
+    # 通訳ワーカーの起動の失敗または異常終了が、この回数だけ続いたら、起動し直しをやめる。
+    # やめたときは、会議を中断にする。
+    interpreter_max_failures: int = _limits(1, 20)
+    # 通訳ワーカーを起動し直す前に待つ秒数。
+    interpreter_restart_wait_seconds: float = _limits(0.0, 60.0)
+    # この秒数以上動き続けた通訳ワーカーが止まったときは、失敗の回数を数え直す。
+    interpreter_stable_seconds: float = _limits(0.0, 3600.0)
+    # 会議の終了と中断で、待っている音声を通訳ワーカーへ渡し切るまで待つ秒数。
+    meeting_end_flush_timeout_seconds: float = _limits(1.0, 600.0)
+    # 会議の終了と中断で、終了処理の依頼のあと、字幕が 1 件も届かないまま、この秒数がたったら、
+    # 通訳ワーカーが固まったとみなして止める。
+    meeting_end_finish_idle_seconds: float = _limits(1.0, 600.0)
+    # 会議の開始から、音声の WebSocket が 1 本も張られないまま、この秒数がたったら、
+    # 画面との接続が切れたとみなして、会議を中断にする（通訳ワーカーを止めて、進行中の枠を空ける）。
+    audio_connect_timeout_seconds: float = _limits(5.0, 600.0)
     # 翻訳モデルを実行基盤の形式へ変換するときの量子化。選べる値は TRANSLATION_QUANTIZATIONS。
     # 変換後のファイルの大きさと、翻訳の速さと質に効く。変えると、変換し直しになる。
     translation_quantization: str = _choices(*TRANSLATION_QUANTIZATIONS)

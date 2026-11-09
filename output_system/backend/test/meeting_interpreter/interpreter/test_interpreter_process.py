@@ -578,3 +578,121 @@ class TestStopWhenTheWorkerFreezes:
         assert stopped is None
         assert elapsed < 10.0
         assert process_group_members(pid) == []
+
+
+class TestFinishAndStopTimingForTheMeetingManager:
+    """会議管理部が使う、終了処理と停止の時間の区切り。"""
+
+    def test_should_give_up_finish_in_time_when_the_worker_does_not_read(self, client):
+        """
+        【テスト対象】InterpreterClient.finish(timeout_seconds=)（固まったワーカー）
+        【テスト内容】ワーカーを SIGSTOP で止め、別のスレッドで音声を送り続けて、送信がパイプの
+                    満杯で止まった状態にする。そこで finish(timeout_seconds=0.5) を呼ぶ
+        【期待結果】finish が約 0.5 秒で TimeoutError（OSError の一種）になって戻ること。
+                    そのあとの stop が、ワーカーのプロセスを残さず片付けること
+        """
+        client.start(fake_start(), timeout_seconds=START_TIMEOUT)
+        pid = client.pid
+        assert pid is not None
+
+        def keep_sending() -> None:
+            with contextlib.suppress(OSError):
+                while True:
+                    client.send_audio(silence(1.0), START)
+
+        sender = threading.Thread(target=keep_sending, daemon=True)
+        try:
+            os.killpg(pid, signal.SIGSTOP)
+            sender.start()
+            time.sleep(1.5)
+            assert sender.is_alive(), "パイプが満杯になり、送信が止まっているはず"
+
+            started = time.monotonic()
+            with pytest.raises(TimeoutError):
+                client.finish(timeout_seconds=0.5)
+            elapsed = time.monotonic() - started
+
+            client.stop(timeout_seconds=0.5)
+        finally:
+            with contextlib.suppress(ProcessLookupError):
+                os.killpg(pid, signal.SIGKILL)
+            sender.join(timeout=10)
+
+        assert elapsed < 5.0
+        assert not sender.is_alive()
+        assert process_group_members(pid) == []
+
+    def test_should_finish_normally_when_the_worker_reads(self, client):
+        """
+        【テスト対象】InterpreterClient.finish(timeout_seconds=)（普通のワーカー）
+        【テスト内容】timeout 付きで終了処理を依頼し、停止完了まで読む
+        【期待結果】停止完了が届き、外へ通信しようとした回数が 0 であること
+        """
+        client.start(fake_start(), timeout_seconds=START_TIMEOUT)
+
+        client.finish(timeout_seconds=2.0)
+        collected = read_until(client, (Stopped,))
+
+        stopped = collected[-1]
+        assert isinstance(stopped, Stopped)
+        assert stopped.network_attempts == 0
+
+    def test_should_not_wait_for_the_timeout_in_stop_after_worker_exited_was_read(self, client):
+        """
+        【テスト対象】InterpreterClient.stop（WorkerExited を受け取ったあと）
+        【テスト内容】終了処理を依頼し、get で停止完了と WorkerExited を読んでから、
+                    stop(timeout_seconds=5.0) を呼ぶ
+        【期待結果】WorkerExited をすでに受け取っているので、5 秒を待たず 2 秒以内に戻ること
+        """
+        client.start(fake_start(), timeout_seconds=START_TIMEOUT)
+        client.finish()
+        read_until(client, (WorkerExited,))
+
+        started = time.monotonic()
+        stopped = client.stop(timeout_seconds=5.0)
+        elapsed = time.monotonic() - started
+
+        assert stopped is None
+        assert elapsed < 2.0
+
+    def test_should_report_worker_exited_at_once_when_the_output_breaks_and_the_child_lives(
+        self, tmp_path
+    ):
+        """
+        【テスト対象】InterpreterClient の出力の読み取り（壊れた出力のあとも子が動いているとき）
+        【テスト内容】準備完了を返したあと、壊れた出力を書いて、そのまま眠り続ける偽のワーカーを
+                    起動する
+        【期待結果】子が終わるのを待たず、2 秒以内に WorkerExited（protocol_error）が届くこと。
+                    stop で、子のプロセスは残らない（子を止めるのは受け取った側の役目）
+        """
+        script = tmp_path / "broken_and_alive_worker.py"
+        script.write_text(
+            f"#!{sys.executable}\n"
+            "import os, struct, sys, time\n"
+            "fd = int(sys.argv[sys.argv.index('--output-fd') + 1])\n"
+            "sys.stdin.buffer.read1(1)\n"
+            "def send(payload):\n"
+            "    data = struct.pack('>IB', len(payload), 1) + payload\n"
+            "    while data:\n"
+            "        data = data[os.write(fd, data):]\n"
+            'send(b\'{"type":"ready","load_seconds":0.1,"trace_id":"t"}\')\n'
+            'send(b\'{"type":"not-a-message"}\')\n'
+            "time.sleep(60)\n"
+        )
+        script.chmod(0o755)
+        broken = InterpreterClient(python=script)
+        try:
+            broken.start(fake_start(), timeout_seconds=START_TIMEOUT)
+            pid = broken.pid
+
+            started = time.monotonic()
+            exited = broken.get(timeout=MESSAGE_TIMEOUT)
+            elapsed = time.monotonic() - started
+            broken.stop(timeout_seconds=0.5)
+        finally:
+            broken.stop(timeout_seconds=0.2)
+
+        assert isinstance(exited, WorkerExited)
+        assert exited.protocol_error is True
+        assert elapsed < 2.0
+        assert pid is not None and process_group_members(pid) == []

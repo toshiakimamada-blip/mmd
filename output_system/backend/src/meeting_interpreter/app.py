@@ -10,7 +10,7 @@
 - それ以外: 画面のファイル（配信部）
 """
 
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Awaitable, Callable
 from contextlib import asynccontextmanager
 from typing import Final
 
@@ -19,7 +19,7 @@ from fastapi.responses import JSONResponse
 
 from . import APP_NAME
 from .access import AccessControlMiddleware
-from .api import health, models
+from .api import health, meetings, models, ws
 from .errors import (
     ROUTE_NOT_FOUND,
     UnhandledErrorMiddleware,
@@ -29,13 +29,19 @@ from .errors import (
 from .frontend import INDEX_FILE, FrontendFiles
 from .logs import STARTUP_LOGGER, log_error
 from .logs.asgi import TraceIdMiddleware
+from .meetings.manager import MeetingManager
+from .meetings.session import SessionPolicy
+from .meetings.workers import InterpreterLauncher, ProductionLauncher
 from .models.conversion.service import TranslationConverter
 from .models.download import HttpsDownloader
 from .models.fetch import ModelFetcher
-from .models.manager import ModelManager
+from .models.manager import ModelManager, ModelStatus, ModelStatusNotifier
 from .models.store import ModelStore
+from .notify.hub import NotificationHub
 from .records.database import RecordDatabase
 from .records.errors import RecordSchemaError
+from .records.models import Meeting
+from .records.store import RecordStore
 from .security_headers import SecurityHeadersMiddleware
 from .settings import Settings
 
@@ -66,6 +72,7 @@ def _register_api_routes(app: FastAPI) -> None:
     """
     app.include_router(health.router, prefix="/api")
     app.include_router(models.router, prefix="/api")
+    app.include_router(meetings.router, prefix="/api")
     # 存在しない /api の経路。画面のファイルへ落ちないよう、明示して受ける。
     app.add_api_route("/api", _route_not_found, methods=_ALL_METHODS, include_in_schema=False)
     app.add_api_route(
@@ -78,6 +85,7 @@ def _register_websocket_routes(app: FastAPI) -> None:
 
     個別の WebSocket の経路は、末尾の「存在しない経路」の受け皿より先に登録する。
     """
+    app.include_router(ws.router, prefix="/ws")
     # 存在しない /ws の経路。HTTP の要求にはエラーを返し、WebSocket の接続は閉じる。
     for path in ("/ws", "/ws/{path:path}"):
         app.add_api_route(path, _route_not_found, methods=_ALL_METHODS, include_in_schema=False)
@@ -99,12 +107,14 @@ def _mount_frontend(app: FastAPI, settings: Settings) -> None:
     app.mount("/", FrontendFiles(directory=settings.static_dir, check_dir=False), name="frontend")
 
 
-def build_model_manager(settings: Settings) -> ModelManager:
+def build_model_manager(
+    settings: Settings, notifier: ModelStatusNotifier | None = None
+) -> ModelManager:
     """本番のモデル管理部を組み立てる（開始はしない）。
 
     外向きの通信を行う部品（HttpsDownloader）を、ここでモデル管理部へ渡す。通信を行うのは、
     アプリでこの 1 つだけ。翻訳モデルの変換（別のプロセスで動き、外へ通信しない）も接続する。
-    通知の送り先は、通知の仕組みを作る作業で渡す（いまは何もしない発行先）。
+    準備状況の変化は、notifier（通知部）へ発行する。
     """
     store = ModelStore(settings.models_dir)
     fetcher = ModelFetcher(store, HttpsDownloader())
@@ -114,7 +124,9 @@ def build_model_manager(settings: Settings) -> ModelManager:
         python=settings.conversion_python,
         quantization=settings.tuning.translation_quantization,
     )
-    return ModelManager(settings.model_catalog, store, fetcher, conversion=conversion)
+    return ModelManager(
+        settings.model_catalog, store, fetcher, conversion=conversion, notifier=notifier
+    )
 
 
 @asynccontextmanager
@@ -141,23 +153,41 @@ async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
         log_error("RECORD_SCHEMA_UNSUPPORTED", "startup")
         STARTUP_LOGGER.error(str(error))
         raise
+    meeting_manager: MeetingManager = app.state.meeting_manager
+    hub: NotificationHub = app.state.notification_hub
     try:
         manager.start()
         try:
             yield
         finally:
+            # 進行中の会議を閉じる（字幕の保存に記録データベースが要るため、データベースより先）。
+            await meeting_manager.shutdown()
+            await hub.close_all()
             await manager.shutdown()
     finally:
         await database.close()
 
 
-def create_app(settings: Settings, *, model_manager: ModelManager | None = None) -> FastAPI:
+def create_app(
+    settings: Settings,
+    *,
+    model_manager: ModelManager | None = None,
+    interpreter_launcher: InterpreterLauncher | None = None,
+    meeting_policy: SessionPolicy | None = None,
+    on_meeting_ended: Callable[[Meeting], Awaitable[None]] | None = None,
+) -> FastAPI:
     """アプリサーバーを組み立てる。
 
     Args:
         settings: 起動の時点で読み込んだ設定。
         model_manager: モデル管理部。省略すると、設定から本番のものを組み立てる。
             テストが、通信しない部品の管理部を渡すために使う。
+        interpreter_launcher: 通訳ワーカーの起動の入口。省略すると、本物の AI モデルで動かす。
+            テストが、偽のエンジンで動かす入口を渡すために使う。
+        meeting_policy: 会議のセッションの、時間と回数の決め。省略すると、既定の決め。
+            テストが、短い時間を渡すために使う。
+        on_meeting_ended: 会議を終了して要約作成中になったあとに呼ぶ。作成ジョブ管理部への口。
+            省略すると、何もしない。
 
     Returns:
         経路をすべて登録した FastAPI のアプリ。
@@ -172,9 +202,22 @@ def create_app(settings: Settings, *, model_manager: ModelManager | None = None)
         openapi_url="/api/openapi.json",
     )
     app.state.settings = settings
-    app.state.model_manager = model_manager or build_model_manager(settings)
+    # 通知部。AI モデルの準備状況も、会議の字幕も、この 1 つから画面へ送る。
+    notification_hub = NotificationHub()
+    app.state.notification_hub = notification_hub
+    app.state.model_manager = model_manager or build_model_manager(
+        settings, notifier=notification_hub
+    )
     # 記録データベースは、起動のとき（_lifespan）に開く。組み立てるだけでは、ディスクに触れない。
     app.state.record_database = RecordDatabase(settings.records_dir)
+    app.state.meeting_manager = MeetingManager(
+        store=RecordStore(app.state.record_database),
+        publisher=notification_hub,
+        launcher=interpreter_launcher or ProductionLauncher(settings),
+        models_ready=lambda: app.state.model_manager.snapshot.status is ModelStatus.READY,
+        policy=meeting_policy or SessionPolicy.from_tuning(settings.tuning),
+        on_meeting_ended=on_meeting_ended,
+    )
 
     register_exception_handlers(app)
     # add_middleware は、あとから足したものほど外側になる。内側から順に足す。

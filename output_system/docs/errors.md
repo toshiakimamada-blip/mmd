@@ -156,3 +156,22 @@ FastAPI が自動で返す応答も、共通の形に変えています。
 - 記録データベースの構造が、このアプリの版では使えないときは、起動時に `RECORD_SCHEMA_UNSUPPORTED` をエラーログに出します（画面には出しません）。
 
 各機能のコードは、その機能の作業で足します。
+
+### 会議の開始と終了（MEETING_*・MODEL_NOT_READY・SYSTEM_INTERPRETER_UNAVAILABLE）
+
+会議管理部（`backend/src/meeting_interpreter/meetings/`）が返すエラーです。文言に、タイトルなど会議の内容は入れません。
+
+| コード | 分類 | 何が起きたか |
+|---|---|---|
+| `MEETING_TITLE_INVALID` | 入力エラー（422） | タイトルが 100 文字を超える、または改行を含む（空白だけのタイトルは未入力として扱い、エラーにしない） |
+| `MEETING_AUDIO_SOURCE_INVALID` | 入力エラー（422） | 音声の出どころが、`system_audio` でも `microphone` でもない |
+| `MODEL_NOT_READY` | 業務エラー（409） | AI モデルが準備完了でないのに、会議を開始しようとした |
+| `MEETING_ALREADY_RUNNING` | 業務エラー（409） | 通訳中の会議があるのに、新しい会議を開始しようとした |
+| `MEETING_NOT_FOUND` | 業務エラー（404） | 会議番号に合う会議が無い（終了の要求、音声の接続） |
+| `MEETING_NOT_RUNNING` | 業務エラー（409） | 通訳中でない会議へ、音声を送ろうとした（音声の接続は 403 で断られる） |
+| `MEETING_AUDIO_ALREADY_CONNECTED` | 業務エラー（409） | この会議には、すでに音声の接続がある（2 本目の接続は 403 で断られる） |
+| `MEETING_INVALID_TRANSITION` | 業務エラー（409） | 遷移規則の表に無い遷移を求められた |
+| `SYSTEM_INTERPRETER_UNAVAILABLE` | システムエラー（通知で届く） | 通訳ワーカーが止まり、起動し直せなかったため、会議を中断にした。`error.occurred` の通知で届く |
+
+- 音声の WebSocket の接続を断る 3 つ（`MEETING_NOT_FOUND`・`MEETING_NOT_RUNNING`・`MEETING_AUDIO_ALREADY_CONNECTED`）は、接続を受け付ける前に起こすため、画面には HTTP の 403 として見えます。エラーコードは、サーバーのエラーログにだけ出ます。
+- エラーの通知（`error.occurred`）は、`/ws/events` で届きます。項目は `meeting_id`・`category`・`code`・`message`・`action` です。画面は、`code` から画面側の文言を引きます。
