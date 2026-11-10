@@ -97,6 +97,56 @@ class TestProcessingLog:
         assert "peak_memory_mb" not in entry
         assert entry["dropped_field_count"] == 1
 
+    def test_should_write_the_job_items_when_given_and_omit_them_otherwise(self, capsys):
+        """
+        【テスト対象】log_processing（作成ジョブの記録の項目）
+        【テスト内容】種類・状況・待った時間・起動の時間・読み込みの時間を渡す。渡さない記録も出す
+        【期待結果】渡した項目だけが出ること。渡さない記録には、これらの項目が出ない
+        """
+        log_processing(
+            "job_finished",
+            meeting_id="m-001",
+            job_type="summary",
+            job_status="succeeded",
+            wait_ms=1500.5,
+            startup_ms=40000,
+            load_ms=35000.25,
+        )
+        log_processing("app_started")
+
+        first, second = read_lines(capsys)
+        assert (first["job_type"], first["job_status"]) == ("summary", "succeeded")
+        assert (first["wait_ms"], first["startup_ms"], first["load_ms"]) == (
+            1500.5,
+            40000,
+            35000.25,
+        )
+        for name in ("job_type", "job_status", "wait_ms", "startup_ms", "load_ms"):
+            assert name not in second
+
+    @pytest.mark.parametrize(
+        ("name", "bad"),
+        [
+            ("job_type", "要約の本文"),
+            ("job_status", "Summary Text"),
+            ("wait_ms", -1),
+            ("wait_ms", float("nan")),
+            ("startup_ms", "40"),
+            ("load_ms", True),
+        ],
+    )
+    def test_should_drop_a_job_item_that_does_not_have_the_expected_shape(self, capsys, name, bad):
+        """
+        【テスト対象】log_processing（作成ジョブの記録の項目の検証）
+        【テスト内容】日本語の文・空白を含む文字列・負の数・NaN・数字の文字列・真偽値を渡す
+        【期待結果】出力されず、捨てた数に数えられること（会議の内容が入り込めない）
+        """
+        log_processing("job_finished", **{name: bad})
+
+        (entry,) = read_lines(capsys)
+        assert name not in entry
+        assert entry["dropped_field_count"] == 1
+
     def test_should_always_include_the_required_items_as_null_when_not_given(self, capsys):
         """
         【テスト対象】log_processing（項目を渡さないとき）

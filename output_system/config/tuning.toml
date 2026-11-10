@@ -94,6 +94,10 @@ disk_free_warning_gigabytes = 1.0
 # 文章生成モデル（Qwen3-4B）の文脈の長さに収まる量にする。質問の作成時間の目標にも効く。
 generation_input_max_chars = 4000
 
+# 生成ワーカーが準備完了になるまで待つ秒数。文章生成モデル（約 2.5GB）の読み込みを含む。
+# 実測は 31〜39 秒（docs/generation.md）。初回のディスクの読み込みは、これより長い。
+generation_start_timeout_seconds = 300.0
+
 # 生成ワーカーに割り当てる CPU のスレッド数。
 # 動かす PC は 8 スレッド。会議をしていないときは、全部を使う。
 generation_cpu_threads_normal = 8

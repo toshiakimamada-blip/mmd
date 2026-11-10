@@ -320,3 +320,46 @@ describe('ERROR_WORDINGS for meetings', () => {
     expect(wording.action).toContain('要約');
   });
 });
+
+describe('ERROR_WORDINGS for summary and question jobs', () => {
+  const JOB_CODES = [
+    'SUMMARY_GENERATION_FAILED',
+    'SUMMARY_WORKER_STOPPED',
+    'SUMMARY_WORKER_START_FAILED',
+    'SUMMARY_SAVE_FAILED',
+    'QUESTION_GENERATION_FAILED',
+    'QUESTION_WORKER_STOPPED',
+    'QUESTION_WORKER_START_FAILED',
+    'QUESTION_SAVE_FAILED',
+  ];
+
+  /**
+   * 【テスト対象】ERROR_WORDINGS（要約と質問の作成の失敗のコード）
+   * 【テスト内容】作成ジョブ管理部が返す 8 つのコードが、一覧にあるかを調べる
+   * 【期待結果】どれも一覧にあり、文言がコードごとに異なること（取り違えて案内しない）
+   */
+  it('should register a distinct wording for every code the job manager returns', () => {
+    const messages = JOB_CODES.map((code) => {
+      expect(Object.keys(ERROR_WORDINGS), code).toContain(code);
+      return ERROR_WORDINGS[code].message;
+    });
+
+    expect(new Set(messages).size).toBe(JOB_CODES.length);
+  });
+
+  /**
+   * 【テスト対象】ERROR_WORDINGS（次に行う操作）
+   * 【テスト内容】要約の失敗と質問の失敗の案内を調べる
+   * 【期待結果】要約は会議の記録から作り直す案内、質問はもう一度ボタンを押す案内であること
+   */
+  it('should guide the user to retry with the button that matches the job kind', () => {
+    for (const code of JOB_CODES) {
+      const action = ERROR_WORDINGS[code].action;
+      if (code.startsWith('SUMMARY_')) {
+        expect(action, code).toContain('要約を作るボタン');
+      } else {
+        expect(action, code).toContain('質問を作るボタン');
+      }
+    }
+  });
+});

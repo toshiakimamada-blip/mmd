@@ -268,6 +268,7 @@ class MeetingSession:
         clock: Callable[[], datetime] = lambda: datetime.now(UTC),
         on_meeting_ended: Callable[[Meeting], Awaitable[None]] | None = None,
         on_finished: Callable[["MeetingSession"], None] | None = None,
+        on_interpreter_stopped: Callable[[str], None] | None = None,
     ) -> None:
         """
         Args:
@@ -279,6 +280,9 @@ class MeetingSession:
             clock: アプリサーバーの時計。音声が届いた日時と、終了日時に使う。
             on_meeting_ended: 会議を終了し、要約作成中になったあとに呼ぶ。作成ジョブ管理部への口。
             on_finished: セッションが終わったあとに呼ぶ。会議管理部が、進行中の枠を空ける。
+            on_interpreter_stopped: 通訳ワーカーを止めたあとに、会議番号を渡して 1 回だけ呼ぶ
+                （会議の終了でも中断でも）。作成ジョブ管理部が、後回しにした要約を再開できる
+                ようにする口。要約を始める呼び出し（on_meeting_ended）より先に呼ぶ。
         """
         self._meeting = meeting
         self._store = store
@@ -288,6 +292,8 @@ class MeetingSession:
         self._clock = clock
         self._on_meeting_ended = on_meeting_ended
         self._on_finished = on_finished
+        self._on_interpreter_stopped = on_interpreter_stopped
+        self._interpreter_stopped_notified = False
 
         self._events: asyncio.Queue[_Event] = asyncio.Queue()
         self._audio: collections.deque[tuple[bytes, datetime]] = collections.deque()
@@ -491,6 +497,7 @@ class MeetingSession:
             handle = self._handle
             if handle is not None and not handle.torn_down:
                 await self._teardown(handle)
+            self._notify_interpreter_stopped()
             if self._result.done() and not self._result.cancelled():
                 self._result.exception()  # 取り出されなかった例外の警告を出さない
             if self._on_finished is not None:
@@ -873,6 +880,7 @@ class MeetingSession:
             handle = self._handle
             if handle is not None:
                 await self._teardown(handle)
+            self._notify_interpreter_stopped()
             self._publish_error(error)
             self._result.set_exception(error)
             return
@@ -880,6 +888,9 @@ class MeetingSession:
         handle = self._handle
         if handle is not None:
             await self._teardown(handle)
+        # 通訳ワーカーを止めた。要約を始める呼び出しより先に知らせる（後回しにした要約の再開と、
+        # この会議の要約の開始が、通訳中の会議が無い状態で決まるように）。
+        self._notify_interpreter_stopped()
 
         self._meeting = meeting
         log_processing(
@@ -907,6 +918,21 @@ class MeetingSession:
             and self._on_meeting_ended is not None
         ):
             await self._call_on_meeting_ended(meeting)
+
+    def _notify_interpreter_stopped(self) -> None:
+        """通訳ワーカーを止めたことを、1 回だけ知らせる。知らせ先の失敗で、後始末を止めない。"""
+        if self._interpreter_stopped_notified or self._on_interpreter_stopped is None:
+            return
+        self._interpreter_stopped_notified = True
+        try:
+            self._on_interpreter_stopped(self.meeting_id)
+        except Exception as error:  # noqa: BLE001 (知らせの失敗は、種類だけを残して続ける)
+            log_error(
+                "SYSTEM_UNEXPECTED_ERROR",
+                COMPONENT,
+                meeting_id=self.meeting_id,
+                exception_type=type(error).__name__,
+            )
 
     async def _call_on_meeting_ended(self, meeting: Meeting) -> None:
         """要約を始める呼び出し。失敗しても、会議の終了の結果は変えない。"""
