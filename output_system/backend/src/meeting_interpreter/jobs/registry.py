@@ -143,6 +143,14 @@ class JobRegistry:
             record = self._find_active(meeting_id, kind)
             return None if record is None else record.snapshot()
 
+    def active_records(self) -> list[JobRecord]:
+        """待機中と作成中のジョブの全体の様子。受け付けた順。作成ジョブ管理部の中だけで使う。
+
+        返す値は、変更してはいけない（record と同じ）。
+        """
+        with self._lock:
+            return sorted(self._active.values(), key=lambda record: record.sequence)
+
     def record(self, job_id: str) -> JobRecord | None:
         """作成ジョブの全体の様子。終わったジョブは None。作成ジョブ管理部の中だけで使う。
 

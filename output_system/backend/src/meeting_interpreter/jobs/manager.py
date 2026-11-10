@@ -1,0 +1,557 @@
+"""作成ジョブ管理部の本体。要約と質問の作成を、決めた順に 1 件ずつ、生成ワーカーで実行する。
+
+やること
+- 作成の依頼を受け付ける（submit_summary・submit_questions）。同じ会議の同じ種類で、待機中か作成中の
+  ジョブがあれば、新しく作らず、そのジョブを返す（重複を防ぐ規約）
+- 実行できる作成ジョブが出たら、生成ワーカーを起動して依頼し、結果を受け取る。実行できる作成ジョブが
+  無くなったら、ワーカーを止める。後回しにした要約だけが残る間は、止めたままにする
+- 結果を、結果の受け取り先（outcomes.py）へ渡す。保存してから、完了にして通知する
+- 会議の開始と、通訳ワーカーの停止の知らせを受けて、実行できる作成ジョブを決め直す
+
+実行順の規則は policy.py にある。この部は、規則の答えに従って動く。
+
+構成
+- 管理のタスク（_run）が 1 つ。出来事（受け付け・会議の知らせ・ワーカーのメッセージ）が来るたびに、
+  現在の状態から、やるべきことを決め直す（_reconcile）。決め直しは、何回行っても同じ結果になる
+- ブロックする呼び出し（ワーカーの起動と停止、依頼の書き込み）は、asyncio.to_thread に出す。
+  ワーカーの出力は、読む専用のスレッドが読み、管理のタスクの待ち行列へ渡す
+- 作成ジョブの状態（registry.py）は、鍵で守る。有無の取得は、どのスレッドからでも答えられる。
+  それ以外の関数は、イベントループの上で呼ぶ（通知部が、イベントループの上で呼ぶ決まりのため）
+
+作成ジョブは保存しない（ADR-12）。ブラウザーを閉じても、作成ジョブは止まらない。この部は、
+画面との接続を持たない。結果は、接続のあるなしにかかわらず、受け取り先へ渡る。
+会議の内容（字幕・中間メモ・要約・質問）は、ログに出さない。
+"""
+
+import asyncio
+import threading
+import time
+from collections.abc import Callable, Sequence
+from dataclasses import dataclass
+from datetime import UTC, datetime
+from typing import Final
+
+from ..errors import AppError
+from ..generation.client import GenerationClient
+from ..generation.inputs import QuestionInput
+from ..generation.protocol import (
+    CpuApplied,
+    CpuMode,
+    Memo,
+    Progress,
+    Questions,
+    Ready,
+    Stopped,
+    Summary,
+    WorkerError,
+)
+from ..logs import log_error
+from ..meetings.session import ERROR_OCCURRED, describe_worker_exit, error_payload
+from ..tuning import Tuning
+from ..worker_client import WorkerExited
+from .errors import COMPONENT, JobFailure, error_code, job_error
+from .models import (
+    JobKind,
+    JobRecord,
+    JobSnapshot,
+    JobStatus,
+    QuestionPayload,
+    SummaryPayload,
+)
+from .notices import JobNotifier, JobPublisher
+from .outcomes import JobOutcomeHandler, NullOutcomeHandler
+from .policy import JobView, Situation, needs_worker, pick_next
+from .registry import JobRegistry, Registration
+from .workers import GenerationLauncher
+
+# 出力を読むスレッドが、ワーカーのメッセージを待つ間隔（秒）。止める合図を確かめる間隔でもある。
+_READ_POLL_SECONDS: Final = 0.25
+
+# ワーカーを止めるとき、停止完了を待つ秒数の既定。強制終了の猶予 1 秒が別に付く。
+STOP_TIMEOUT_SECONDS: Final = 2.0
+
+
+@dataclass(frozen=True, slots=True)
+class JobPolicy:
+    """作成ジョブ管理部の、時間の決め。既定値は、調整値（config/tuning.toml）が持つ。"""
+
+    # 生成ワーカーが準備完了になるまで待つ秒数（文章生成モデルの読み込みを含む）。
+    worker_start_timeout_seconds: float
+    # ワーカーを止めるとき、停止完了を待つ秒数。強制終了の猶予 1 秒が別に付く。
+    stop_timeout_seconds: float = STOP_TIMEOUT_SECONDS
+
+    @classmethod
+    def from_tuning(cls, tuning: Tuning) -> "JobPolicy":
+        """調整値から作る。"""
+        return cls(worker_start_timeout_seconds=tuning.generation_start_timeout_seconds)
+
+
+@dataclass(slots=True)
+class _Handle:
+    """起動した生成ワーカー 1 つ。クライアントと、出力を読むスレッド。"""
+
+    generation: int
+    client: GenerationClient
+    reader_stop: threading.Event
+    # ワーカーに最後に頼んだ（または起動時に決めた）CPU の割り当て。
+    cpu_mode: CpuMode
+    reader: threading.Thread | None = None
+    torn_down: bool = False
+
+
+# --- 管理のタスクが処理する出来事 -----------------------------------------------------------
+
+
+@dataclass(frozen=True, slots=True)
+class _Wake:
+    """状態が変わった（受け付け・会議の知らせ）。やるべきことを決め直す。"""
+
+
+@dataclass(frozen=True, slots=True)
+class _FromWorker:
+    """ワーカーからのメッセージ（または出力の終わり）。"""
+
+    generation: int
+    message: object
+
+
+_Event = _Wake | _FromWorker
+
+
+class JobManager:
+    """作成ジョブ管理部。"""
+
+    def __init__(
+        self,
+        *,
+        launcher: GenerationLauncher,
+        publisher: JobPublisher,
+        policy: JobPolicy,
+        outcomes: JobOutcomeHandler | None = None,
+        clock: Callable[[], datetime] = lambda: datetime.now(UTC),
+        monotonic: Callable[[], float] = time.monotonic,
+    ) -> None:
+        """
+        Args:
+            launcher: 生成ワーカーの起動の入口。
+            publisher: 通知の送り先（通知部）。
+            policy: 時間の決め（JobPolicy.from_tuning で調整値から作る）。
+            outcomes: 作成の結果の受け取り先。省略すると、結果を捨てる（保存を行う部をつなぐまで）。
+            clock: アプリサーバーの時計。受け付けた日時に使う。
+            monotonic: 単調増加の時計（秒）。待ち時間の計算に使う。
+        """
+        self._launcher = launcher
+        self._publisher = publisher
+        self._policy = policy
+        self._outcomes: JobOutcomeHandler = outcomes or NullOutcomeHandler()
+        self._monotonic = monotonic
+        self._registry = JobRegistry(
+            listener=JobNotifier(publisher), clock=clock, monotonic=monotonic
+        )
+        self._events: asyncio.Queue[_Event] = asyncio.Queue()
+        # 通訳中の会議の番号。無ければ None。
+        self._interpreting: str | None = None
+        self._handle: _Handle | None = None
+        # ワーカーへ依頼して、結果を待っている作成ジョブの識別子。無ければ None。
+        self._current_id: str | None = None
+        self._generation = 0
+        self._task: asyncio.Task[None] | None = None
+        self._closing = False
+
+    # --- 受け付け -------------------------------------------------------------------
+
+    def submit_summary(self, meeting_id: str, blocks: Sequence[str]) -> Registration:
+        """要約の作成を受け付ける。同じ会議の要約が待機中か作成中なら、新しく作らず、それを返す。
+
+        Args:
+            meeting_id: 会議番号。
+            blocks: 字幕（英語の原文）のブロック。inputs.split_into_blocks で分けたもの。
+
+        Raises:
+            ValueError: ブロックが 0 個のとき（字幕が無い会議の要約は作れない）。
+        """
+        return self._submit(meeting_id, JobKind.SUMMARY, SummaryPayload(tuple(blocks)))
+
+    def submit_questions(self, meeting_id: str, question_input: QuestionInput) -> Registration:
+        """質問の作成を受け付ける。同じ会議の質問が待機中か作成中なら、新しく作らず、それを返す。
+
+        Args:
+            meeting_id: 会議番号。
+            question_input: inputs.build_question_input で組み立てた入力。
+        """
+        return self._submit(meeting_id, JobKind.QUESTIONS, QuestionPayload(question_input))
+
+    def _submit(
+        self, meeting_id: str, kind: JobKind, payload: SummaryPayload | QuestionPayload
+    ) -> Registration:
+        registration = self._registry.register(meeting_id, kind, payload)
+        if registration.created:
+            self._wake()
+        return registration
+
+    # --- 参照（どのスレッドからでも答えられる） -----------------------------------------
+
+    def has_active_job(self, meeting_id: str) -> bool:
+        """会議に、待機中または作成中の作成ジョブがあるか。種類は問わない。"""
+        return self._registry.has_active_job(meeting_id)
+
+    def active_jobs(self, meeting_id: str | None = None) -> list[JobSnapshot]:
+        """待機中と作成中の作成ジョブ。受け付けた順。会議番号を渡すと、その会議のものだけ。"""
+        return self._registry.active_jobs(meeting_id)
+
+    # --- 会議の知らせ ---------------------------------------------------------------
+
+    def meeting_started(self, meeting_id: str) -> None:
+        """会議が通訳中になった。以後、要約の新しいブロックを始めない。
+
+        会議管理部の開始の口から呼ぶ。イベントループの上で呼ぶ。
+        """
+        self._interpreting = meeting_id
+        self._wake()
+
+    def interpreter_stopped(self, meeting_id: str) -> None:
+        """会議の通訳ワーカーを止めた（会議の終了または中断）。要約を始められる。
+
+        通訳ワーカーを止めたあとに呼ぶこと。2 つのワーカーのメモリが重ならないようにするため。
+        イベントループの上で呼ぶ。
+        """
+        if self._interpreting == meeting_id:
+            self._interpreting = None
+            self._wake()
+
+    # --- 開始と停止 -----------------------------------------------------------------
+
+    def start(self) -> None:
+        """管理のタスクを始める。イベントループの上で呼ぶ。"""
+        if self._task is None:
+            self._task = asyncio.create_task(self._run(), name="job-manager")
+
+    async def shutdown(self) -> None:
+        """アプリの停止。管理のタスクを止め、生成ワーカーを止める。作成中のジョブは、そのまま消える。
+
+        作成ジョブは保存しない。要約作成中の会議は、次の起動の復旧が、要約失敗に直す。
+        """
+        self._closing = True
+        task, self._task = self._task, None
+        if task is not None:
+            task.cancel()
+            await asyncio.gather(task, return_exceptions=True)
+        handle = self._handle
+        if handle is not None:
+            await self._teardown(handle)
+
+    # --- 管理のタスク ---------------------------------------------------------------
+
+    def _wake(self) -> None:
+        self._events.put_nowait(_Wake())
+
+    async def _run(self) -> None:
+        """出来事を 1 つずつ処理し、そのたびに、やるべきことを決め直す。"""
+        while True:
+            event = await self._events.get()
+            try:
+                if isinstance(event, _FromWorker):
+                    await self._on_worker_message(event)
+                await self._reconcile()
+            except asyncio.CancelledError:
+                raise
+            except Exception as error:  # noqa: BLE001 (想定外の失敗は、種類だけを残して続ける)
+                log_error(
+                    "SYSTEM_UNEXPECTED_ERROR",
+                    COMPONENT,
+                    exception_type=type(error).__name__,
+                )
+
+    def _situation(self) -> Situation:
+        """規則の入力。待機中と作成中の作成ジョブと、通訳中の会議。"""
+        jobs = tuple(
+            JobView(
+                job_id=record.job_id,
+                meeting_id=record.meeting_id,
+                kind=record.kind,
+                running=record.status is JobStatus.RUNNING,
+                sequence=record.sequence,
+            )
+            for record in self._registry.active_records()
+        )
+        return Situation(jobs=jobs, interpreting_meeting_id=self._interpreting)
+
+    async def _reconcile(self) -> None:
+        """現在の状態に合わせて、ワーカーの起動・依頼・割り当て・停止を行う。
+
+        何回呼んでも、同じ結果になる。動作のたびに状態が変わるため、やることが無くなるまで繰り返す。
+        """
+        while not self._closing:
+            situation = self._situation()
+            handle = self._handle
+            if handle is None:
+                chosen = pick_next(situation)
+                if chosen is None:
+                    return
+                await self._launch(chosen)
+                continue
+            if self._current_id is None:
+                chosen = pick_next(situation)
+                if chosen is not None:
+                    await self._dispatch(handle, chosen)
+                    continue
+                if not needs_worker(situation):
+                    await self._teardown(handle)
+                return
+            await self._sync_cpu(handle)
+            return
+
+    # --- 生成ワーカーの起動 ---------------------------------------------------------
+
+    async def _launch(self, chosen: JobView) -> None:
+        """生成ワーカーを起動し、準備完了まで待つ。起動できなければ、選んだ作成ジョブを失敗にする。
+
+        失敗を 1 件ずつ数えるため、待機中の作成ジョブが残っていても、起動をやり直し続けない。
+        """
+        record = self._registry.record(chosen.job_id)
+        if record is None:
+            return
+        cpu_mode = CpuMode.MEETING if self._interpreting is not None else CpuMode.NORMAL
+        client = self._launcher.create_client()
+        try:
+            start = self._launcher.start_message(record.trace_id, cpu_mode)
+            await asyncio.to_thread(
+                client.start, start, timeout_seconds=self._policy.worker_start_timeout_seconds
+            )
+        except Exception as error:  # noqa: BLE001 (起動の失敗は、種類だけを残す)
+            log_error(
+                "SYSTEM_GENERATION_START_FAILED",
+                COMPONENT,
+                meeting_id=record.meeting_id,
+                trace_id=record.trace_id,
+                exception_type=type(error).__name__,
+            )
+            await asyncio.to_thread(client.stop, timeout_seconds=self._policy.stop_timeout_seconds)
+            await self._fail_job(record, JobFailure.WORKER_START_FAILED)
+            return
+        self._attach(client, cpu_mode)
+
+    def _attach(self, client: GenerationClient, cpu_mode: CpuMode) -> None:
+        """起動したワーカーに、出力を読むスレッドをつなぐ。"""
+        self._generation += 1
+        handle = _Handle(
+            generation=self._generation,
+            client=client,
+            reader_stop=threading.Event(),
+            cpu_mode=cpu_mode,
+        )
+        loop = asyncio.get_running_loop()
+        handle.reader = threading.Thread(
+            target=self._read_worker,
+            args=(handle, loop),
+            name=f"generation-read-{handle.generation}",
+            daemon=True,
+        )
+        handle.reader.start()
+        self._handle = handle
+
+    def _read_worker(self, handle: _Handle, loop: asyncio.AbstractEventLoop) -> None:
+        """ワーカーの出力を読み、待ち行列へ渡す（専用のスレッド）。出力の終わりか、止める合図で終わる。"""
+        while not handle.reader_stop.is_set():
+            item = handle.client.get(timeout=_READ_POLL_SECONDS)
+            if item is None:
+                continue
+            try:
+                loop.call_soon_threadsafe(
+                    self._events.put_nowait, _FromWorker(handle.generation, item)
+                )
+            except RuntimeError:
+                return  # イベントループが終わっている。
+            if isinstance(item, WorkerExited):
+                return
+
+    async def _teardown(self, handle: _Handle) -> None:
+        """ワーカーのプロセスを止め、出力を読むスレッドを終わらせる。何回呼んでもよい。
+
+        戻るときに、ワーカーのプロセスは残っていない。停止完了を受け取れたときは、
+        外へ通信を試みた回数を確かめる。
+        """
+        if handle.torn_down:
+            return
+        handle.torn_down = True
+        if self._handle is handle:
+            self._handle = None
+        # 出力を読むスレッドを先に止める。同じ待ち行列を読む stop と、メッセージを取り合わないため。
+        handle.reader_stop.set()
+        reader = handle.reader
+        if reader is not None:
+            await asyncio.to_thread(reader.join, _READ_POLL_SECONDS * 4)
+        stopped = await asyncio.to_thread(
+            handle.client.stop, timeout_seconds=self._policy.stop_timeout_seconds
+        )
+        if isinstance(stopped, Stopped) and stopped.network_attempts != 0:
+            # 外へ通信しない方針の違反。作成ジョブは続けられるため、止めない。
+            log_error("SYSTEM_GENERATION_NETWORK_ATTEMPT", COMPONENT, trace_id=stopped.trace_id)
+
+    async def _sync_cpu(self, handle: _Handle) -> None:
+        """CPU の割り当てを、通訳中の会議の有無に合わせる。会議中は字幕の処理を優先する。"""
+        wanted = CpuMode.MEETING if self._interpreting is not None else CpuMode.NORMAL
+        if handle.cpu_mode is wanted:
+            return
+        try:
+            await asyncio.to_thread(handle.client.set_cpu, wanted)
+        except OSError:
+            return  # ワーカーが終わっている。出力の終わりが続けて届き、そこで扱う。
+        handle.cpu_mode = wanted
+
+    # --- 依頼 -----------------------------------------------------------------------
+
+    async def _dispatch(self, handle: _Handle, chosen: JobView) -> None:
+        """選んだ作成ジョブを、ワーカーへ依頼する。書けなければ、ワーカーが止まったものとして扱う。"""
+        record = self._registry.record(chosen.job_id)
+        if record is None:
+            return
+        self._current_id = record.job_id
+        self._registry.mark_running(record.job_id)
+        try:
+            await asyncio.to_thread(self._write_request, handle, record)
+        except OSError:
+            await self._on_worker_gone(handle, "write_failed")
+
+    @staticmethod
+    def _write_request(handle: _Handle, record: JobRecord) -> None:
+        """依頼をワーカーへ書く。要約は、続きの位置があれば、続きから頼む。"""
+        payload = record.payload
+        if isinstance(payload, SummaryPayload):
+            resume = record.resume
+            handle.client.summarize(
+                payload.blocks,
+                memos=resume.memos if resume is not None else (),
+                next_block=resume.next_block if resume is not None else 0,
+            )
+        else:
+            handle.client.create_questions(payload.question_input)
+
+    # --- ワーカーのメッセージ -------------------------------------------------------
+
+    def _current_record(self) -> JobRecord | None:
+        """ワーカーへ依頼して、結果を待っている作成ジョブ。"""
+        return None if self._current_id is None else self._registry.record(self._current_id)
+
+    async def _on_worker_message(self, event: _FromWorker) -> None:
+        """ワーカーのメッセージ 1 つを処理する。前の世代のメッセージは捨てる。"""
+        handle = self._handle
+        if handle is None or event.generation != handle.generation:
+            return
+        message = event.message
+        record = self._current_record()
+        match message:
+            case Progress():
+                if record is not None:
+                    self._registry.set_progress(
+                        record.job_id, message.done_blocks, message.total_blocks
+                    )
+            case Summary() | Questions():
+                await self._on_result(record, message)
+            case WorkerError():
+                await self._on_worker_error(handle, record, message)
+            case Stopped():
+                await self._on_worker_gone(handle, "stopped_unrequested")
+            case WorkerExited():
+                await self._on_worker_gone(handle, describe_worker_exit(message))
+            case Memo() | CpuApplied() | Ready():
+                pass  # 中間メモは、中断のメッセージが全部まとめて返す。
+
+    async def _on_result(self, record: JobRecord | None, message: Summary | Questions) -> None:
+        """結果を受け取り先へ渡し、保存できたら完了にする。保存できなければ失敗にする。"""
+        if record is None:
+            return
+        try:
+            if isinstance(message, Summary) and record.kind is JobKind.SUMMARY:
+                await self._outcomes.summary_ready(record.meeting_id, message.text)
+            elif isinstance(message, Questions) and record.kind is JobKind.QUESTIONS:
+                await self._outcomes.questions_ready(record.meeting_id, message.pairs)
+            else:
+                # 頼んだ種類と違う結果。起きないはずの食い違い。
+                await self._fail_job(record, JobFailure.GENERATION_FAILED)
+                return
+        except Exception as error:  # noqa: BLE001 (保存の失敗は、種類だけを残して失敗にする)
+            log_error(
+                "SYSTEM_JOB_OUTCOME_FAILED",
+                COMPONENT,
+                meeting_id=record.meeting_id,
+                trace_id=record.trace_id,
+                exception_type=type(error).__name__,
+            )
+            await self._fail_job(record, JobFailure.SAVE_FAILED)
+            return
+        self._current_id = None
+        self._registry.finish(record.job_id, JobStatus.SUCCEEDED)
+
+    async def _on_worker_error(
+        self, handle: _Handle, record: JobRecord | None, message: WorkerError
+    ) -> None:
+        """ワーカーのエラー。回復できるなら、その作成ジョブだけを失敗にして続ける。"""
+        if message.recoverable:
+            if record is not None:
+                await self._fail_job(record, JobFailure.GENERATION_FAILED)
+            return
+        await self._on_worker_gone(handle, message.kind.value)
+
+    async def _on_worker_gone(self, handle: _Handle, how: str) -> None:
+        """ワーカーが止まった。止まり方をエラーログに残し、作成中のジョブを失敗にする。
+
+        待機中のジョブは残る。実行できるジョブがあれば、次の決め直しが、新しいワーカーを起動する。
+
+        Args:
+            handle: 止まったワーカー。
+            how: 止まり方の語（describe_worker_exit など）。exception_type に書く。
+        """
+        if handle.torn_down:
+            return
+        record = self._current_record()
+        log_error(
+            "SYSTEM_GENERATION_WORKER_EXITED",
+            COMPONENT,
+            meeting_id=None if record is None else record.meeting_id,
+            trace_id=None if record is None else record.trace_id,
+            exception_type=how,
+        )
+        await self._teardown(handle)
+        if record is not None:
+            await self._fail_job(record, JobFailure.WORKER_STOPPED)
+
+    # --- 失敗 -----------------------------------------------------------------------
+
+    async def _fail_job(self, record: JobRecord, failure: str) -> None:
+        """作成ジョブを失敗にする。
+
+        要約は、結果の受け取り先に、失敗を保存する依頼を出す（会議の状態を要約失敗にして、失敗理由を
+        保存する）。質問は、会議の状態を変えない。保存を終えてから、失敗にして通知する。
+        """
+        code = error_code(record.kind, failure)
+        error = job_error(record.kind, failure, record.meeting_id)
+        log_error(code, COMPONENT, meeting_id=record.meeting_id, trace_id=record.trace_id)
+        try:
+            if record.kind is JobKind.SUMMARY:
+                await self._outcomes.summary_failed(record.meeting_id, code)
+        except Exception as cause:  # noqa: BLE001 (保存の失敗で、失敗の通知を止めない)
+            log_error(
+                "SYSTEM_JOB_OUTCOME_FAILED",
+                COMPONENT,
+                meeting_id=record.meeting_id,
+                trace_id=record.trace_id,
+                exception_type=type(cause).__name__,
+            )
+        finally:
+            if self._current_id == record.job_id:
+                self._current_id = None
+        self._registry.finish(record.job_id, JobStatus.FAILED, code)
+        self._publish_error(record.meeting_id, error)
+
+    def _publish_error(self, meeting_id: str, error: AppError) -> None:
+        """エラーの通知を送る。通知の送り先の失敗で、作成ジョブを止めない。"""
+        try:
+            self._publisher.publish(ERROR_OCCURRED, error_payload(meeting_id, error))
+        except Exception as cause:  # noqa: BLE001 (通知の失敗は、種類だけを残して続ける)
+            log_error(
+                "SYSTEM_UNEXPECTED_ERROR",
+                COMPONENT,
+                meeting_id=meeting_id,
+                exception_type=type(cause).__name__,
+            )

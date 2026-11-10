@@ -88,6 +88,8 @@ class Tuning:
     subtitle_delay_target_seconds: float = _limits(1.0, 600.0)
     # 文章生成モデルへ一度に渡す字幕の量（文字数）。
     generation_input_max_chars: int = _limits(100, GENERATION_INPUT_MAX_CHARS_LIMIT)
+    # 生成ワーカーが準備完了になるまで待つ秒数（文章生成モデルの読み込みを含む）。
+    generation_start_timeout_seconds: float = _limits(10.0, 1800.0)
     # 生成ワーカーに割り当てる CPU のスレッド数（会議をしていないとき）。
     generation_cpu_threads_normal: int = _limits(1, 256)
     # 生成ワーカーに割り当てる CPU のスレッド数（会議中）。

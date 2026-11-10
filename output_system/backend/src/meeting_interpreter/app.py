@@ -27,6 +27,9 @@ from .errors import (
     register_exception_handlers,
 )
 from .frontend import INDEX_FILE, FrontendFiles
+from .jobs.manager import JobManager, JobPolicy
+from .jobs.outcomes import JobOutcomeHandler
+from .jobs.workers import GenerationLauncher, ProductionGenerationLauncher
 from .logs import STARTUP_LOGGER, log_error
 from .logs.asgi import TraceIdMiddleware
 from .meetings.manager import MeetingManager
@@ -154,14 +157,18 @@ async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
         STARTUP_LOGGER.error(str(error))
         raise
     meeting_manager: MeetingManager = app.state.meeting_manager
+    job_manager: JobManager = app.state.job_manager
     hub: NotificationHub = app.state.notification_hub
     try:
         manager.start()
+        job_manager.start()
         try:
             yield
         finally:
             # 進行中の会議を閉じる（字幕の保存に記録データベースが要るため、データベースより先）。
             await meeting_manager.shutdown()
+            # 作成ジョブ管理部は、会議を閉じたあとに止める（会議の終了の知らせを受け取れるように）。
+            await job_manager.shutdown()
             await hub.close_all()
             await manager.shutdown()
     finally:
@@ -175,6 +182,9 @@ def create_app(
     interpreter_launcher: InterpreterLauncher | None = None,
     meeting_policy: SessionPolicy | None = None,
     on_meeting_ended: Callable[[Meeting], Awaitable[None]] | None = None,
+    generation_launcher: GenerationLauncher | None = None,
+    job_policy: JobPolicy | None = None,
+    job_outcomes: JobOutcomeHandler | None = None,
 ) -> FastAPI:
     """アプリサーバーを組み立てる。
 
@@ -188,6 +198,11 @@ def create_app(
             テストが、短い時間を渡すために使う。
         on_meeting_ended: 会議を終了して要約作成中になったあとに呼ぶ。作成ジョブ管理部への口。
             省略すると、何もしない。
+        generation_launcher: 生成ワーカーの起動の入口。省略すると、本物の AI モデルで動かす。
+            テストが、偽のエンジンで動かす入口を渡すために使う。
+        job_policy: 作成ジョブ管理部の、時間の決め。省略すると、調整値から作る。
+        job_outcomes: 作成の結果（要約・質問・失敗）の受け取り先。省略すると、結果を捨てる
+            （保存を行う部をつなぐまでの既定）。
 
     Returns:
         経路をすべて登録した FastAPI のアプリ。
@@ -210,6 +225,13 @@ def create_app(
     )
     # 記録データベースは、起動のとき（_lifespan）に開く。組み立てるだけでは、ディスクに触れない。
     app.state.record_database = RecordDatabase(settings.records_dir)
+    # 作成ジョブ管理部。要約と質問の作成を、決めた順に 1 件ずつ実行する。起動は _lifespan で行う。
+    app.state.job_manager = JobManager(
+        launcher=generation_launcher or ProductionGenerationLauncher(settings),
+        publisher=notification_hub,
+        policy=job_policy or JobPolicy.from_tuning(settings.tuning),
+        outcomes=job_outcomes,
+    )
     app.state.meeting_manager = MeetingManager(
         store=RecordStore(app.state.record_database),
         publisher=notification_hub,
