@@ -249,3 +249,34 @@ class BlockGate:
             self.reached.set()
             self.release.wait(timeout=10)
         return ScriptedGenerator._default(request, nth)
+
+
+class ProcessLauncher:
+    """生成ワーカーを、別のプロセスとして、偽のエンジンで動かす入口。強制終了を確かめるために使う。"""
+
+    def __init__(self, delay_seconds: float = 0.0) -> None:
+        """
+        Args:
+            delay_seconds: 文章生成 1 回にかける秒数。作成中の状態を、強制終了できる長さに保つ。
+        """
+        from meeting_interpreter.generation.client import GenerationClient
+
+        self._client_class = GenerationClient
+        self._delay_seconds = delay_seconds
+        self.clients: list = []
+
+    def create_client(self):
+        client = self._client_class()
+        self.clients.append(client)
+        return client
+
+    def start_message(self, trace_id: str | None, cpu_mode: CpuMode) -> Start:
+        from meeting_interpreter.generation.protocol import FakeGenerationOptions
+
+        return Start(
+            trace_id=trace_id,
+            engine="fake",
+            settings=SETTINGS,
+            cpu_mode=cpu_mode,
+            fake=FakeGenerationOptions(delay_seconds=self._delay_seconds),
+        )

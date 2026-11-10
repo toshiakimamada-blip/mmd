@@ -136,6 +136,39 @@ export const ERROR_WORDINGS: Readonly<Record<string, ErrorWording>> = Object.fre
     message: '字幕を作る処理が止まり、起動し直せなかったため、会議を中断しました。',
     action: `それまでの字幕は保存されています。会議の記録から要約を作れます。新しい会議を開始する前に、${REPORT_IF_NOT_FIXED}`,
   },
+  // --- 要約と質問の作成の失敗（作成ジョブ管理部。文言はサーバーの jobs/errors.py と同じ内容） ---
+  SUMMARY_GENERATION_FAILED: {
+    message: '要約を作れませんでした。',
+    action: `会議の記録で、要約を作るボタンを押してください。${REPORT_IF_NOT_FIXED}`,
+  },
+  SUMMARY_WORKER_STOPPED: {
+    message: '要約を作る処理が止まったため、要約を作れませんでした。',
+    action: `会議の記録で、要約を作るボタンを押してください。${REPORT_IF_NOT_FIXED}`,
+  },
+  SUMMARY_WORKER_START_FAILED: {
+    message: '要約を作る処理を開始できなかったため、要約を作れませんでした。',
+    action: `会議の記録で、要約を作るボタンを押してください。${REPORT_IF_NOT_FIXED}`,
+  },
+  SUMMARY_SAVE_FAILED: {
+    message: '要約を作れましたが、保存できませんでした。',
+    action: `会議の記録で、要約を作るボタンを押してください。${REPORT_IF_NOT_FIXED}`,
+  },
+  QUESTION_GENERATION_FAILED: {
+    message: '質問を作れませんでした。',
+    action: `もう一度、質問を作るボタンを押してください。${REPORT_IF_NOT_FIXED}`,
+  },
+  QUESTION_WORKER_STOPPED: {
+    message: '質問を作る処理が止まったため、質問を作れませんでした。',
+    action: `もう一度、質問を作るボタンを押してください。${REPORT_IF_NOT_FIXED}`,
+  },
+  QUESTION_WORKER_START_FAILED: {
+    message: '質問を作る処理を開始できなかったため、質問を作れませんでした。',
+    action: `もう一度、質問を作るボタンを押してください。${REPORT_IF_NOT_FIXED}`,
+  },
+  QUESTION_SAVE_FAILED: {
+    message: '質問を作れましたが、保存できませんでした。',
+    action: `もう一度、質問を作るボタンを押してください。${REPORT_IF_NOT_FIXED}`,
+  },
   // --- AI モデルの入手の失敗（準備状況が入手失敗のときの、原因の種類ごとの文言） ---
   MODEL_NETWORK_UNREACHABLE: {
     message: 'ネットワークにつながらないため、AI モデルを入手できませんでした。',
