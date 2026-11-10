@@ -31,7 +31,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Final
 
-from ..errors import AppError
+from ..errors import AppError, describe_origin
 from ..generation.client import GenerationClient
 from ..generation.inputs import QuestionInput
 from ..generation.protocol import (
@@ -263,11 +263,13 @@ class JobManager:
                 await self._reconcile()
             except asyncio.CancelledError:
                 raise
-            except Exception as error:  # noqa: BLE001 (想定外の失敗は、種類だけを残して続ける)
+            except Exception as error:  # noqa: BLE001 (想定外の失敗は、種類と発生場所だけを残して続ける)
+                _, location = describe_origin(error)
                 log_error(
                     "SYSTEM_UNEXPECTED_ERROR",
                     COMPONENT,
                     exception_type=type(error).__name__,
+                    location=location,
                 )
 
     def _situation(self) -> Situation:
@@ -341,15 +343,17 @@ class JobManager:
             ready = await asyncio.to_thread(
                 client.start, start, timeout_seconds=self._policy.worker_start_timeout_seconds
             )
-        except Exception as error:  # noqa: BLE001 (起動の失敗は、種類だけを残す)
+        except Exception as error:  # noqa: BLE001 (起動の失敗は、種類と発生場所だけを残す)
             record.worker_starts += 1
             record.worker_start_seconds += self._monotonic() - started
+            _, location = describe_origin(error)
             log_error(
                 "SYSTEM_GENERATION_START_FAILED",
                 COMPONENT,
                 meeting_id=record.meeting_id,
                 trace_id=record.trace_id,
                 exception_type=type(error).__name__,
+                location=location,
             )
             await asyncio.to_thread(client.stop, timeout_seconds=self._policy.stop_timeout_seconds)
             await self._fail_job(record, JobFailure.WORKER_START_FAILED)
@@ -553,13 +557,15 @@ class JobManager:
                 # 頼んだ種類と違う結果。起きないはずの食い違い。
                 await self._fail_job(record, JobFailure.GENERATION_FAILED)
                 return
-        except Exception as error:  # noqa: BLE001 (保存の失敗は、種類だけを残して失敗にする)
+        except Exception as error:  # noqa: BLE001 (保存の失敗は、種類と発生場所だけを残して失敗にする)
+            _, location = describe_origin(error)
             log_error(
                 "SYSTEM_JOB_OUTCOME_FAILED",
                 COMPONENT,
                 meeting_id=record.meeting_id,
                 trace_id=record.trace_id,
                 exception_type=type(error).__name__,
+                location=location,
             )
             await self._fail_job(record, JobFailure.SAVE_FAILED)
             return
@@ -646,12 +652,14 @@ class JobManager:
             if record.kind is JobKind.SUMMARY:
                 await self._outcomes.summary_failed(record.meeting_id, code)
         except Exception as cause:  # noqa: BLE001 (保存の失敗で、失敗の通知を止めない)
+            _, location = describe_origin(cause)
             log_error(
                 "SYSTEM_JOB_OUTCOME_FAILED",
                 COMPONENT,
                 meeting_id=record.meeting_id,
                 trace_id=record.trace_id,
                 exception_type=type(cause).__name__,
+                location=location,
             )
         finally:
             if self._current_id == record.job_id:
@@ -664,12 +672,14 @@ class JobManager:
         """エラーの通知を送る。通知の送り先の失敗で、作成ジョブを止めない。"""
         try:
             self._publisher.publish(ERROR_OCCURRED, error_payload(meeting_id, error))
-        except Exception as cause:  # noqa: BLE001 (通知の失敗は、種類だけを残して続ける)
+        except Exception as cause:  # noqa: BLE001 (通知の失敗は、種類と発生場所だけを残して続ける)
+            _, location = describe_origin(cause)
             log_error(
                 "SYSTEM_UNEXPECTED_ERROR",
                 COMPONENT,
                 meeting_id=meeting_id,
                 exception_type=type(cause).__name__,
+                location=location,
             )
 
 

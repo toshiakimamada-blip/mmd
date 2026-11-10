@@ -189,4 +189,4 @@ FastAPI が自動で返す応答も、共通の形に変えています。
 
 - 失敗した作成ジョブが要約のときは、結果の受け取り先の `summary_failed(会議番号, エラーコード)` が呼ばれます。会議の状態を `summary_failed` にして失敗理由を保存するのは、その先の作業です。質問の失敗では、会議の状態を変えません。
 - 画面は、コードから画面側の文言を引きます（`frontend/src/errors/errorMessages.ts`）。次に行う操作は、要約が「会議の記録で、要約を作るボタンを押す」、質問が「もう一度、質問を作るボタンを押す」です。
-- エラーログには、コード・コンポーネント（`job_manager`）・会議番号・処理の識別子を出します。ワーカーが止まったときは、止まり方（`killed_by_signal_9` など）を `SYSTEM_GENERATION_WORKER_EXITED` の `exception_type` に出します。
+- エラーログには、コード・コンポーネント（`job_manager`）・会議番号・処理の識別子を出します。ワーカーが止まったときは、止まり方（`killed_by_signal_9` など）を `SYSTEM_GENERATION_WORKER_EXITED` の `exception_type` に出します。例外を捕まえて続ける箇所（結果の保存の失敗・起動の失敗・通知の失敗・管理のタスクの想定外の失敗）は、例外の種類（`exception_type`）と発生場所（`location`）を出します。例外の文面は出しません。

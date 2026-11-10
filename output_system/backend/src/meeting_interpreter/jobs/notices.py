@@ -13,6 +13,7 @@ succeeded・failed）・done_blocks・total_blocks（要約のブロック数。
 from collections.abc import Mapping
 from typing import Final, Protocol
 
+from ..errors import describe_origin
 from ..logs import log_error
 from .models import JobSnapshot
 from .registry import JobChange
@@ -57,10 +58,12 @@ class JobNotifier:
         """JobRegistry の受け取り先として使う。"""
         try:
             self._publisher.publish(_NAMES[change], job_payload(snapshot))
-        except Exception as error:  # noqa: BLE001 (通知の失敗は、種類だけを残して続ける)
+        except Exception as error:  # noqa: BLE001 (通知の失敗は、種類と発生場所だけを残して続ける)
+            _, location = describe_origin(error)
             log_error(
                 "SYSTEM_UNEXPECTED_ERROR",
                 COMPONENT,
                 meeting_id=snapshot.meeting_id,
                 exception_type=type(error).__name__,
+                location=location,
             )

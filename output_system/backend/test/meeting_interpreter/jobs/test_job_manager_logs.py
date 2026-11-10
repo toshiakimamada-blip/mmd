@@ -43,9 +43,14 @@ class Clock:
             self._now += seconds
 
 
-def build(launcher: InProcessLauncher, clock: Clock):
-    outcomes = RecordingOutcomes()
-    publisher = RecordingPublisher()
+def build(
+    launcher: InProcessLauncher,
+    clock: Clock,
+    outcomes: RecordingOutcomes | None = None,
+    publisher: RecordingPublisher | None = None,
+):
+    outcomes = outcomes or RecordingOutcomes()
+    publisher = publisher or RecordingPublisher()
     manager = JobManager(
         launcher=launcher,
         publisher=publisher,
@@ -66,6 +71,17 @@ def job_logs(capsys) -> list[dict]:
         for line in lines
         if str(line.get("process_type", "")).startswith("job_")
         or line.get("process_type") == "generation_worker_started"
+    ]
+
+
+def error_logs(capsys) -> list[dict]:
+    """標準出力のエラーログ。"""
+    return [
+        line
+        for line in (
+            json.loads(row) for row in capsys.readouterr().out.splitlines() if row.startswith("{")
+        )
+        if line.get("log_type") == "error"
     ]
 
 
@@ -499,3 +515,163 @@ class TestNoContent:
 
         assert (accepted["m1"]["item_count"], accepted["m1"]["char_count"]) == (2, 18)
         assert (accepted["m2"]["item_count"], accepted["m2"]["char_count"]) == (None, 16)
+
+
+class FailingOutcomes(RecordingOutcomes):
+    """結果も、失敗の保存も、受け取れない受け取り先。"""
+
+    async def summary_failed(self, meeting_id: str, error_code: str) -> None:
+        raise RuntimeError("SECRET-CONTENT")
+
+
+class BrokenCreateLauncher(InProcessLauncher):
+    """クライアントを作る段階で、想定外の例外を起こす入口。"""
+
+    def create_client(self):
+        raise RuntimeError("SECRET-CONTENT")
+
+
+class BrokenPublisher(RecordingPublisher):
+    """通知を送れない通知部。"""
+
+    def publish(self, name, payload) -> None:
+        raise RuntimeError("SECRET-CONTENT")
+
+
+class TestErrorLogLocation:
+    """エラーログに、例外の種類と発生場所（location）が出る。例外の文面は出ない。
+
+    例外を捕まえて続ける箇所は、種類（exception_type）だけでなく、どこで起きたかも残す
+    （errors.describe_origin が、アプリのコードの中で、いちばん奥の場所を選ぶ）。
+    """
+
+    def test_should_log_the_location_when_the_result_cannot_be_saved(self, capsys):
+        """
+        【テスト対象】エラーログ（SYSTEM_JOB_OUTCOME_FAILED。結果の保存の失敗）
+        【テスト内容】結果の受け取り先が、結果を受け取るときに例外（文面に目印を含む）を起こす
+        【期待結果】発生場所が、結果を受け取る関数（_on_result）で、例外の種類が RuntimeError。
+                    例外の文面（目印）は、ログのどこにも出ない
+        """
+
+        async def scenario():
+            manager, _ = build(
+                InProcessLauncher(),
+                Clock(),
+                outcomes=RecordingOutcomes(fail_with=RuntimeError("SECRET-CONTENT")),
+            )
+            manager.start()
+            manager.submit_questions("m1", QUESTION_INPUT)
+            await wait_until(lambda: not manager.has_active_job("m1"), description="失敗")
+            await manager.shutdown()
+
+        asyncio.run(scenario())
+        entries = error_logs(capsys)
+        failed = [e for e in entries if e["error_code"] == "SYSTEM_JOB_OUTCOME_FAILED"]
+
+        assert len(failed) == 1
+        assert failed[0]["exception_type"] == "RuntimeError"
+        assert failed[0]["location"].startswith(
+            "meeting_interpreter.jobs.manager.JobManager._on_result:"
+        )
+        assert "SECRET-CONTENT" not in repr(entries)
+
+    def test_should_log_the_location_when_the_failure_cannot_be_saved_either(self, capsys):
+        """
+        【テスト対象】エラーログ（SYSTEM_JOB_OUTCOME_FAILED。失敗の保存の失敗）
+        【テスト内容】要約の結果も、失敗の保存も、受け取り先が例外を起こす
+        【期待結果】2 件のログが出る。発生場所は、1 件目が結果を受け取る関数（_on_result）、
+                    2 件目が失敗にする関数（_fail_job）
+        """
+
+        async def scenario():
+            outcomes = FailingOutcomes(fail_with=RuntimeError("SECRET-CONTENT"))
+            manager, _ = build(InProcessLauncher(), Clock(), outcomes=outcomes)
+            manager.start()
+            manager.submit_summary("m1", ("block a",))
+            await wait_until(lambda: not manager.has_active_job("m1"), description="失敗")
+            await manager.shutdown()
+
+        asyncio.run(scenario())
+        failed = [e for e in error_logs(capsys) if e["error_code"] == "SYSTEM_JOB_OUTCOME_FAILED"]
+
+        assert [e["location"].rsplit(":", 1)[0] for e in failed] == [
+            "meeting_interpreter.jobs.manager.JobManager._on_result",
+            "meeting_interpreter.jobs.manager.JobManager._fail_job",
+        ]
+
+    def test_should_log_the_location_when_the_worker_cannot_start(self, capsys):
+        """
+        【テスト対象】エラーログ（SYSTEM_GENERATION_START_FAILED。生成ワーカーの起動の失敗）
+        【テスト内容】起動に失敗する偽のワーカーで、質問を 1 件作る
+        【期待結果】発生場所が、起動する関数（_start_worker）で、例外の種類が WorkerStartError
+        """
+
+        async def scenario():
+            manager, _ = build(InProcessLauncher(fail_start=True), Clock())
+            manager.start()
+            manager.submit_questions("m1", QUESTION_INPUT)
+            await wait_until(lambda: not manager.has_active_job("m1"), description="失敗")
+            await manager.shutdown()
+
+        asyncio.run(scenario())
+        (failed,) = [
+            e for e in error_logs(capsys) if e["error_code"] == "SYSTEM_GENERATION_START_FAILED"
+        ]
+
+        assert failed["exception_type"] == "WorkerStartError"
+        assert failed["location"].startswith(
+            "meeting_interpreter.jobs.manager.JobManager._start_worker:"
+        )
+
+    def test_should_log_the_location_of_an_unexpected_error_in_the_manager_task(self, capsys):
+        """
+        【テスト対象】エラーログ（SYSTEM_UNEXPECTED_ERROR。管理のタスクの想定外の失敗）
+        【テスト内容】クライアントを作る段階で、想定外の例外を起こす入口で、質問を 1 件受け付ける
+        【期待結果】管理のタスクは止まらずにログを 1 件出す。発生場所が、アプリのコードのいちばん奥
+                    （_start_worker）で、例外の種類が RuntimeError。例外の文面は出ない
+        """
+
+        async def scenario():
+            manager, _ = build(BrokenCreateLauncher(), Clock())
+            manager.start()
+            manager.submit_questions("m1", QUESTION_INPUT)
+            await asyncio.sleep(0.1)
+            await manager.shutdown()
+
+        asyncio.run(scenario())
+        entries = error_logs(capsys)
+        unexpected = [e for e in entries if e["error_code"] == "SYSTEM_UNEXPECTED_ERROR"]
+
+        assert len(unexpected) == 1
+        assert unexpected[0]["exception_type"] == "RuntimeError"
+        assert unexpected[0]["location"].startswith(
+            "meeting_interpreter.jobs.manager.JobManager._start_worker:"
+        )
+        assert "SECRET-CONTENT" not in repr(entries)
+
+    def test_should_log_the_location_when_a_notice_cannot_be_sent(self, capsys):
+        """
+        【テスト対象】エラーログ（SYSTEM_UNEXPECTED_ERROR。通知の送り先の失敗）
+        【テスト内容】通知を送れない通知部で、起動に失敗する質問を 1 件作る
+        【期待結果】状況の通知の失敗（JobNotifier）と、エラーの通知の失敗（_publish_error）の両方で、
+                    発生場所つきのログが出る。作成ジョブは失敗で終わる
+        """
+
+        async def scenario():
+            manager, _ = build(
+                InProcessLauncher(fail_start=True), Clock(), publisher=BrokenPublisher()
+            )
+            manager.start()
+            manager.submit_questions("m1", QUESTION_INPUT)
+            await wait_until(lambda: not manager.has_active_job("m1"), description="失敗")
+            await manager.shutdown()
+
+        asyncio.run(scenario())
+        entries = error_logs(capsys)
+        unexpected = [e for e in entries if e["error_code"] == "SYSTEM_UNEXPECTED_ERROR"]
+        locations = {e["location"].rsplit(":", 1)[0] for e in unexpected}
+
+        assert "meeting_interpreter.jobs.notices.JobNotifier.__call__" in locations
+        assert "meeting_interpreter.jobs.manager.JobManager._publish_error" in locations
+        assert all(e["exception_type"] == "RuntimeError" for e in unexpected)
+        assert "SECRET-CONTENT" not in repr(entries)
