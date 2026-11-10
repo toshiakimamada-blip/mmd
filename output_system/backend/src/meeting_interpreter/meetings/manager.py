@@ -67,6 +67,8 @@ class MeetingManager:
         policy: SessionPolicy,
         clock: Callable[[], datetime] = lambda: datetime.now(UTC),
         on_meeting_ended: Callable[[Meeting], Awaitable[None]] | None = None,
+        on_meeting_started: Callable[[str], None] | None = None,
+        on_interpreter_stopped: Callable[[str], None] | None = None,
         shutdown_wait_seconds: float = SHUTDOWN_WAIT_SECONDS,
     ) -> None:
         """
@@ -80,6 +82,11 @@ class MeetingManager:
             on_meeting_ended: 会議を終了し、状態が要約作成中になったあとに呼ぶ。要約を始める
                 呼び出しで、作成ジョブ管理部につなぐ口。つなぐまでは何もしない（字幕が 1 件以上の
                 会議は、要約作成中のまま残る）。
+            on_meeting_started: 会議を開始し、通訳ワーカーの起動を始めたあとに、会議番号を渡して
+                呼ぶ。作成ジョブ管理部が、ほかの会議の要約を後回しにする口。
+            on_interpreter_stopped: 通訳ワーカーを止めたあとに、会議番号を渡して呼ぶ（会議の
+                終了でも中断でも）。作成ジョブ管理部が、後回しにした要約を再開する口。
+                要約を始める呼び出し（on_meeting_ended）より先に呼ぶ。
             shutdown_wait_seconds: アプリの停止のとき、進行中の会議を閉じるのを待つ秒数。
         """
         self._store = store
@@ -89,6 +96,8 @@ class MeetingManager:
         self._policy = policy
         self._clock = clock
         self._on_meeting_ended = on_meeting_ended or _do_nothing
+        self._on_meeting_started = on_meeting_started
+        self._on_interpreter_stopped = on_interpreter_stopped
         self._shutdown_wait_seconds = shutdown_wait_seconds
         # 進行中の枠。会議を作る前から埋めて、同時に届いた 2 件目の開始を断る。
         self._occupied = False
@@ -146,6 +155,7 @@ class MeetingManager:
                 clock=self._clock,
                 on_meeting_ended=self._on_meeting_ended,
                 on_finished=self._on_session_finished,
+                on_interpreter_stopped=self._on_interpreter_stopped,
             )
             for listener in self._capture_listeners:
                 session.add_capture_listener(listener)
@@ -155,6 +165,7 @@ class MeetingManager:
             self._occupied = False
             self._session = None
             raise
+        self._notify_meeting_started(meeting.meeting_id)
         log_processing("meeting_started", meeting_id=meeting.meeting_id)
         self._publisher.publish(
             MEETING_STATE_CHANGED,
@@ -165,6 +176,20 @@ class MeetingManager:
             },
         )
         return meeting
+
+    def _notify_meeting_started(self, meeting_id: str) -> None:
+        """会議を開始したことを、作成ジョブ管理部へ知らせる。知らせ先の失敗で、開始を失敗にしない。"""
+        if self._on_meeting_started is None:
+            return
+        try:
+            self._on_meeting_started(meeting_id)
+        except Exception as error:  # noqa: BLE001 (知らせの失敗は、種類だけを残して続ける)
+            log_error(
+                "SYSTEM_UNEXPECTED_ERROR",
+                COMPONENT,
+                meeting_id=meeting_id,
+                exception_type=type(error).__name__,
+            )
 
     def _on_session_finished(self, session: MeetingSession) -> None:
         """セッションが終わった。進行中の枠を空ける。"""

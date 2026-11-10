@@ -37,6 +37,7 @@ from ..generation.inputs import QuestionInput
 from ..generation.protocol import (
     CpuApplied,
     CpuMode,
+    Interrupted,
     Memo,
     Progress,
     Questions,
@@ -56,11 +57,12 @@ from .models import (
     JobSnapshot,
     JobStatus,
     QuestionPayload,
+    ResumePoint,
     SummaryPayload,
 )
 from .notices import JobNotifier, JobPublisher
 from .outcomes import JobOutcomeHandler, NullOutcomeHandler
-from .policy import JobView, Situation, needs_worker, pick_next
+from .policy import JobView, Situation, needs_worker, pick_next, yield_reason
 from .registry import JobRegistry, Registration
 from .workers import GenerationLauncher
 
@@ -154,6 +156,8 @@ class JobManager:
         self._handle: _Handle | None = None
         # ワーカーへ依頼して、結果を待っている作成ジョブの識別子。無ければ None。
         self._current_id: str | None = None
+        # 作成中の要約に、ブロックの区切りで止まるよう頼んだか。頼んだ間は、重ねて頼まない。
+        self._interrupt_requested = False
         self._generation = 0
         self._task: asyncio.Task[None] | None = None
         self._closing = False
@@ -299,6 +303,7 @@ class JobManager:
                     await self._teardown(handle)
                 return
             await self._sync_cpu(handle)
+            await self._request_yield(handle, situation)
             return
 
     # --- 生成ワーカーの起動 ---------------------------------------------------------
@@ -399,6 +404,39 @@ class JobManager:
             return  # ワーカーが終わっている。出力の終わりが続けて届き、そこで扱う。
         handle.cpu_mode = wanted
 
+    # --- 順番を譲る・後回しにする ---------------------------------------------------------
+
+    async def _request_yield(self, handle: _Handle, situation: Situation) -> None:
+        """作成中の要約が、ブロックの区切りで止まるべきなら、止まるよう頼む。
+
+        質問が待っているとき（順番を譲る）と、通訳中の会議があるとき（後回しにする）。
+        頼んでも、要約はブロックの区切りまで動く。区切りで止まると、中断のメッセージが返る
+        （_on_interrupted）。要約が先に完成したときは、頼みは使われずに終わる。
+        """
+        if self._interrupt_requested or yield_reason(situation) is None:
+            return
+        try:
+            await asyncio.to_thread(handle.client.interrupt)
+        except OSError:
+            return  # ワーカーが終わっている。出力の終わりが続けて届き、そこで扱う。
+        self._interrupt_requested = True
+
+    def _on_interrupted(self, record: JobRecord | None, message: Interrupted) -> None:
+        """要約が、ブロックの区切りで止まった。待機中へ戻し、続きの位置（中間メモと次のブロック）を覚える。
+
+        続きは、規則が選んだときに、この位置から始める（処理済みのブロックを作り直さない）。
+        """
+        if record is None:
+            return
+        resume = ResumePoint(memos=message.memos, next_block=message.next_block)
+        self._end_current()
+        self._registry.mark_queued(record.job_id, resume)
+
+    def _end_current(self) -> None:
+        """依頼して結果を待っている作成ジョブは、無くなった。"""
+        self._current_id = None
+        self._interrupt_requested = False
+
     # --- 依頼 -----------------------------------------------------------------------
 
     async def _dispatch(self, handle: _Handle, chosen: JobView) -> None:
@@ -407,6 +445,7 @@ class JobManager:
         if record is None:
             return
         self._current_id = record.job_id
+        self._interrupt_requested = False
         self._registry.mark_running(record.job_id)
         try:
             await asyncio.to_thread(self._write_request, handle, record)
@@ -448,6 +487,8 @@ class JobManager:
                     )
             case Summary() | Questions():
                 await self._on_result(record, message)
+            case Interrupted():
+                self._on_interrupted(record, message)
             case WorkerError():
                 await self._on_worker_error(handle, record, message)
             case Stopped():
@@ -480,7 +521,7 @@ class JobManager:
             )
             await self._fail_job(record, JobFailure.SAVE_FAILED)
             return
-        self._current_id = None
+        self._end_current()
         self._registry.finish(record.job_id, JobStatus.SUCCEEDED)
 
     async def _on_worker_error(
@@ -540,7 +581,7 @@ class JobManager:
             )
         finally:
             if self._current_id == record.job_id:
-                self._current_id = None
+                self._end_current()
         self._registry.finish(record.job_id, JobStatus.FAILED, code)
         self._publish_error(record.meeting_id, error)
 

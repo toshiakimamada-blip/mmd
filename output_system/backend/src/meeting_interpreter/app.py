@@ -239,6 +239,9 @@ def create_app(
         models_ready=lambda: app.state.model_manager.snapshot.status is ModelStatus.READY,
         policy=meeting_policy or SessionPolicy.from_tuning(settings.tuning),
         on_meeting_ended=on_meeting_ended,
+        # 会議の開始で、ほかの会議の要約を区切りで後回しにし、通訳ワーカーを止めたら、再開する。
+        on_meeting_started=app.state.job_manager.meeting_started,
+        on_interpreter_stopped=app.state.job_manager.interpreter_stopped,
     )
 
     register_exception_handlers(app)

@@ -59,6 +59,8 @@ class InProcessGenerationClient:
     def start(self, start: Start, *, timeout_seconds: float) -> Ready:
         self._launcher.events.append(f"worker_start:{start.cpu_mode.value}")
         self._launcher.start_messages.append(start)
+        if self._launcher.on_start is not None:
+            self._launcher.on_start()
         if self._launcher.start_delay:
             time.sleep(self._launcher.start_delay)
         if self._launcher.fail_start:
@@ -139,6 +141,7 @@ class InProcessLauncher:
         fail_start: bool = False,
         start_delay: float = 0.0,
         load_seconds: float = 0.5,
+        on_start: Callable[[], None] | None = None,
     ) -> None:
         """
         Args:
@@ -146,11 +149,13 @@ class InProcessLauncher:
             fail_start: 起動に失敗させる。
             start_delay: 起動にかける秒数。
             load_seconds: 準備完了で報告する、モデルの読み込みの秒数。
+            on_start: ワーカーを起動する瞬間に呼ぶ関数。起動の時点の外の様子を調べるために使う。
         """
         self.generator = ScriptedGenerator(responder)
         self.fail_start = fail_start
         self.start_delay = start_delay
         self.load_seconds = load_seconds
+        self.on_start = on_start
         # 起動と停止の順。"worker_start:<割り当て>"・"worker_stop"。テストが別の出来事も足せる。
         self.events: list[str] = []
         self.clients: list[InProcessGenerationClient] = []
@@ -193,6 +198,8 @@ class RecordingOutcomes:
         self.summaries: list[tuple[str, SummaryText]] = []
         self.questions: list[tuple[str, tuple[QuestionPair, ...]]] = []
         self.failures: list[tuple[str, str]] = []
+        # 結果を受け取った順。"summary:<会議番号>"・"questions:<会議番号>"。
+        self.order: list[str] = []
         # 受け取るときに起こす例外（保存の失敗を真似る）。
         self.fail_with = fail_with
 
@@ -200,11 +207,13 @@ class RecordingOutcomes:
         if self.fail_with is not None:
             raise self.fail_with
         self.summaries.append((meeting_id, summary))
+        self.order.append(f"summary:{meeting_id}")
 
     async def questions_ready(self, meeting_id: str, pairs: tuple[QuestionPair, ...]) -> None:
         if self.fail_with is not None:
             raise self.fail_with
         self.questions.append((meeting_id, pairs))
+        self.order.append(f"questions:{meeting_id}")
 
     async def summary_failed(self, meeting_id: str, error_code: str) -> None:
         self.failures.append((meeting_id, error_code))
@@ -219,3 +228,24 @@ async def wait_until(
         if time.monotonic() > deadline:
             raise AssertionError(f"{timeout} 秒たっても、{description}が成り立ちません")
         await asyncio.sleep(0.01)
+
+
+class BlockGate:
+    """要約の中間メモの作成を、決めたブロックで止めておく、偽の文章生成の応答。
+
+    ブロック hold の中間メモを作り始めたら reached が立つ。release を立てるまで、そこで待つ。
+    ブロックの区切りで順番を譲る・後回しにする動きを、決まった位置で確かめるために使う。
+    """
+
+    def __init__(self, hold: str) -> None:
+        self.hold = hold
+        self.reached = threading.Event()
+        self.release = threading.Event()
+
+    def __call__(self, request, nth: int) -> str:
+        from generation_fakes import ScriptedGenerator
+
+        if request.task == "memo" and request.data == self.hold:
+            self.reached.set()
+            self.release.wait(timeout=10)
+        return ScriptedGenerator._default(request, nth)
