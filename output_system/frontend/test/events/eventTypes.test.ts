@@ -39,6 +39,36 @@ describe('parseAppEvent', () => {
   });
 
   /**
+   * 【テスト対象】parseAppEvent（model.status_changed）
+   * 【テスト内容】AI モデルの入手中の通知（準備状況の取得と同じ項目）を渡す
+   * 【期待結果】準備状況（入手中）と進み具合を持つ通知になること
+   */
+  it('should read a model.status_changed notification', () => {
+    const text = JSON.stringify({
+      type: 'model.status_changed',
+      status: 'downloading',
+      progress: { downloaded_bytes: 10, total_bytes: 40 },
+      failure_kind: null,
+      error_code: null,
+      conversion_implemented: true,
+    });
+
+    expect(parseAppEvent(text)).toEqual({
+      type: 'model.status_changed',
+      status: { status: 'downloading', progress: { downloadedBytes: 10, totalBytes: 40 }, errorCode: null },
+    });
+  });
+
+  /**
+   * 【テスト対象】parseAppEvent（形が合わない model.status_changed）
+   * 【テスト内容】知らない準備状況の通知を渡す
+   * 【期待結果】読み捨てて null を返すこと
+   */
+  it('should ignore a model.status_changed notification with an unknown status', () => {
+    expect(parseAppEvent(JSON.stringify({ type: 'model.status_changed', status: 'bogus' }))).toBeNull();
+  });
+
+  /**
    * 【テスト対象】parseAppEvent（日本語訳が無い字幕の通知）
    * 【テスト内容】translated_text が null の通知を渡す
    * 【期待結果】字幕の日本語訳が null の通知になること

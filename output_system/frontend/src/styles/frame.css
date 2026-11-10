@@ -111,3 +111,25 @@ body {
   font-weight: 700;
   line-height: 1.5;
 }
+
+/* 画面の操作の領域（会議の一覧の「新しい会議を始める」）。ボタンの見た目のリンク */
+.screen__actions {
+  margin: 1rem 0 0;
+}
+
+.screen__action {
+  display: inline-flex;
+  align-items: center;
+  min-height: 2.75rem;
+  padding: 0 1.25rem;
+  border: 2px solid var(--color-band);
+  border-radius: 0.25rem;
+  background: var(--color-band);
+  color: var(--color-band-ink);
+  font-weight: 700;
+  text-decoration: none;
+}
+
+.screen__action:hover {
+  background: #24486b;
+}

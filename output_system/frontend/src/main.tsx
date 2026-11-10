@@ -6,6 +6,7 @@ import { createAppRouter } from './router';
 import './styles/frame.css';
 import './styles/live.css';
 import './styles/notices.css';
+import './styles/prepare.css';
 
 const root = document.getElementById('root');
 if (root === null) {

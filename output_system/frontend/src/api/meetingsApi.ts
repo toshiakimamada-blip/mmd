@@ -2,8 +2,51 @@
  * 会議の経路（/api/meetings 以下）の呼び出し。失敗は ApiError（apiClient.ts）で返る。
  */
 
+import { readLiveMeeting } from '../meetings/liveMeeting';
+import { type MeetingStartRequest } from '../meetings/meetingInput';
 import { parseSubtitle, type Subtitle } from '../subtitles/subtitleTypes';
 import { requestJson } from './apiClient';
+
+/**
+ * 会議の開始（POST /api/meetings）の応答。「会議中」の画面は、この応答そのままを画面の移動の状態に載せて受け取る
+ * （meetings/liveMeeting.ts）。画面が読む項目は meeting_id・title・started_at・audio_source。
+ */
+export type MeetingResponse = Readonly<Record<string, unknown>> & { readonly meeting_id: string };
+
+/**
+ * 会議の開始の応答を確かめる。「会議中」の画面が読める形でなければ例外
+ * （呼び出し側が、想定外のエラーにする）。
+ */
+function parseMeetingResponse(body: unknown): MeetingResponse {
+  const meetingId = (body as { meeting_id?: unknown } | null)?.meeting_id;
+  if (typeof meetingId !== 'string' || readLiveMeeting({ meeting: body }, meetingId, null) === null) {
+    throw new Error('会議の形ではありません');
+  }
+  return body as MeetingResponse;
+}
+
+/**
+ * 会議を開始する（POST /api/meetings）。会議を作り、通訳ワーカーの起動を始める。
+ * アプリサーバーは、通訳ワーカーの準備完了を待たず、会議番号を返す。応答を受け取ったら、すぐ音声の WebSocket を
+ * つなぐこと（開始から 30 秒のうちにつながらないと、会議は中断になる）。
+ *
+ * タイトルは会議の内容のため、URL ではなく本文で送る。
+ *
+ * @param request 開始の要求。タイトルは、未入力のときも画面が組み立てた文字列を持つ
+ * @throws ApiError 入力が誤っている（MEETING_TITLE_INVALID・MEETING_AUDIO_SOURCE_INVALID）・AI モデルが準備完了でない
+ *   （MODEL_NOT_READY）・進行中の会議がある（MEETING_ALREADY_RUNNING）・保存できなかった・アプリサーバーに届かなかったとき
+ */
+export async function createMeeting(request: MeetingStartRequest): Promise<MeetingResponse> {
+  return requestJson(
+    '/api/meetings',
+    {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ title: request.title, audio_source: request.audioSource }),
+    },
+    parseMeetingResponse,
+  );
+}
 
 /** 字幕の一覧の応答を、画面の字幕の配列に読み替える。1 件でも読めなければ例外（呼び出し側が想定外のエラーにする）。 */
 function parseSubtitleList(body: unknown): Subtitle[] {
