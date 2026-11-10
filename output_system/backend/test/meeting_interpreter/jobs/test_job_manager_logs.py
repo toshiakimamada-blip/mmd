@@ -243,6 +243,40 @@ class TestWaitTimes:
         ]
         assert [line["wait_ms"] for line in summary] == [0, 0, 0, 30000, 30000]
 
+    def test_should_log_postponing_when_the_meeting_ends_before_the_boundary(self, capsys):
+        """
+        【テスト対象】処理ログ（後回しにした時点。止まるよう頼んだあとに状況が変わる場合）
+        【テスト内容】要約の作成中に会議が始まり、区切りで止まる前に、会議が終わる。そのあと
+                    区切りまで進める
+        【期待結果】会議のために止まるよう頼んだので、要約の記録は「後回し」で出る（順番を譲った
+                    記録にならない）。要約はそのあと再開して完成する
+        """
+
+        async def scenario():
+            clock = Clock()
+            gate = BlockGate("block 1")
+            launcher = InProcessLauncher(gate)
+            manager, outcomes = build(launcher, clock)
+            manager.start()
+            manager.submit_summary("m1", BLOCKS)
+            await wait_until(gate.reached.is_set, description="2 つ目のブロックの作成")
+            manager.meeting_started("m2")
+            await wait_until(
+                lambda: launcher.clients[0].interrupt_count >= 1, description="中断の要求"
+            )
+            manager.interpreter_stopped("m2")  # 区切りに届く前に、会議が終わる。
+            gate.release.set()
+            await wait_until(lambda: bool(outcomes.summaries), description="要約の完成")
+            await manager.shutdown()
+
+        asyncio.run(scenario())
+        summary = of(job_logs(capsys), "m1", "summary")
+        types = [line["process_type"] for line in summary]
+
+        assert "job_postponed" in types
+        assert "job_yielded" not in types
+        assert types[-1] == "job_finished"
+
 
 class TestWorkerStartLog:
     """生成ワーカーの起動と、モデルの読み込みにかかった時間。"""

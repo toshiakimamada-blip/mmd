@@ -233,6 +233,47 @@ class TestRecoverableFailures:
         assert [body["code"] for body in publisher.named("error.occurred")] == [code]
         assert outcomes.failures == ([("m1", code)] if kind == "summary" else [])
 
+    def test_should_fail_the_job_when_the_request_cannot_be_written_for_any_reason(self):
+        """
+        【テスト対象】JobManager（ワーカーへの依頼の書き込みの失敗。OSError 以外）
+        【テスト内容】要約の依頼を書くときに、OSError ではない例外（ValueError）が起きる。
+                    そのあと、質問を受け付ける
+        【期待結果】要約が失敗になり（SUMMARY_WORKER_STOPPED）、作成中のまま残らないこと。
+                    失敗を保存する依頼が出て、待機中だった質問は、新しいワーカーで完成する。
+                    エラーログには、例外の型（ValueError）が残り、字幕の本文は残らない
+        """
+
+        class BrokenWriteLauncher(InProcessLauncher):
+            """最初に作ったクライアントだけ、要約の依頼を書けない。"""
+
+            def create_client(self):
+                client = super().create_client()
+                if len(self.clients) == 1:
+
+                    def broken(*_args, **_kwargs):
+                        raise ValueError("書けない")
+
+                    client.summarize = broken
+                return client
+
+        async def scenario():
+            launcher = BrokenWriteLauncher()
+            manager, publisher, outcomes = build(launcher)
+            manager.start()
+            manager.submit_summary("m1", ("block a",))
+            await wait_until(lambda: not manager.has_active_job("m1"), description="失敗")
+            manager.submit_questions("m2", QUESTION_INPUT)
+            await wait_until(lambda: bool(outcomes.questions), description="質問の完成")
+            await manager.shutdown()
+            return launcher, publisher, outcomes
+
+        launcher, publisher, outcomes = asyncio.run(scenario())
+
+        assert last_status(publisher, "m1", "summary") == "failed"
+        assert outcomes.failures == [("m1", "SUMMARY_WORKER_STOPPED")]
+        assert outcomes.questions[0][0] == "m2"
+        assert len(launcher.clients) == 2
+
     def test_should_not_put_meeting_content_in_the_error_notice(self):
         """
         【テスト対象】エラーの通知（error.occurred）

@@ -10,7 +10,7 @@
 | `frontend/` | 画面。TypeScript と React を Vite でビルドします。ロックファイルは `package-lock.json` です |
 | `config/` | アプリに同梱する設定ファイル。調整値（`tuning.toml`）と、AI モデルの定義（`models.toml`。翻訳モデルの代わりの候補は `translation_alternatives.md`） |
 | `tools/` | 補助の道具。画面の依存を足すときに、固定した Node.js で実行する `with-pinned-node.sh` など |
-| `docs/` | 実装に付ける文書。エラーの扱いと、エラーコードの一覧は `docs/errors.md`。お知らせ帯とエラー表示の部品の使い方は `docs/notices.md`。AI モデルの入手と、翻訳モデルの変換（確かめた結果、部品、測定値）は `docs/models.md`。通訳ワーカー（音声から字幕を作る別のプロセス）の構成、測り方、字幕の遅れとメモリの測定値、外へ通信しない確認は `docs/interpreter.md`。生成ワーカー（字幕から要約と質問を作る別のプロセス）の構成、作り方、CPU の割り当て、作成時間とメモリの測定値は `docs/generation.md`。ブラウザーの音声の取り込み（画面共有とマイク、16kHz・モノラルへの変換、WebSocket での送信、停止の検知とやり直し、実ブラウザーでの確認）は `docs/audio-capture.md`。会議の開始と終了、音声の WebSocket、字幕の保存と通知、中断、通訳ワーカーの起動し直しは `docs/meetings.md`。「会議の準備」の画面（入力・案内・AI モデルの準備状況・開始の流れ・終了のときの取り込みの止め方）と、出荷するコンテナでの確認は `docs/prepare-screen.md` |
+| `docs/` | 実装に付ける文書。エラーの扱いと、エラーコードの一覧は `docs/errors.md`。お知らせ帯とエラー表示の部品の使い方は `docs/notices.md`。AI モデルの入手と、翻訳モデルの変換（確かめた結果、部品、測定値）は `docs/models.md`。通訳ワーカー（音声から字幕を作る別のプロセス）の構成、測り方、字幕の遅れとメモリの測定値、外へ通信しない確認は `docs/interpreter.md`。生成ワーカー（字幕から要約と質問を作る別のプロセス）の構成、作り方、CPU の割り当て、作成時間とメモリの測定値は `docs/generation.md`。ブラウザーの音声の取り込み（画面共有とマイク、16kHz・モノラルへの変換、WebSocket での送信、停止の検知とやり直し、実ブラウザーでの確認）は `docs/audio-capture.md`。会議の開始と終了、音声の WebSocket、字幕の保存と通知、中断、通訳ワーカーの起動し直しは `docs/meetings.md`。「会議の準備」の画面（入力・案内・AI モデルの準備状況・開始の流れ・終了のときの取り込みの止め方）と、出荷するコンテナでの確認は `docs/prepare-screen.md`。要約と質問の作成を、決めた順に 1 件ずつ実行する作成ジョブ管理部（実行順・順番を譲る・後回し・再開・失敗・処理ログ・通知）は `docs/jobs.md` |
 
 テストは、各フォルダの `src/` と同じ階層の `test/` に置き、`src/` と同じ構造にします。起動したコンテナを相手にするテストだけは、`backend/test/container/` に置きます。ブラウザーで手動で確かめるための確認用のサーバーは、`backend/test/browser/` に置きます（pytest は集めません）。確認用のページは `frontend/test/browser/` に置きます（ビルドの対象は `frontend/index.html` だけで、出荷するアプリには含まれません）。
 

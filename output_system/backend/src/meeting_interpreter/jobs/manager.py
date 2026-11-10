@@ -156,8 +156,9 @@ class JobManager:
         self._handle: _Handle | None = None
         # ワーカーへ依頼して、結果を待っている作成ジョブの識別子。無ければ None。
         self._current_id: str | None = None
-        # 作成中の要約に、ブロックの区切りで止まるよう頼んだか。頼んだ間は、重ねて頼まない。
-        self._interrupt_requested = False
+        # 作成中の要約に、ブロックの区切りで止まるよう頼んだときの理由。頼んでいなければ None。
+        # 頼んだ間は、重ねて頼まない。区切りで止まったときの記録（譲った・後回し）にも使う。
+        self._interrupt_reason: YieldReason | None = None
         self._generation = 0
         self._task: asyncio.Task[None] | None = None
         self._closing = False
@@ -430,13 +431,14 @@ class JobManager:
         頼んでも、要約はブロックの区切りまで動く。区切りで止まると、中断のメッセージが返る
         （_on_interrupted）。要約が先に完成したときは、頼みは使われずに終わる。
         """
-        if self._interrupt_requested or yield_reason(situation) is None:
+        reason = yield_reason(situation)
+        if self._interrupt_reason is not None or reason is None:
             return
         try:
             await asyncio.to_thread(handle.client.interrupt)
         except OSError:
             return  # ワーカーが終わっている。出力の終わりが続けて届き、そこで扱う。
-        self._interrupt_requested = True
+        self._interrupt_reason = reason
 
     def _on_interrupted(self, record: JobRecord | None, message: Interrupted) -> None:
         """要約が、ブロックの区切りで止まった。待機中へ戻し、続きの位置（中間メモと次のブロック）を覚える。
@@ -446,18 +448,19 @@ class JobManager:
         if record is None:
             return
         resume = ResumePoint(memos=message.memos, next_block=message.next_block)
-        # 待機中へ戻す前の状態で、理由を決める（作成中の要約を止める理由を見る規則のため）。
-        reason = yield_reason(self._situation())
+        # 待機中へ戻す前の状態で、理由を決める。止まるよう頼んだあとに状況が変わっていたら
+        # （会議が先に終わった、など）、頼んだときの理由を使う。
+        reason = yield_reason(self._situation()) or self._interrupt_reason
         self._end_current()
         self._registry.mark_queued(record.job_id, resume)
-        # 通訳中の会議のために止めたなら後回し。そうでなければ（質問が待っていた）順番を譲った。
-        postponed = reason is YieldReason.MEETING_IN_PROGRESS or self._interpreting is not None
+        # 通訳中の会議のために止めたなら後回し。質問が待っていたなら、順番を譲った。
+        postponed = reason is YieldReason.MEETING_IN_PROGRESS
         self._log_job("job_postponed" if postponed else "job_yielded", record)
 
     def _end_current(self) -> None:
         """依頼して結果を待っている作成ジョブは、無くなった。"""
         self._current_id = None
-        self._interrupt_requested = False
+        self._interrupt_reason = None
 
     # --- 依頼 -----------------------------------------------------------------------
 
@@ -467,14 +470,16 @@ class JobManager:
         if record is None:
             return
         self._current_id = record.job_id
-        self._interrupt_requested = False
+        self._interrupt_reason = None
         resuming = record.timeline.first_wait_seconds is not None
         self._registry.mark_running(record.job_id)
         self._log_job("job_resumed" if resuming else "job_started", record)
         try:
             await asyncio.to_thread(self._write_request, handle, record)
-        except OSError:
-            await self._on_worker_gone(handle, "write_failed")
+        except Exception as error:  # noqa: BLE001 (書けない理由は問わず、作成中のまま残さない)
+            await self._on_worker_gone(
+                handle, "write_failed" if isinstance(error, OSError) else type(error).__name__
+            )
 
     @staticmethod
     def _write_request(handle: _Handle, record: JobRecord) -> None:
