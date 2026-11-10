@@ -7,9 +7,9 @@
 - 実行基盤: Docker コンテナ 1 つ（土台 ubuntu:24.04）。名前付きボリューム 2 つ（記録・モデル）
 - クールダウン: uv は `exclude-newer = "7 days"`（`backend/pyproject.toml`）、npm は `min-release-age=7`（`frontend/.npmrc`）
 - AI モデルの入手: 依存を足さず、標準ライブラリの HTTPS クライアント（urllib）で自前に行う
-- 通訳ワーカー: faster-whisper（Whisper small.en。Silero VAD の ONNX 形式が同梱。ONNX Runtime で動かす）、CTranslate2（FuguMT）、SentencePiece。依存グループ `interpreter`（`uv.lock` で固定。開発環境の `uv sync` の既定に入る）。PyTorch は使わない。出荷するイメージのアプリサーバーの環境には、このグループだけを入れた（Dockerfile は `--no-default-groups --group interpreter`。アプリサーバー自身は取り込まない）
+- 通訳ワーカー: faster-whisper（Whisper small.en。Silero VAD の ONNX 形式が同梱。ONNX Runtime で動かす）、CTranslate2（FuguMT）、SentencePiece。依存グループ `interpreter`（`uv.lock` で固定。開発環境の `uv sync` の既定に入る）。PyTorch は使わない。出荷するイメージのアプリサーバーの環境には、このグループと `generation` だけを入れた（Dockerfile は `--no-default-groups --group interpreter --group generation`。アプリサーバー自身は取り込まない）
 - 翻訳モデルの変換: 部品（PyTorch の CPU 版 wheel、transformers、CTranslate2、SentencePiece）は依存グループ `conversion`（`uv.lock` で固定）。開発環境の `uv sync` には入り、イメージではアプリサーバーの環境に入れず `/opt/conversion-venv` にだけ入れる（展開後 約 1.33GB）。llama.cpp は、生成ワーカーの部品（下）として入れた
-- 生成ワーカー: llama-cpp-python（llama.cpp の Python の結び付け。PyPI に wheel が無く、ソースから組み立てる。組み立ての指定は `pyproject.toml` の `[tool.uv.config-settings-package]`）で Qwen3-4B（Q4_K_M の GGUF）を動かす。依存グループ `generation`（`uv.lock` で固定。開発環境の `uv sync` の既定に入る）。**出荷するイメージには、まだ入れていない**
+- 生成ワーカー: llama-cpp-python（llama.cpp の Python の結び付け。PyPI に wheel が無く、ソースから組み立てる。組み立ての指定は `pyproject.toml` の `[tool.uv.config-settings-package]`）で Qwen3-4B（Q4_K_M の GGUF）を動かす。依存グループ `generation`（`uv.lock` で固定。開発環境の `uv sync` の既定に入る）。出荷するイメージにも入れた（Dockerfile の `--group generation`。ソースからの組み立てに要る build-essential・cmake は、サーバーの依存を入れる段にだけ入れ、最終のイメージには残らない。`llama_cpp 0.3.36`）
 
 ## ディレクトリ構成
 ```
@@ -33,13 +33,14 @@ output_system/
 │   │   ├── interpreter/      # 通訳ワーカー（会議の間だけ動く別のプロセス）。protocol.py（メッセージの型とフレーム）、client.py（親側の起動・送受信・停止）、entry.py/__main__.py（子の入口。通信を断つ備え）、worker.py（待ち行列と字幕の組み立て）、segmenter.py/vad.py（発話の区切り）、transcriber.py、translator.py、engines.py/fake.py（差し替え口と偽のエンジン）、locations.py、settings.py。使い方・測定値は docs/interpreter.md
 │   │   ├── worker_ipc.py, worker_client.py # 2 つのワーカー共通の枠の読み書き・出力の書き込み・親側のプロセス管理（固まったワーカーの強制終了を含む）
 │   │   ├── generation/       # 生成ワーカー（要約と質問を作る別のプロセス）。protocol.py（メッセージの型）、client.py（親側）、entry.py/__main__.py（子の入口。通信を断つ備え）、worker.py（待ち行列・中断・割り当ての反映）、pipeline.py（ブロック・中間メモ・統合・作り直し）、prompts.py（指示の文面・出力の形）、results.py（出力の検証）、inputs.py（ブロック分けと質問の入力の組み立て。依頼を作る側が使う）、cpu.py、engines.py/llama.py/fake.py（差し替え口・本物・偽）、locations.py、settings.py。使い方・測定値は docs/generation.md
+│   │   ├── jobs/             # 作成ジョブ管理部（要約と質問の作成を 1 件ずつ決めた順に実行）。models.py（種類・状況・待ち時間 `JobTimeline`）、registry.py（メモリの上の置き場・重複の判定。鍵つき）、policy.py（実行順の規則。純粋な関数。見直すときはここだけ）、manager.py（管理のタスク。生成ワーカーの起動・停止・依頼・中断・失敗・処理ログ）、workers.py（生成ワーカーの起動の入口。テストは偽のエンジンを渡す）、outcomes.py（結果の受け取り先の窓口）、notices.py（`job.*` の通知）、errors.py（`SUMMARY_*`・`QUESTION_*`）。使い方は docs/jobs.md
 │   │   ├── records/          # 記録保存部。database.py（接続・構造の版の確認・専用の実行器）、migrations.py（版の一覧と移行）、schema.py（版 1 の 5 つの表・桁の上限・区分コード）、models.py（Meeting・Subtitle・区分）、times.py（UTC のミリ秒の変換）、store.py（会議と字幕の保存と読み出し・失敗の変換とエラーログ）、errors.py（RecordSchemaError と RecordError 系）
 │   │   ├── models/           # モデル管理部。definition.py（定義の検証）、store.py（置き場・一致の確認）、download.py（唯一の外向きの通信）、hosts.py（通信を許すホスト）、fetch.py（確認→入手の流れ）、manager.py（準備状況）、failure.py（失敗の原因）
 │   │   │   └── conversion/   # 翻訳モデルの変換。アプリサーバー側: service.py（管理部への口）・process.py（起動と見届け）・receipt.py（控えと判定）・layout.py・protocol.py。変換プロセス側: worker.py・network_guard.py・sandbox.py・safe_torch.py
 │   │   ├── meetings/         # 会議管理部。transitions.py（遷移規則の表）、manager.py（開始・終了の窓口、進行中は 1 件）、session.py（会議 1 件の音声・字幕・終了・中断・ワーカーの起動し直し）、inputs.py、errors.py、workers.py（ワーカーの起動の入口。テストは偽のエンジンを渡す）。使い方は docs/meetings.md
 │   │   ├── notify/hub.py     # 通知部（/ws/events）
 │   │   └── api/{health,models,meetings,ws}.py  # /api/health、/api/models/*、POST /api/meetings と /end、GET /api/meetings/{会議番号}/subtitles、/ws/audio/{会議番号} と /ws/events
-│   └── test/                 # src と同じ構造。test/container/ は起動したコンテナを相手にする（MMD_CONTAINER_URL のときだけ動く）。test/browser/ はブラウザーで手動で確かめる確認用のサーバー（pytest は集めない）。test/distribution_server.py（擬似の配布元、HTTPS）と test/model_fakes.py（小さな定義・偽の入手の部品）と test/interpreter_audio.py（合成音声・音声ファイルの読み込み）は共通の道具。test/measure/measure_interpreter.py は、本物のモデルで字幕の遅れとメモリを測る道具、test/measure/measure_generation.py は、生成ワーカーの作成時間とメモリを測る道具（どちらも pytest は集めない）。test/meeting_fakes.py は会議管理部のテストの道具（偽のエンジンの入口、本物の uvicorn を起動する running_app、記録の読み取り）。test/generation_fakes.py（偽の文章生成）と test/meeting_subtitles.py（英語の会議の字幕の見本。測定と動作確認用）も共通の道具
+│   └── test/                 # src と同じ構造。test/container/ は起動したコンテナを相手にする（MMD_CONTAINER_URL のときだけ動く）。test/browser/ はブラウザーで手動で確かめる確認用のサーバー（pytest は集めない）。test/distribution_server.py（擬似の配布元、HTTPS）と test/model_fakes.py（小さな定義・偽の入手の部品）と test/interpreter_audio.py（合成音声・音声ファイルの読み込み）は共通の道具。test/measure/measure_interpreter.py は、本物のモデルで字幕の遅れとメモリを測る道具、test/measure/measure_generation.py は、生成ワーカーの作成時間とメモリを測る道具（どちらも pytest は集めない）。test/meeting_fakes.py は会議管理部のテストの道具（偽のエンジンの入口、本物の uvicorn を起動する running_app、記録の読み取り）。test/generation_fakes.py（偽の文章生成）と test/meeting_subtitles.py（英語の会議の字幕の見本。測定と動作確認用）も共通の道具。test/job_fakes.py は作成ジョブ管理部のテストの道具（同じプロセスで動かす偽の生成ワーカー `InProcessLauncher`、別のプロセスで動かす `ProcessLauncher`、ブロックの区切りで止める位置を決める `BlockGate`）
 ├── frontend/
 │   ├── src/{routes.ts,router.tsx,components/AppFrame.tsx,screens/*,styles/{frame,notices,live}.css}
 │   ├── src/events/           # 通知の受信と再接続。EventConnection.ts（/ws/events への接続・つなぎ直し）、EventsProvider.tsx（useEvent・useReloadOnConnect。AppFrame が置く）、eventTypes.ts（通知の型と読み替え）。使い方は docs/events.md
@@ -53,7 +54,7 @@ output_system/
 │   └── test/                 # src と同じ構造。test/browser/capture-check/ は実ブラウザーで音声の取り込みを確かめる確認用のページ（ビルドの対象外。出荷しない）。test/audio/fakes.ts は偽のトラック・ストリーム・WebSocket・AudioContext・処理部
 ├── tools/with-pinned-node.sh # Dockerfile と同じ版の Node.js で、渡されたコマンド（npm install など）を実行する
 ├── config/                   # tuning.toml（調整値の仮置き）、models.toml（3 つの AI モデルの定義）、translation_alternatives.md（翻訳モデルの代わりの候補）
-├── docs/                     # errors.md（エラーの扱い・コード一覧）、notices.md（画面の部品の使い方）、models.md（入手・変換）、interpreter.md（通訳ワーカー・測定値）、generation.md（生成ワーカー・測定値）、meetings.md（会議の開始と終了・通知・実機での確認）、events.md（通知の受信と再接続）、live-screen.md（「会議中」の画面と確認）、prepare-screen.md（「会議の準備」の画面と確認）
+├── docs/                     # errors.md（エラーの扱い・コード一覧）、notices.md（画面の部品の使い方）、models.md（入手・変換）、interpreter.md（通訳ワーカー・測定値）、generation.md（生成ワーカー・測定値）、meetings.md（会議の開始と終了・通知・実機での確認）、events.md（通知の受信と再接続）、live-screen.md（「会議中」の画面と確認）、prepare-screen.md（「会議の準備」の画面と確認）、jobs.md（作成ジョブ管理部）
 ```
 
 ## ビルド・起動方法
@@ -135,6 +136,11 @@ output_system/
 - 遷移規則の表は `meetings/transitions.py` の 1 か所（15 行）。状態を変えるのは `meetings/` と将来の `jobs/` だけ（`update_meeting` の呼び出し元を `test_state_change_boundary.py` が構文木で検査）。要約・削除・復旧の遷移は表にだけあり、使う部（作成ジョブ管理部など）はまだ無い
 - 通知は `{"type": "対象.出来事", ...}`: `subtitle.created`（保存が確定してから）、`meeting.state_changed`、`error.occurred`（`meeting_id`・`category`・`code`・`message`・`action`）、`model.status_changed`（モデル管理部の発行先は通知部）。送り待ちが 1,000 件を超えた画面だけ 1013 で閉じる。保存に失敗した字幕は通知せず順番も使わない
 - `WorkerClient`: `get` が停止完了か `WorkerExited` を返したあとは、`stop` が停止完了を待たずに片付ける。壊れた出力のときの `WorkerExited` は、子の終了を待たずに届く（子を止めるのは受け取った側）。`finish(timeout_seconds=)` で依頼を書く待ちを区切れる。`WorkerProcess.write` は `select.poll`（記述子 1024 以上でも動く）
+- 作成ジョブ管理部（`jobs/`）は、管理のタスク 1 つが、出来事（受け付け・会議の知らせ・ワーカーのメッセージ）を 1 つずつ処理し、そのたびに現在の状態（`Situation`）から、`policy.py` の純粋な関数（`pick_next`・`yield_reason`・`needs_worker`）でやるべきことを決め直す。実行順は確認事項 13 の仮置き。見直すときは `policy.py` だけを変える。ジョブはメモリの上だけ（ADR-12）で、アプリが止まれば消える。作成中は同時に 1 件。質問は要約より先。会議中は質問だけ実行し、要約は後回し
+- 順番を譲る・後回しにする: 作成中の要約へ、ブロックの区切りで止まるよう頼み（`interrupt`）、止まったら中間メモと次のブロックの番号を覚えて `queued` へ戻す。再開は続きのブロックから依頼する。質問が待ち、通訳中の会議もあるときは、後回しの理由を優先する（質問のあとも、会議が終わるまで再開しないため）。止まるよう頼んだあとで状況が変わっても、頼んだときの理由で「後回し」か「譲った」かを処理ログに残す（`_interrupt_reason`）。ブロックの途中では打ち切らない（確認事項 13 で目標に届かないときの見直しの候補）
+- 会議管理部は、`meeting_started` と `interpreter_stopped` を作成ジョブ管理部へ知らせる。`interpreter_stopped` は、通訳ワーカーを止めたあと、要約を始める呼び出し（`on_meeting_ended`）より先に呼ぶ。2 つのワーカーのメモリを重ねないため。会議中に起動する生成ワーカーは、CPU の割り当てを会議中にして始める
+- 結果の保存と、会議の状態の変更は、作成ジョブ管理部ではしない。`JobOutcomeHandler`（`summary_ready`・`questions_ready`・`summary_failed`）の受け取り先を `create_app(job_outcomes=...)` へ渡す。省略は、結果を捨てる `NullOutcomeHandler`。PBI 5.2・5.3 が実装する。会議を `summarizing` にしてから `submit_summary` を呼ぶのは、依頼する側。窓口が終わってから、ジョブを完了にして通知する（窓口が例外なら `*_SAVE_FAILED`）
+- 生成ワーカーが止まったときは、理由を問わず（強制終了・出力の終わり・依頼を書けない例外）、作成中のジョブだけを失敗にする（`*_WORKER_STOPPED`）。待機中のジョブは、次のワーカーの起動で続く。ブラウザー（通知の接続）は持たないため、閉じても作成は続く。処理ログは `job_*`（本文なし。件数と文字数だけ）。メモリ使用量は、PBI 4.1 を後回しにしたため記録していない（`_log_job` の `job_finished` に足す。docs/jobs.md）
 
 - 通知の受信は `AppFrame` の `EventsProvider` が 1 本持つ。`useEvent(種類, 関数)` で購読し、型は `eventTypes.ts` に足す（いまは `subtitle.created` だけ）。切れるとお知らせ帯に offline を出し、1・2・4・8・10 秒の間隔でつなぎ直す。`useReloadOnConnect(関数)` は開通のたびに呼ぶ（登録した時点で開通済みなら呼ばない。開いた時点の読み込みは画面が行う）。通知の重複は、受け取る側が順番で除く（`mergeSubtitles`）
 - 「会議中」は、開始の応答を `location.state.meeting` から受け取る。読めない・会議番号が違う・再読み込みで履歴に残った古い会議（`staleMeetingIdFrom`）なら、「会議の記録」へ置き換えて移す。#68 は `navigate(screenPaths.meetingLive(id), { replace: true, state: { meeting: 応答 } })` で移ること。**「会議を終了する」は終了の API を呼んで記録へ移るだけで、音声の取り込み（`AudioCaptureSession`）を止めない。#68 が、開始の流れの側で `stop()` と `close()` を呼ぶこと**。会議の中断（`meeting.state_changed` の `interrupted`）で記録へ移る動きは、まだ無い
@@ -197,6 +203,8 @@ output_system/
 - 共通の道具を `test/meeting_fakes.py` に集めた（`__init__.py` が無いため、テストのファイル同士の import はできない）。ワーカーを SIGSTOP で固める確認は、`os.killpg(pid, SIGSTOP)`。止めた後の後始末は SIGKILL
 - コンテナを作り直した直後の最初の会議は、モデルの読み込みが冷えていて、最初の字幕の通知まで 36.7 秒かかった（2 回目は 6.2 秒）。遅れを測るときは、先に 1 回会議を流す
 - コンテナの中で `docker exec ... python -c "<コード>"` からワーカーを探すとき、コードの文字列にワーカーの起動の引数（`--output-fd`）が入っていると、探した自分自身を数える。文字列を `+` で分けて書き、自分のプロセス番号を除く
+- `docker compose build` の層の再利用が効くと、生成ワーカーの部品の組み立て（llama.cpp のコンパイル）は数秒で終わる。Dockerfile の `uv sync` の行か `pyproject.toml`・`uv.lock` を変えると、組み立て直しになる。出荷するコンテナで本物のモデルを動かす確認は、`docker exec -i <コンテナ> python - < <スクリプト>` で、`ProductionGenerationLauncher` と `JobManager` を直接動かす（アプリを通さない）
+- 作成ジョブ管理部のテストで、ブロックの区切りで止まる位置は `BlockGate("block 1")` で決める（そのブロックの中間メモを作り始めたら `reached`、`release` を立てるまで待つ）。強制終了は `ProcessLauncher`（別のプロセスの偽のエンジン）へ `os.kill(pid, SIGKILL)`。同じプロセスの偽は `crash()`
 
 - 画面のテストで「会議の準備」を開くと、準備状況の取得（`GET /api/models/status`）が走る。fetch の偽物が無いと、領域の中のエラーが出て、お知らせ帯の `alert` の数を数えるテストが崩れる（`AppFrame.test.tsx` に準備完了を返す fetch を置いた）。「会議の準備」のテストは `vi.mock('.../audio/browserEnvironment')` で偽の環境（`test/audio/fakes.ts`）に替える
 - 経路の状態（`router.state`）が変わっても、画面の描画は少し遅れる。`waitFor(pathname)` の直後の `getByRole` は、3 回に 1 回ほど落ちた。`findByRole` で待つ
@@ -216,3 +224,4 @@ output_system/
 - PBI #57: 会議の開始（`POST /api/meetings`）と終了（`POST /api/meetings/{会議番号}/end`）、音声の WebSocket（`/ws/audio/{会議番号}`。届いた日時を付けて順に通訳ワーカーへ）、通知部（`/ws/events`）、字幕の「保存してから通知」、接続切れでの中断、通訳ワーカーの起動し直し、遷移規則の表。出荷するコンテナで本物のモデルを動かして確認した（`docs/meetings.md`）。画面の接続、字幕の状況・遅れの測定・警告（Epic 4）、要約を始める本体（Epic 5）、起動時の復旧（PBI 7.1）は含まない
 - PBI #64: 通知の受信と再接続（`/ws/events`、切断でお知らせ帯、開通のたびの読み直し）、「会議中」の画面（タイトル・経過時間・音声の出どころ・案内・終了の確認と終了）、字幕の一覧（通知で追加・順番で重複を除く・最新まで自動で進む・過去へ戻っている間は進まず「最新の字幕へ戻る」・再接続のあとの読み直し）、`GET /api/meetings/{会議番号}/subtitles`。出荷するコンテナで本物のモデルを動かして確認した（`docs/live-screen.md`）。質問の領域・字幕の状況・遅れの警告・取り込み停止の選択は含まない
 - PBI #68: 「会議の準備」の画面（タイトルと音声の出どころの入力と検査、取り込み手順の案内と注意書き、AI モデルの準備状況・入手のやり直し、開始の流れ: 取り込み → 会議を作る → 音声の接続 → 「会議中」、取り込めない・開始できないときの案内とお知らせ、取りやめる）。「会議の一覧」に「新しい会議を始める」の入口。「会議中」の終了で取り込みを止める。出荷するコンテナを Chromium の疑似入力で確認した（`docs/prepare-screen.md`）。会議の一覧の表示（PBI 6.1）、取り込み停止の選択（PBI 4.3）、会議の中断の表示、ディスクの空きの警告は含まない
+- PBI #92: 作成ジョブ管理部（要約と質問の作成を、メモリの上で受け付け、生成ワーカーで 1 件ずつ実行）。質問が要約より先、同じ種類は受け付けた順。同じ会議・同じ種類の待機中か作成中は 1 件まで（2 回目は既存のジョブを返す）。作成中の要約は、質問が待てばブロックの区切りで順番を譲り、通訳中の会議があれば後回しにして、続きのブロックから再開する。会議の終了の直後は通訳ワーカーを止めてから要約を始め、実行できるジョブが無くなったら生成ワーカーを止める。生成ワーカーが止まったら作成中のジョブを失敗にする。受け付け・開始・譲る・後回し・再開・終了を、待った時間つきで処理ログへ出す。生成ワーカーの部品を、出荷するイメージへ入れた。結果の保存と会議の状態の変更（PBI 5.2・5.3）、作成の依頼の API、画面への表示、終了時のメモリ使用量の記録（PBI 4.1 の後）は含まない
