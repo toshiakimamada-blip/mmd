@@ -44,6 +44,7 @@ output_system/
 │   ├── src/{routes.ts,router.tsx,components/AppFrame.tsx,screens/*,styles/{frame,notices,live}.css}
 │   ├── src/events/           # 通知の受信と再接続。EventConnection.ts（/ws/events への接続・つなぎ直し）、EventsProvider.tsx（useEvent・useReloadOnConnect。AppFrame が置く）、eventTypes.ts（通知の型と読み替え）。使い方は docs/events.md
 │   ├── src/{api,meetings,subtitles}/ # api: apiClient.ts（ApiError・requestJson）と meetingsApi.ts。meetings: liveMeeting.ts（「会議中」が受け取る会議）・経過時間。subtitles: 字幕の型・mergeSubtitles・useMeetingSubtitles・formatClockTime
+│   ├── src/screens/prepare/ + src/meetings/ + src/models/ # 「会議の準備」: PrepareForm（入力・二度押しの防止）・PrepareGuidance・ModelStatusPanel。meetings/: meetingInput.ts（検査）・startMeeting.ts（開始の流れ）・MeetingCaptureProvider.tsx（取り込みの預け先）・guidanceTexts.ts（案内の文言を集めた 1 か所）。models/: modelStatus.ts・useModelStatus.ts。docs/prepare-screen.md
 │   ├── src/screens/live/ + src/components/subtitles/ # 「会議中」の中身と字幕の行・一覧・追いかける領域（SubtitleRow は「会議の記録」でも使い回す）。docs/live-screen.md
 │   ├── scripts/              # ビルドした dist/ に外部の URL への参照が無いかの検査（npm run build の最後に走る）
 │   ├── src/errors/           # エラーの型と、エラーコードごとの文言の一覧（errorMessages.ts）
@@ -52,7 +53,7 @@ output_system/
 │   └── test/                 # src と同じ構造。test/browser/capture-check/ は実ブラウザーで音声の取り込みを確かめる確認用のページ（ビルドの対象外。出荷しない）。test/audio/fakes.ts は偽のトラック・ストリーム・WebSocket・AudioContext・処理部
 ├── tools/with-pinned-node.sh # Dockerfile と同じ版の Node.js で、渡されたコマンド（npm install など）を実行する
 ├── config/                   # tuning.toml（調整値の仮置き）、models.toml（3 つの AI モデルの定義）、translation_alternatives.md（翻訳モデルの代わりの候補）
-├── docs/                     # errors.md（エラーの扱い・コード一覧）、notices.md（画面の部品の使い方）、models.md（入手・変換）、interpreter.md（通訳ワーカー・測定値）、generation.md（生成ワーカー・測定値）、meetings.md（会議の開始と終了・通知・実機での確認）、events.md（通知の受信と再接続）、live-screen.md（「会議中」の画面と確認）
+├── docs/                     # errors.md（エラーの扱い・コード一覧）、notices.md（画面の部品の使い方）、models.md（入手・変換）、interpreter.md（通訳ワーカー・測定値）、generation.md（生成ワーカー・測定値）、meetings.md（会議の開始と終了・通知・実機での確認）、events.md（通知の受信と再接続）、live-screen.md（「会議中」の画面と確認）、prepare-screen.md（「会議の準備」の画面と確認）
 ```
 
 ## ビルド・起動方法
@@ -137,6 +138,9 @@ output_system/
 
 - 通知の受信は `AppFrame` の `EventsProvider` が 1 本持つ。`useEvent(種類, 関数)` で購読し、型は `eventTypes.ts` に足す（いまは `subtitle.created` だけ）。切れるとお知らせ帯に offline を出し、1・2・4・8・10 秒の間隔でつなぎ直す。`useReloadOnConnect(関数)` は開通のたびに呼ぶ（登録した時点で開通済みなら呼ばない。開いた時点の読み込みは画面が行う）。通知の重複は、受け取る側が順番で除く（`mergeSubtitles`）
 - 「会議中」は、開始の応答を `location.state.meeting` から受け取る。読めない・会議番号が違う・再読み込みで履歴に残った古い会議（`staleMeetingIdFrom`）なら、「会議の記録」へ置き換えて移す。#68 は `navigate(screenPaths.meetingLive(id), { replace: true, state: { meeting: 応答 } })` で移ること。**「会議を終了する」は終了の API を呼んで記録へ移るだけで、音声の取り込み（`AudioCaptureSession`）を止めない。#68 が、開始の流れの側で `stop()` と `close()` を呼ぶこと**。会議の中断（`meeting.state_changed` の `interrupted`）で記録へ移る動きは、まだ無い
+- 取り込み中の音声（`AudioCaptureSession`）は、`MeetingCaptureProvider`（`AppFrame` が置く）が預かる。「会議を終了する」は `stop()` → `POST /api/meetings/{会議番号}/end` → `release()`（接続を閉じる）の順。先に閉じると、アプリサーバーが接続切れとみなして会議を中断にする。預けた会議の「会議中」から離れる（戻る操作など）と、接続を閉じる（実機で、約 4 秒で中断になることを確認）。接続が切れた取り込みは `forget` で預かりをやめるだけで、中断の表示は未実装（Epic 4）
+- 開始の流れは `meetings/startMeeting.ts`: 取り込み → 会議を作る → 音声の接続（応答の直後）。結果は `StartOutcome`（started・capture_failed・rejected・invalid_input）。取り込めない失敗は案内の領域（失敗した出どころの手順を強調）、開始を断られた失敗（`MEETING_ALREADY_RUNNING`・`MODEL_NOT_READY` など）はお知らせ帯、アプリサーバーの入力の再検査は項目の下に出す。音声の接続を始められなければ、作った会議をすぐ終了して取り込みを止める。どの失敗でも入力は残る
+- 準備状況（`useModelStatus`）は、取得・通知 `model.status_changed`・つなぎ直しの読み直しで更新する。取得の応答より新しい通知が先に届いたら、通知を優先する（古い応答で上書きしない）。案内の文言は `meetings/guidanceTexts.ts` の 1 か所
 - 字幕の領域は、最下部から 24px 以内かで追いかけているかを決める。字幕の取得は `cache: 'no-store'`（会議の内容を HTTP キャッシュに残さない）。失敗は `ApiError` にそろえ、画面は `toDisplayError` で文言を引く。経過時間は、秒の切り替わりで更新し（`setInterval` だと秒がとぶ）、タブが見えたときに直す
 
 ## はまりポイント
@@ -194,6 +198,11 @@ output_system/
 - コンテナを作り直した直後の最初の会議は、モデルの読み込みが冷えていて、最初の字幕の通知まで 36.7 秒かかった（2 回目は 6.2 秒）。遅れを測るときは、先に 1 回会議を流す
 - コンテナの中で `docker exec ... python -c "<コード>"` からワーカーを探すとき、コードの文字列にワーカーの起動の引数（`--output-fd`）が入っていると、探した自分自身を数える。文字列を `+` で分けて書き、自分のプロセス番号を除く
 
+- 画面のテストで「会議の準備」を開くと、準備状況の取得（`GET /api/models/status`）が走る。fetch の偽物が無いと、領域の中のエラーが出て、お知らせ帯の `alert` の数を数えるテストが崩れる（`AppFrame.test.tsx` に準備完了を返す fetch を置いた）。「会議の準備」のテストは `vi.mock('.../audio/browserEnvironment')` で偽の環境（`test/audio/fakes.ts`）に替える
+- 経路の状態（`router.state`）が変わっても、画面の描画は少し遅れる。`waitFor(pathname)` の直後の `getByRole` は、3 回に 1 回ほど落ちた。`findByRole` で待つ
+- 実ブラウザーの確認（疑似入力）: `curl` で `POST /api/meetings` を叩くときは `-H "Origin: <宛先と同じ>"` が要る。音声をつながない会議は 30 秒で中断になる。安全な接続として扱わせる起動設定を外すと `mediaDevices` が無く、`AUDIO_CAPTURE_FAILED` を再現できる（疑似入力では、共有の取りやめと音声なしは再現できない）。疑似の音声は PyAV で 48kHz・ステレオの WAV にする（`docs/prepare-screen.md`）
+- 1 回目の会議で、約 25 秒間、画面の経過時間と字幕が更新されないように見えた（その後は追いついた）。同じ手順を 2 回繰り返しても再現しなかった。原因は未特定
+
 ## 実装済み機能
 - PBI #2: コンテナの起動、共通の枠と 4 画面の骨組み、`GET /api/health`、配信部、名前付きボリューム 2 つ、自動再起動
 - PBI #7: 設定の読み込み（環境変数と調整値）、3 種類のログ（標準出力・許可リスト）、共通のエラーの形（サーバーと画面）、お知らせ帯・7 つのエラー表示パターン・確認の表示の部品、対応していないブラウザーの案内
@@ -206,3 +215,4 @@ output_system/
 - PBI #52: ブラウザーでの音声の取り込みと送信。画面共有（PC の音声。映像は破棄）とマイクから音声を得て、失敗の理由を 4 種類で返す。16kHz・モノラル・16 ビットの PCM に変換して、約 100 ミリ秒のフレームで `/ws/audio/{会議番号}` へ送る（詰まっても順序を保ち、欠落しない）。共有が止まったことを検知し、`capture.stopped` を送って呼び出し側へ通知し、同じ接続で取り込み直せる（`capture.resumed`）。Chromium 156 と Edge 155 の実ブラウザー（疑似入力）で確認済み。会議の開始の画面と、サーバー側で音声を受け取る経路は含まない。手順と結果は `output_system/docs/audio-capture.md`
 - PBI #57: 会議の開始（`POST /api/meetings`）と終了（`POST /api/meetings/{会議番号}/end`）、音声の WebSocket（`/ws/audio/{会議番号}`。届いた日時を付けて順に通訳ワーカーへ）、通知部（`/ws/events`）、字幕の「保存してから通知」、接続切れでの中断、通訳ワーカーの起動し直し、遷移規則の表。出荷するコンテナで本物のモデルを動かして確認した（`docs/meetings.md`）。画面の接続、字幕の状況・遅れの測定・警告（Epic 4）、要約を始める本体（Epic 5）、起動時の復旧（PBI 7.1）は含まない
 - PBI #64: 通知の受信と再接続（`/ws/events`、切断でお知らせ帯、開通のたびの読み直し）、「会議中」の画面（タイトル・経過時間・音声の出どころ・案内・終了の確認と終了）、字幕の一覧（通知で追加・順番で重複を除く・最新まで自動で進む・過去へ戻っている間は進まず「最新の字幕へ戻る」・再接続のあとの読み直し）、`GET /api/meetings/{会議番号}/subtitles`。出荷するコンテナで本物のモデルを動かして確認した（`docs/live-screen.md`）。質問の領域・字幕の状況・遅れの警告・取り込み停止の選択は含まない
+- PBI #68: 「会議の準備」の画面（タイトルと音声の出どころの入力と検査、取り込み手順の案内と注意書き、AI モデルの準備状況・入手のやり直し、開始の流れ: 取り込み → 会議を作る → 音声の接続 → 「会議中」、取り込めない・開始できないときの案内とお知らせ、取りやめる）。「会議の一覧」に「新しい会議を始める」の入口。「会議中」の終了で取り込みを止める。出荷するコンテナを Chromium の疑似入力で確認した（`docs/prepare-screen.md`）。会議の一覧の表示（PBI 6.1）、取り込み停止の選択（PBI 4.3）、会議の中断の表示、ディスクの空きの警告は含まない
