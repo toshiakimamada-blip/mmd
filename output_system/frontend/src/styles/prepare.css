@@ -1,0 +1,158 @@
+/*
+ * 「会議の準備」の画面（S-02）の見た目。
+ *
+ * 見た目の方針
+ * - 利用者は、説明書なしで会議を始める。上から「入力 → 案内 → AI モデルの準備 → 操作」の順に、
+ *   一本道で読めるようにする。枠で囲んだカードを重ねず、領域は余白と細い線で分ける。
+ * - 目立たせるのは、開始のボタン 1 つ。ヘッダと同じ紺で塗りつぶす。取りやめるは、紺の枠だけにして控えめにする。
+ *   押せない間は、色を薄くして残す（操作の場所を見失わないため）。
+ * - 色は frame.css の変数を使う。文字と背景の明るさの差は AA（通常の文字で 4.5 対 1 以上）を満たす。
+ * - 文字の大きさと余白は rem で決め、ブラウザーの拡大に追従させる。アニメーションは使わない。
+ */
+
+.prepare {
+  display: flex;
+  flex-direction: column;
+  gap: 1.5rem;
+  /* 行が長くなりすぎないよう、読む幅に収める */
+  max-width: 48rem;
+}
+
+.prepare-form {
+  display: flex;
+  flex-direction: column;
+  gap: 1.5rem;
+}
+
+.prepare-form__field {
+  display: flex;
+  flex-direction: column;
+}
+
+.prepare-form__label {
+  padding: 0;
+  font-weight: 700;
+}
+
+.prepare-form__hint {
+  margin: 0 0 0.375rem;
+  color: var(--color-ink-muted);
+  font-size: 0.9375rem;
+}
+
+.prepare-form__input {
+  width: 100%;
+  min-height: 2.75rem;
+  padding: 0 0.75rem;
+  border: 2px solid #6b7886;
+  border-radius: 0.25rem;
+  background: #fff;
+  color: var(--color-ink);
+  font: inherit;
+}
+
+/* エラーの欄は、枠でも分かるようにする（色だけに頼らない。エラーの札と文字も出る） */
+.prepare-form__input[aria-invalid='true'] {
+  border-color: var(--notice-error-accent);
+}
+
+.prepare-form__input:disabled {
+  background: #e8ecf0;
+  color: #5b6875;
+}
+
+.prepare-form__group {
+  min-width: 0;
+  margin: 0;
+  padding: 0;
+  border: 0;
+}
+
+.prepare-form__choices {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem 1rem;
+  margin-top: 0.375rem;
+}
+
+/* 選ぶ場所を大きくする。文字の部分も押せる */
+.prepare-form__choice {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  min-height: 2.75rem;
+  padding: 0 1rem 0 0.75rem;
+  border: 2px solid #6b7886;
+  border-radius: 0.25rem;
+  background: #fff;
+  cursor: pointer;
+}
+
+.prepare-form__choice:has(input:checked) {
+  border-color: var(--color-band);
+  background: rgb(23 50 77 / 0.08);
+  font-weight: 700;
+}
+
+.prepare-form__choice input {
+  width: 1.125rem;
+  height: 1.125rem;
+  margin: 0;
+  accent-color: var(--color-band);
+}
+
+.prepare-form__group[aria-invalid='true'] .prepare-form__choice {
+  border-color: var(--notice-error-accent);
+}
+
+/* 操作の領域 */
+.prepare-form__actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.75rem;
+}
+
+.prepare-form__start,
+.prepare-form__cancel {
+  min-width: 10rem;
+  min-height: 2.75rem;
+  padding: 0 1.25rem;
+  border: 2px solid var(--color-band);
+  border-radius: 0.25rem;
+  font: inherit;
+  font-weight: 700;
+  cursor: pointer;
+}
+
+.prepare-form__start {
+  background: var(--color-band);
+  color: var(--color-band-ink);
+}
+
+.prepare-form__start:hover:not(:disabled) {
+  background: #24486b;
+}
+
+.prepare-form__cancel {
+  background: #fff;
+  color: var(--color-band);
+}
+
+.prepare-form__cancel:hover:not(:disabled) {
+  background: rgb(23 50 77 / 0.1);
+}
+
+.prepare-form__start:disabled,
+.prepare-form__cancel:disabled {
+  border-color: #8794a1;
+  cursor: not-allowed;
+}
+
+.prepare-form__start:disabled {
+  background: #8794a1;
+  color: #fff;
+}
+
+.prepare-form__cancel:disabled {
+  color: #5b6875;
+}

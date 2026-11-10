@@ -189,20 +189,25 @@ export const GENERIC_WORDINGS: Readonly<Record<ErrorCategory, ErrorWording>> = O
 });
 
 /**
+ * 分類とエラーコードから、画面に出す形のエラーを作る。
+ * 登録済みのコードは一覧の文言を、未登録のコードは分類ごとの汎用の文言を使う。
+ * サーバーの応答を介さず、画面が自分でエラーを決めるとき（入力の検査、音声の取り込みの失敗）に使う。
+ *
+ * @param category エラーの分類
+ * @param code エラーコード（領域_出来事）
+ */
+export function toDisplayErrorFromCode(category: ErrorCategory, code: string): DisplayError {
+  // Object.hasOwn: "constructor" など、オブジェクトが元から持つ名前を、登録済みと取り違えない。
+  const wording = Object.hasOwn(ERROR_WORDINGS, code) ? ERROR_WORDINGS[code] : GENERIC_WORDINGS[category];
+  return { category, code, message: wording.message, action: wording.action };
+}
+
+/**
  * エラー本文を、画面に出す形にする。
  * 登録済みのコードは一覧の文言を、未登録のコードは分類ごとの汎用の文言を使う。
  *
  * @param body サーバーが返したエラー本文
  */
 export function toDisplayError(body: AppErrorBody): DisplayError {
-  // Object.hasOwn: "constructor" など、オブジェクトが元から持つ名前を、登録済みと取り違えない。
-  const wording = Object.hasOwn(ERROR_WORDINGS, body.code)
-    ? ERROR_WORDINGS[body.code]
-    : GENERIC_WORDINGS[body.category];
-  return {
-    category: body.category,
-    code: body.code,
-    message: wording.message,
-    action: wording.action,
-  };
+  return toDisplayErrorFromCode(body.category, body.code);
 }
