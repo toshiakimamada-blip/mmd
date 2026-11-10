@@ -9,6 +9,7 @@ import { LiveSubtitleView } from '../../components/subtitles/LiveSubtitleView';
 import { toDisplayError } from '../../errors/errorMessages';
 import { formatElapsed } from '../../meetings/formatElapsed';
 import { type LiveMeeting } from '../../meetings/liveMeeting';
+import { useMeetingCapture } from '../../meetings/MeetingCaptureProvider';
 import { useElapsedMilliseconds } from '../../meetings/useElapsedMilliseconds';
 import { SCREENS, screenPaths } from '../../routes';
 import { useMeetingSubtitles } from '../../subtitles/useMeetingSubtitles';
@@ -33,6 +34,7 @@ const END_FAILED_NOTICE_ID = 'end-meeting-failed';
 export function LiveMeetingView({ meeting }: { readonly meeting: LiveMeeting }) {
   const navigate = useNavigate();
   const { post, clear } = useNoticeActions();
+  const capture = useMeetingCapture();
   const elapsed = useElapsedMilliseconds(meeting.startedAt);
   const subtitles = useMeetingSubtitles(meeting.meetingId);
   const subtitlesHeadingId = useId();
@@ -42,15 +44,19 @@ export function LiveMeetingView({ meeting }: { readonly meeting: LiveMeeting }) 
   const [ending, setEnding] = useState(false);
 
   /**
-   * 終了の確認で「終了する」を選んだときの処理。終了を依頼し、済んだら「会議の記録」へ移る。
-   * 履歴は置き換える。戻るボタンで、終わった会議の「会議中」へ戻らないため。
-   * 失敗したら、お知らせ帯にエラーを出し、「会議中」にとどまる（もう一度試せる）。
+   * 終了の確認で「終了する」を選んだときの処理。音声の取り込みを止め、終了を依頼し、済んだら音声の接続を閉じて
+   * 「会議の記録」へ移る。
+   * - 取り込みは、終了の依頼の前に止める（残りの音声を送りきる）。接続は、依頼のあとに閉じる。
+   *   先に閉じると、アプリサーバーが音声の接続切れとみなして、会議を中断にする
+   * - 履歴は置き換える。戻るボタンで、終わった会議の「会議中」へ戻らないため
+   * - 失敗したら、お知らせ帯にエラーを出し、「会議中」にとどまる（もう一度試せる。止めた取り込みは、もう一度止めても害が無い）
    */
   const endNow = async () => {
     setConfirming(false);
     setEnding(true);
     clear(END_FAILED_NOTICE_ID);
     try {
+      await capture.stop();
       await endMeeting(meeting.meetingId);
     } catch (error) {
       if (!(error instanceof ApiError)) {
@@ -60,6 +66,7 @@ export function LiveMeetingView({ meeting }: { readonly meeting: LiveMeeting }) 
       post({ kind: 'error', id: END_FAILED_NOTICE_ID, error: toDisplayError(error.body) });
       return;
     }
+    capture.release();
     navigate(screenPaths.meetingRecord(meeting.meetingId), { replace: true });
   };
 

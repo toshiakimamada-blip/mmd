@@ -269,6 +269,19 @@ describe('AppFrame', () => {
     try {
       FakeEventSocket.reset();
       vi.stubGlobal('WebSocket', FakeEventSocket);
+      // 移った先の「会議の準備」は、AI モデルの準備状況を取得する。準備完了と答える相手を置く
+      // （答えが無いと、領域の中のエラーが出て、お知らせ帯のエラーの数と混ざる）。
+      vi.stubGlobal(
+        'fetch',
+        vi.fn(() =>
+          Promise.resolve(
+            new Response(
+              JSON.stringify({ status: 'ready', progress: null, failure_kind: null, error_code: null, conversion_implemented: true }),
+              { status: 200, headers: { 'Content-Type': 'application/json' } },
+            ),
+          ),
+        ),
+      );
       const router = openUrl('/');
       act(() => FakeEventSocket.last.open());
       expect(screen.queryByRole('alert')).not.toBeInTheDocument();

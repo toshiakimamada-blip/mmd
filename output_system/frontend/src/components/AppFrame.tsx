@@ -3,6 +3,7 @@ import { Outlet, useMatches } from 'react-router';
 
 import { APP_NAME } from '../appInfo';
 import { EventsProvider } from '../events/EventsProvider';
+import { MeetingCaptureProvider } from '../meetings/MeetingCaptureProvider';
 import { type ScreenDefinition } from '../routes';
 import { BrowserSupportNotice, NoticeBand, NoticeProvider } from './notices';
 
@@ -41,12 +42,16 @@ function useCurrentScreen(): ScreenDefinition {
  * アプリサーバーとの接続（/ws/events）は 1 本を使い回す。
  * 画面の部品は useNoticeActions でお知らせを出す・消し、useEvent で通知を購読する。
  * 通知の置き場は、つながらないことの表示を出すため、お知らせの置き場の内側に置く。
+ * 取り込み中の音声の置き場（MeetingCaptureProvider）は、会議の開始の画面が預け、「会議中」の画面が止めるため、
+ * 画面の移動をまたいで残る枠に置く。
  */
 export function AppFrame() {
   return (
     <NoticeProvider>
       <EventsProvider>
-        <AppFrameLayout />
+        <MeetingCaptureProvider>
+          <AppFrameLayout />
+        </MeetingCaptureProvider>
       </EventsProvider>
     </NoticeProvider>
   );
