@@ -455,13 +455,17 @@ describe('MeetingPrepareScreen ending the meeting that it started', () => {
    *
    * 【期待結果】
    * - 音声のトラックが止まる → 終了の要求（POST /api/meetings/abc123/end）→ 音声の接続を閉じる の順
+   *   （終了の要求を受けた時点と、接続を閉じた時点の、それぞれでトラックの状態を見る。
+   *   画面が取り込みを止めない・止める順が逆になると、要求の時点でトラックが動いたままになり失敗する）
    * - 「会議の記録」へ移る
    */
   it('should stop the capture before the end request and close the connection after it', async () => {
     const events: string[] = [];
+    // 開始のあとで、取り込んだ音声のトラックを入れる。終了の要求を受けた時点の状態を見るために、先に宣言する。
+    let track: FakeTrack | null = null;
     stubApi({
       end: () => {
-        events.push('end request');
+        events.push(`end request (track stopped: ${track?.readyState === 'ended'})`);
         return Promise.resolve(jsonResponse({ ...wireMeeting('x', 'microphone'), status: 'completed' }));
       },
     });
@@ -473,7 +477,7 @@ describe('MeetingPrepareScreen ending the meeting that it started', () => {
     await waitFor(() => expect(router.state.location.pathname).toBe('/meetings/abc123/live'));
     const socket = env.sockets[0];
     socket.open();
-    const track = env.inputs[0].audio;
+    track = env.inputs[0].audio;
     const originalClose = socket.close.bind(socket);
     socket.close = (code?: number, reason?: string) => {
       events.push(`socket closed (track stopped: ${track.readyState === 'ended'})`);
@@ -485,7 +489,7 @@ describe('MeetingPrepareScreen ending the meeting that it started', () => {
     await user.click(within(screen.getByRole('alertdialog')).getByRole('button', { name: '終了する' }));
 
     await waitFor(() => expect(router.state.location.pathname).toBe('/meetings/abc123'));
-    expect(events).toEqual(['end request', 'socket closed (track stopped: true)']);
+    expect(events).toEqual(['end request (track stopped: true)', 'socket closed (track stopped: true)']);
     expect(track.readyState).toBe('ended');
     await waitFor(() => expect(screen.getByRole('heading', { level: 1 })).toHaveTextContent('会議の記録'));
   });
