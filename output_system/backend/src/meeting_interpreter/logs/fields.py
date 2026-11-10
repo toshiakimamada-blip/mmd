@@ -134,6 +134,17 @@ PROCESSING_LOG: Final = LogKind(
         # プロセスのメモリの最大値（MB）。翻訳モデルの変換が済んだ時点などで出す。
         # 必ず含める項目ではない（出す契機のときだけ付く）。
         FieldSpec("peak_memory_mb", non_negative_number),
+        # 作成ジョブの記録の項目。必ず含める項目ではない（作成ジョブの記録のときだけ付く）。
+        # 作成ジョブの種類（summary か questions）。
+        FieldSpec("job_type", _KIND_WORD),
+        # 作成ジョブの状況（queued・running・succeeded・failed）。
+        FieldSpec("job_status", _KIND_WORD),
+        # 受け付けから、順番を待った時間（ミリ秒）。譲った・後回しにした間の待ちも含む。
+        FieldSpec("wait_ms", non_negative_number),
+        # 生成ワーカーの起動にかかった時間（ミリ秒）。モデルの読み込みを含む。
+        FieldSpec("startup_ms", non_negative_number),
+        # 生成ワーカーが、モデルの読み込みにかかった時間（ミリ秒）。
+        FieldSpec("load_ms", non_negative_number),
     ),
 )
 

@@ -46,7 +46,7 @@ from ..generation.protocol import (
     Summary,
     WorkerError,
 )
-from ..logs import log_error
+from ..logs import log_error, log_processing
 from ..meetings.session import ERROR_OCCURRED, describe_worker_exit, error_payload
 from ..tuning import Tuning
 from ..worker_client import WorkerExited
@@ -62,7 +62,7 @@ from .models import (
 )
 from .notices import JobNotifier, JobPublisher
 from .outcomes import JobOutcomeHandler, NullOutcomeHandler
-from .policy import JobView, Situation, needs_worker, pick_next, yield_reason
+from .policy import JobView, Situation, YieldReason, needs_worker, pick_next, yield_reason
 from .registry import JobRegistry, Registration
 from .workers import GenerationLauncher
 
@@ -190,6 +190,9 @@ class JobManager:
     ) -> Registration:
         registration = self._registry.register(meeting_id, kind, payload)
         if registration.created:
+            record = self._registry.record(registration.job.job_id)
+            if record is not None:
+                self._log_job("job_accepted", record)
             self._wake()
         return registration
 
@@ -318,12 +321,15 @@ class JobManager:
             return
         cpu_mode = CpuMode.MEETING if self._interpreting is not None else CpuMode.NORMAL
         client = self._launcher.create_client()
+        started = self._monotonic()
         try:
             start = self._launcher.start_message(record.trace_id, cpu_mode)
-            await asyncio.to_thread(
+            ready = await asyncio.to_thread(
                 client.start, start, timeout_seconds=self._policy.worker_start_timeout_seconds
             )
         except Exception as error:  # noqa: BLE001 (起動の失敗は、種類だけを残す)
+            record.worker_starts += 1
+            record.worker_start_seconds += self._monotonic() - started
             log_error(
                 "SYSTEM_GENERATION_START_FAILED",
                 COMPONENT,
@@ -334,6 +340,17 @@ class JobManager:
             await asyncio.to_thread(client.stop, timeout_seconds=self._policy.stop_timeout_seconds)
             await self._fail_job(record, JobFailure.WORKER_START_FAILED)
             return
+        startup_seconds = self._monotonic() - started
+        record.worker_starts += 1
+        record.worker_start_seconds += startup_seconds
+        record.model_load_seconds += ready.load_seconds
+        log_processing(
+            "generation_worker_started",
+            meeting_id=record.meeting_id,
+            trace_id=record.trace_id,
+            duration_ms=startup_seconds * 1000,
+            load_ms=ready.load_seconds * 1000,
+        )
         self._attach(client, cpu_mode)
 
     def _attach(self, client: GenerationClient, cpu_mode: CpuMode) -> None:
@@ -429,8 +446,13 @@ class JobManager:
         if record is None:
             return
         resume = ResumePoint(memos=message.memos, next_block=message.next_block)
+        # 待機中へ戻す前の状態で、理由を決める（作成中の要約を止める理由を見る規則のため）。
+        reason = yield_reason(self._situation())
         self._end_current()
         self._registry.mark_queued(record.job_id, resume)
+        # 通訳中の会議のために止めたなら後回し。そうでなければ（質問が待っていた）順番を譲った。
+        postponed = reason is YieldReason.MEETING_IN_PROGRESS or self._interpreting is not None
+        self._log_job("job_postponed" if postponed else "job_yielded", record)
 
     def _end_current(self) -> None:
         """依頼して結果を待っている作成ジョブは、無くなった。"""
@@ -446,7 +468,9 @@ class JobManager:
             return
         self._current_id = record.job_id
         self._interrupt_requested = False
+        resuming = record.timeline.first_wait_seconds is not None
         self._registry.mark_running(record.job_id)
+        self._log_job("job_resumed" if resuming else "job_started", record)
         try:
             await asyncio.to_thread(self._write_request, handle, record)
         except OSError:
@@ -523,6 +547,7 @@ class JobManager:
             return
         self._end_current()
         self._registry.finish(record.job_id, JobStatus.SUCCEEDED)
+        self._log_job("job_finished", record)
 
     async def _on_worker_error(
         self, handle: _Handle, record: JobRecord | None, message: WorkerError
@@ -557,6 +582,37 @@ class JobManager:
         if record is not None:
             await self._fail_job(record, JobFailure.WORKER_STOPPED)
 
+    # --- 処理ログ -------------------------------------------------------------------
+
+    def _log_job(self, process_type: str, record: JobRecord) -> None:
+        """作成ジョブの記録を処理ログに出す。本文は入れず、件数と文字数だけを出す。
+
+        項目
+        - duration_ms: 受け付けてから、この時点までの時間
+        - wait_ms: そのうち、順番を待った時間（譲った・後回しにした間を含む）
+        - item_count: 要約のブロックの数。質問は無し
+        - char_count: 入力の文字数
+        - job_type・job_status: 種類と、この時点の状況
+        - startup_ms・load_ms: 終了の記録だけ。このジョブのために生成ワーカーを起動した時間と、
+          そのうち、モデルの読み込みにかかった時間（起動しなかったジョブには付かない）
+        """
+        now = self._registry.now()
+        finished = process_type == "job_finished"
+        started = finished and record.worker_starts > 0
+        log_processing(
+            process_type,
+            meeting_id=record.meeting_id,
+            trace_id=record.trace_id,
+            duration_ms=record.timeline.elapsed_seconds(now) * 1000,
+            item_count=record.total_blocks,
+            char_count=_input_chars(record),
+            job_type=record.kind.value,
+            job_status=record.status.value,
+            wait_ms=record.timeline.waited_seconds(now) * 1000,
+            startup_ms=record.worker_start_seconds * 1000 if started else None,
+            load_ms=record.model_load_seconds * 1000 if started else None,
+        )
+
     # --- 失敗 -----------------------------------------------------------------------
 
     async def _fail_job(self, record: JobRecord, failure: str) -> None:
@@ -583,6 +639,7 @@ class JobManager:
             if self._current_id == record.job_id:
                 self._end_current()
         self._registry.finish(record.job_id, JobStatus.FAILED, code)
+        self._log_job("job_finished", record)
         self._publish_error(record.meeting_id, error)
 
     def _publish_error(self, meeting_id: str, error: AppError) -> None:
@@ -596,3 +653,20 @@ class JobManager:
                 meeting_id=meeting_id,
                 exception_type=type(cause).__name__,
             )
+
+
+def _input_chars(record: JobRecord) -> int:
+    """作成ジョブの入力の文字数。要約はブロックの合計、質問は字幕と要約の合計。"""
+    payload = record.payload
+    if isinstance(payload, SummaryPayload):
+        return sum(len(block) for block in payload.blocks)
+    question = payload.question_input
+    summary_chars = 0
+    if question.summary is not None:
+        summary_chars = (
+            len(question.summary.overview)
+            + len(question.summary.key_points)
+            + len(question.summary.decisions)
+            + len(question.summary.action_items)
+        )
+    return len(question.transcript) + summary_chars

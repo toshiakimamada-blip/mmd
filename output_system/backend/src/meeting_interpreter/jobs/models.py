@@ -171,6 +171,13 @@ class JobRecord:
     error_code: str | None = None
     # 順番を譲った、または後回しにした要約の、続きの位置。要約が終わったら捨てる。
     resume: ResumePoint | None = field(default=None, repr=False)
+    # この作成ジョブのために生成ワーカーを起動した回数。起動しなかったジョブは 0。
+    worker_starts: int = 0
+    # そのときの起動の時間の合計（秒）。モデルの読み込みを含む。
+    # 作成時間のうち、読み込みの分を切り分けるため、終了の記録に出す。
+    worker_start_seconds: float = 0.0
+    # そのうち、モデルの読み込みにかかった時間の合計（秒）。
+    model_load_seconds: float = 0.0
 
     def snapshot(self) -> JobSnapshot:
         """いまの様子を、変更できない値として切り出す。"""

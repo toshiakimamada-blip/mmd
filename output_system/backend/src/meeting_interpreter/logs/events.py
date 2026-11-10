@@ -97,6 +97,11 @@ def log_processing(
     item_count: int | None = None,
     char_count: int | None = None,
     peak_memory_mb: float | None = None,
+    job_type: str | None = None,
+    job_status: str | None = None,
+    wait_ms: float | None = None,
+    startup_ms: float | None = None,
+    load_ms: float | None = None,
     **not_allowed: object,
 ) -> None:
     """処理ログを出す（情報のレベル）。
@@ -109,6 +114,11 @@ def log_processing(
         item_count: 件数。
         char_count: 文字数。文字数だけを渡し、文字そのものは渡さない。
         peak_memory_mb: プロセスのメモリの最大値（MB）。無ければ省略する（項目ごと出ない）。
+        job_type: 作成ジョブの種類（summary か questions）。作成ジョブの記録だけ。
+        job_status: 作成ジョブの状況（queued・running・succeeded・failed）。
+        wait_ms: 作成ジョブが順番を待った時間（ミリ秒）。
+        startup_ms: 生成ワーカーの起動にかかった時間（ミリ秒）。モデルの読み込みを含む。
+        load_ms: 生成ワーカーが、モデルの読み込みにかかった時間（ミリ秒）。
         **not_allowed: 許可リストに無い項目。渡しても出力されない（捨てる）。
             本文やタイトルなどを渡す誤りが、ログに現れないようにする仕組みの受け口。
     """
@@ -124,6 +134,11 @@ def log_processing(
             "item_count": item_count,
             "char_count": char_count,
             "peak_memory_mb": peak_memory_mb,
+            "job_type": job_type,
+            "job_status": job_status,
+            "wait_ms": wait_ms,
+            "startup_ms": startup_ms,
+            "load_ms": load_ms,
         },
     )
 
