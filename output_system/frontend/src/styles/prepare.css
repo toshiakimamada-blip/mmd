@@ -218,3 +218,90 @@
 .prepare-guidance__notices li + li {
   margin-top: 0.25rem;
 }
+
+/*
+ * AI モデルの準備状況の領域。
+ * 状況は、札の文字（確認中・入手中・変換中・準備完了・入手失敗）で示す。色は補助で、文字が主。
+ * 入手失敗の札は、エラーの札（赤の塗り）をそのまま使う。
+ */
+.model-status {
+  display: flex;
+  flex-direction: column;
+  gap: 0.625rem;
+  padding-top: 1rem;
+  border-top: 1px solid #c3ced8;
+}
+
+.model-status__line {
+  margin: 0;
+}
+
+.model-status__line:focus-visible {
+  outline: 3px solid var(--color-focus);
+  outline-offset: 4px;
+}
+
+.model-status__badge {
+  display: inline-block;
+  padding: 0 0.5rem;
+  border: 2px solid var(--color-band);
+  border-radius: 0.25rem;
+  color: var(--color-band);
+  font-size: 0.875rem;
+  font-weight: 700;
+  line-height: 1.5;
+}
+
+/* 準備完了: 緑の枠と文字（白の背景に対して 7 対 1 以上） */
+.model-status__badge[data-status='ready'] {
+  border-color: #14532d;
+  color: #14532d;
+}
+
+.model-status__progress {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+}
+
+.model-status__bar {
+  flex: 1;
+  height: 0.875rem;
+  accent-color: var(--color-band);
+}
+
+.model-status__percent {
+  min-width: 3.5rem;
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+  text-align: right;
+}
+
+.model-status__retry {
+  min-height: 2.75rem;
+  padding: 0 1.25rem;
+  border: 2px solid var(--color-band);
+  border-radius: 0.25rem;
+  background: #fff;
+  color: var(--color-band);
+  font: inherit;
+  font-weight: 700;
+  cursor: pointer;
+}
+
+.model-status__retry:hover:not(:disabled) {
+  background: rgb(23 50 77 / 0.1);
+}
+
+.model-status__retry:disabled {
+  border-color: #8794a1;
+  color: #5b6875;
+  cursor: not-allowed;
+}
+
+/* 開始のボタンを押せない理由 */
+.prepare-form__start-hint {
+  margin: -0.75rem 0 0;
+  color: var(--color-ink-muted);
+  font-size: 0.9375rem;
+}

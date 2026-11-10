@@ -8,9 +8,10 @@
  *
  * 通知の種類を足すには、AppEvent に型を足し、parseAppEvent の switch に読み替えを足す。
  * 通知部が送る通知の一覧は、output_system/docs/meetings.md の「通知」にある。
- * 使われない通知の型は、使う作業で足す。いまは subtitle.created だけ。
+ * 使われない通知の型は、使う作業で足す。いまは subtitle.created と model.status_changed。
  */
 
+import { parseModelStatus, type ModelStatus } from '../models/modelStatus';
 import { parseSubtitle, type Subtitle } from '../subtitles/subtitleTypes';
 
 /** 字幕の保存が確定したときの通知。 */
@@ -21,8 +22,14 @@ export interface SubtitleCreatedEvent {
   readonly subtitle: Subtitle;
 }
 
+/** AI モデルの準備状況が変わったときの通知。項目は、準備状況の取得（GET /api/models/status）と同じ。 */
+export interface ModelStatusChangedEvent {
+  readonly type: 'model.status_changed';
+  readonly status: ModelStatus;
+}
+
 /** 画面が受け取る通知。type で見分ける。 */
-export type AppEvent = SubtitleCreatedEvent;
+export type AppEvent = SubtitleCreatedEvent | ModelStatusChangedEvent;
 
 /** 通知の種類の名前（subtitle.created など）。 */
 export type AppEventType = AppEvent['type'];
@@ -54,6 +61,10 @@ export function parseAppEvent(text: string): AppEvent | null {
         return null;
       }
       return { type: 'subtitle.created', meetingId: record.meeting_id, subtitle };
+    }
+    case 'model.status_changed': {
+      const status = parseModelStatus(record);
+      return status === null ? null : { type: 'model.status_changed', status };
     }
     default:
       return null;

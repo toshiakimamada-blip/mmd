@@ -71,3 +71,7 @@ export const PREPARE_NOTICES: readonly string[] = [
   ENGLISH_ONLY_NOTICE,
   KEEP_BROWSER_OPEN_NOTICE,
 ];
+
+/** AI モデルの準備が終わるまで「会議を開始する」を押せないことの説明。ボタンのすぐ下に出す。 */
+export const START_BLOCKED_HINT =
+  'AI モデルの準備が終わると、「会議を開始する」を押せるようになります。準備の状況は、上の「AI モデルの準備状況」で確かめられます。';

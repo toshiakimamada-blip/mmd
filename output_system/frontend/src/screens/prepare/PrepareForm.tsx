@@ -31,6 +31,8 @@ export interface PrepareFormProps {
   readonly onCancel: () => void;
   /** false の間は、開始のボタンを押せない見た目で残す（AI モデルの準備が終わるまで）。既定は true。 */
   readonly canStart?: boolean;
+  /** 開始のボタンを押せない理由。ボタンのすぐ下に出し、ボタンの説明として読み上げソフトへ伝える。 */
+  readonly startHint?: string;
   /** 音声の出どころを選んだとき（最初と選び直したとき）に呼ぶ。案内の切り替えに使う。未選択は null。 */
   readonly onSourceChange?: (source: AudioSource | null) => void;
   /** 入力欄と操作のボタンの間に出す内容（案内・AI モデルの準備状況）。 */
@@ -48,13 +50,21 @@ export interface PrepareFormProps {
  *
  * 入力した内容は、開始に失敗してもこの部品の中に残る。
  */
-export function PrepareForm({ onStart, onCancel, canStart = true, onSourceChange, children }: PrepareFormProps) {
+export function PrepareForm({
+  onStart,
+  onCancel,
+  canStart = true,
+  startHint,
+  onSourceChange,
+  children,
+}: PrepareFormProps) {
   const ids = {
     title: useId(),
     titleHint: useId(),
     titleError: useId(),
     sourceError: useId(),
     sourceLegend: useId(),
+    startHint: useId(),
   };
   const [title, setTitle] = useState('');
   const [audioSource, setAudioSource] = useState<AudioSource | null>(null);
@@ -195,6 +205,7 @@ export function PrepareForm({ onStart, onCancel, canStart = true, onSourceChange
           type="submit"
           className="prepare-form__start"
           disabled={pending || !canStart}
+          aria-describedby={startHint === undefined ? undefined : ids.startHint}
         >
           会議を開始する
         </button>
@@ -202,6 +213,11 @@ export function PrepareForm({ onStart, onCancel, canStart = true, onSourceChange
           取りやめる
         </button>
       </div>
+      {startHint === undefined ? null : (
+        <p className="prepare-form__start-hint" id={ids.startHint}>
+          {startHint}
+        </p>
+      )}
     </form>
   );
 }

@@ -244,6 +244,19 @@ describe('PrepareForm', () => {
   });
 
   /**
+   * 【テスト対象】PrepareForm の開始できない理由の表示
+   * 【テスト内容】開始できない状態（canStart が false）で、理由の文（startHint）を渡す
+   * 【期待結果】理由がボタンのすぐ下に表示され、開始のボタンの説明として結びつくこと（読み上げソフトが読める）
+   */
+  it('should explain why the start button is disabled', () => {
+    setup(() => Promise.resolve(), { canStart: false, startHint: '準備が終わるまで押せません。' });
+
+    const hint = screen.getByText('準備が終わるまで押せません。');
+    expect(startButton()).toHaveAccessibleDescription('準備が終わるまで押せません。');
+    expect(hint).toBeInTheDocument();
+  });
+
+  /**
    * 【テスト対象】PrepareForm の取りやめる
    * 【テスト内容】「取りやめる」を押す
    * 【期待結果】取りやめの処理が 1 回呼ばれ、開始は呼ばれないこと

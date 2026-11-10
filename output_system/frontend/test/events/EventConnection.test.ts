@@ -6,7 +6,7 @@ import {
   EventConnection,
   type EventConnectionOptions,
 } from '../../src/events/EventConnection';
-import { type AppEvent } from '../../src/events/eventTypes';
+import { type AppEventOf } from '../../src/events/eventTypes';
 import { FakeEventSocket } from './fakeWebSocket';
 
 const URL = 'ws://toshiakimamada-blip-mmd-output-system:3001/ws/events';
@@ -69,7 +69,7 @@ describe('EventConnection', () => {
    * 【期待結果】型のついた通知が、届いた順に購読者へ渡ること
    */
   it('should deliver typed notifications to subscribers of that type', () => {
-    const received: AppEvent[] = [];
+    const received: AppEventOf<'subtitle.created'>[] = [];
     const connection = createConnection();
     connection.onEvent('subtitle.created', (event) => received.push(event));
     connection.start();
