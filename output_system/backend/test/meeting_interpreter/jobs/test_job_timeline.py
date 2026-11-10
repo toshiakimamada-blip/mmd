@@ -60,6 +60,71 @@ class TestJobTimeline:
 
         assert timeline.waited_seconds(500.0) == 40.0
 
+    def test_should_not_count_the_worker_start_as_waiting(self):
+        """
+        【テスト対象】JobTimeline.begin_worker_start / end_worker_start
+        【テスト内容】受け付け 0 秒、起動の開始 10 秒、起動の終了 40 秒、作成の開始 45 秒
+        【期待結果】待った時間は 10 + 5 = 15 秒（起動の 30 秒は入らない）。最初の開始までの待ちも
+                    15 秒。起動が終わって作成を始めるまでの間は、また待った時間に数える
+        """
+        timeline = JobTimeline(0.0)
+        timeline.begin_worker_start(10.0)
+
+        # 起動の間は、待った時間が増えない。
+        assert timeline.waited_seconds(30.0) == 10.0
+        assert timeline.first_wait_seconds is None
+
+        timeline.end_worker_start(40.0)
+
+        # 起動が終わっても、作成を始めるまでは、待っている。
+        assert timeline.waited_seconds(45.0) == 15.0
+        assert timeline.first_wait_seconds is None
+
+        timeline.mark_started(45.0)
+
+        assert timeline.waited_seconds(100.0) == 15.0
+        assert timeline.first_wait_seconds == 15.0
+        assert timeline.elapsed_seconds(100.0) == 100.0
+
+    def test_should_keep_waiting_when_another_job_is_picked_after_the_worker_start(self):
+        """
+        【テスト対象】JobTimeline.end_worker_start
+        【テスト内容】起動の間に質問が届き、起動が終わったあとは質問が選ばれて、このジョブは待機中の
+                    まま残る（受け付け 0 秒、起動 10〜40 秒、そのまま 90 秒に開始）
+        【期待結果】待った時間は 10 + 50 = 60 秒（起動のあとの待ちを、数え落とさない）
+        """
+        timeline = JobTimeline(0.0)
+        timeline.begin_worker_start(10.0)
+        timeline.end_worker_start(40.0)
+        timeline.mark_started(90.0)
+
+        assert timeline.waited_seconds(90.0) == 60.0
+
+    def test_should_not_count_the_worker_start_when_the_job_ends_during_it(self):
+        """
+        【テスト対象】JobTimeline.mark_finished
+        【テスト内容】起動の途中で終わる（受け付け 0 秒、起動の開始 10 秒、終了 40 秒）
+        【期待結果】待った時間は 10 秒。あとで時計が進んでも増えない
+        """
+        timeline = JobTimeline(0.0)
+        timeline.begin_worker_start(10.0)
+        timeline.mark_finished(40.0)
+
+        assert timeline.waited_seconds(500.0) == 10.0
+
+    def test_should_ignore_the_worker_start_marks_when_the_job_is_not_waiting(self):
+        """
+        【テスト対象】JobTimeline.begin_worker_start / end_worker_start
+        【テスト内容】作成中（待っていない）のジョブに、起動の印を付ける
+        【期待結果】待った時間が変わらず、起動の終わりでまた待ち始めることもない
+        """
+        timeline = JobTimeline(0.0)
+        timeline.mark_started(10.0)
+        timeline.begin_worker_start(20.0)
+        timeline.end_worker_start(50.0)
+
+        assert timeline.waited_seconds(100.0) == 10.0
+
     def test_should_not_go_negative_when_the_clock_goes_backwards(self):
         """
         【テスト対象】JobTimeline

@@ -278,6 +278,116 @@ class TestWaitTimes:
         assert types[-1] == "job_finished"
 
 
+class TestWorkerStartIsNotWaiting:
+    """生成ワーカーの起動の時間は、順番を待った時間に入らない（起動の時間は startup_ms に分ける）。
+
+    起動は、選んだジョブが待機中のまま行う。起動の間に時計が進んでも、前に誰も待っていなければ、
+    待った時間は 0 秒でなければならない。
+    """
+
+    def test_should_not_count_the_worker_start_in_the_wait_of_a_lone_job(self, capsys):
+        """
+        【テスト対象】処理ログ（開始と終了の wait_ms。起動の時間との切り分け）
+        【テスト内容】起動に 30 秒かかる偽のワーカー（起動の間、時計が 30 秒進む）で、
+                    ほかに待っているジョブが無い質問を 1 件作る
+        【期待結果】- 開始と終了の wait_ms が 0 秒（ほかのジョブを待っていない）
+                    - 終了の duration_ms が 30 秒で、startup_ms も 30 秒。起動の時間は、待った時間と
+                      分けて startup_ms に出る
+        """
+
+        async def scenario():
+            clock = Clock()
+            launcher = InProcessLauncher(on_start=lambda: clock.advance(30.0))
+            manager, outcomes = build(launcher, clock)
+            manager.start()
+            manager.submit_questions("m1", QUESTION_INPUT)
+            await wait_until(lambda: bool(outcomes.questions), description="質問の完成")
+            await manager.shutdown()
+
+        asyncio.run(scenario())
+        logs = of(job_logs(capsys), "m1", "questions")
+        started = next(line for line in logs if line["process_type"] == "job_started")
+        finished = logs[-1]
+
+        assert started["wait_ms"] == 0
+        assert finished["process_type"] == "job_finished"
+        assert finished["wait_ms"] == 0
+        assert finished["duration_ms"] == 30000
+        assert finished["startup_ms"] == 30000
+
+    def test_should_not_count_the_worker_start_in_the_wait_before_resuming(self, capsys):
+        """
+        【テスト対象】処理ログ（再開の wait_ms。後回しにした間と、起動の時間との切り分け）
+        【テスト内容】要約の作成中に会議が始まり、区切りで後回しになってワーカーが止まる。
+                    30 秒後に会議が終わり、要約のためにワーカーを起動し直す。
+                    この 2 回目の起動に 20 秒かかる
+        【期待結果】再開と終了の wait_ms が 30 秒（後回しにした間だけ。起動の 20 秒は入らない）。
+                    終了の duration_ms は 50 秒で、startup_ms は 20 秒
+        """
+
+        async def scenario():
+            clock = Clock()
+            gate = BlockGate("block 1")
+
+            def on_start():
+                # 2 回目の起動（再開のため）だけ、時間がかかる。
+                if launcher.starts >= 2:
+                    clock.advance(20.0)
+
+            launcher = InProcessLauncher(gate, on_start=on_start)
+            manager, outcomes = build(launcher, clock)
+            manager.start()
+            manager.submit_summary("m1", BLOCKS)
+            await wait_until(gate.reached.is_set, description="2 つ目のブロックの作成")
+            manager.meeting_started("m2")
+            await wait_until(
+                lambda: launcher.clients[0].interrupt_count >= 1, description="中断の要求"
+            )
+            gate.release.set()
+            await wait_until(lambda: "worker_stop" in launcher.events, description="後回しの停止")
+            clock.advance(30.0)
+            manager.interpreter_stopped("m2")
+            await wait_until(lambda: bool(outcomes.summaries), description="要約の完成")
+            await manager.shutdown()
+
+        asyncio.run(scenario())
+        summary = of(job_logs(capsys), "m1", "summary")
+        resumed = next(line for line in summary if line["process_type"] == "job_resumed")
+        finished = summary[-1]
+
+        assert resumed["wait_ms"] == 30000
+        assert finished["process_type"] == "job_finished"
+        assert finished["wait_ms"] == 30000
+        assert finished["duration_ms"] == 50000
+        assert finished["startup_ms"] == 20000
+
+    def test_should_not_count_the_worker_start_in_the_wait_of_a_job_whose_start_failed(
+        self, capsys
+    ):
+        """
+        【テスト対象】処理ログ（起動に失敗したジョブの終了の wait_ms）
+        【テスト内容】起動に 30 秒かかって失敗する偽のワーカーで、質問を 1 件作る
+        【期待結果】終了の記録の状況が failed で、wait_ms が 0 秒
+                    （起動にかかった 30 秒を、待った時間に数えない）
+        """
+
+        async def scenario():
+            clock = Clock()
+            launcher = InProcessLauncher(fail_start=True, on_start=lambda: clock.advance(30.0))
+            manager, _ = build(launcher, clock)
+            manager.start()
+            manager.submit_questions("m1", QUESTION_INPUT)
+            await wait_until(lambda: not manager.has_active_job("m1"), description="失敗")
+            await manager.shutdown()
+
+        asyncio.run(scenario())
+        finished = of(job_logs(capsys), "m1", "questions")[-1]
+
+        assert finished["job_status"] == "failed"
+        assert finished["duration_ms"] == 30000
+        assert finished["wait_ms"] == 0
+
+
 class TestWorkerStartLog:
     """生成ワーカーの起動と、モデルの読み込みにかかった時間。"""
 

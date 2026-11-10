@@ -84,10 +84,14 @@ class JobTimeline:
 
     時計は呼び出し側が渡す（単調増加の秒数）。壁時計は飛ぶことがあるため、時間の計算には使わない。
     順番を待つのは、待機中の間。譲る・後回しで待機中へ戻った間も、待った時間に数える。
+    ただし、生成ワーカーを起動している間は、待機中のままでも待った時間に数えない。起動は、
+    ほかのジョブの順番を待っているのではなく、このジョブのための準備のため（起動の時間は、
+    管理部が startup_ms として別に記録する）。
 
-        accepted ──待つ──▶ started ──作る──▶ paused ──待つ──▶ resumed ──作る──▶ finished
-                     ^^^^^^                        ^^^^^^
-                     待った時間                    待った時間
+        accepted ─待つ─▶ 起動 ─待つ─▶ started ─作る─▶ paused ─待つ─▶ resumed ─作る─▶ finished
+                  ^^^^^        ^^^^^                   ^^^^^
+                  待った時間   待った時間              待った時間
+                         (起動の間は数えない)
     """
 
     def __init__(self, accepted: float) -> None:
@@ -102,6 +106,8 @@ class JobTimeline:
         self._waited = 0.0
         # 初めて作り始めた時点までに待った秒数。まだ作り始めていなければ None。
         self._first_wait: float | None = None
+        # 生成ワーカーを起動している間は True。この間は、待機中でも待った時間に数えない。
+        self._starting_worker = False
 
     @property
     def first_wait_seconds(self) -> float | None:
@@ -125,6 +131,29 @@ class JobTimeline:
         self._waiting_since = None
         if self._first_wait is None:
             self._first_wait = self._waited
+
+    def begin_worker_start(self, now: float) -> None:
+        """生成ワーカーの起動を始めた。ここまでの待ちを締め、起動の間は待った時間に数えない。
+
+        起動は、ジョブが待機中のまま行う。待ちを締めないと、起動の時間（モデルの読み込みを含み、
+        数十秒かかる）が、順番を待った時間に混ざる。待っていない（作成中の）ジョブには何もしない。
+        """
+        if self._waiting_since is None:
+            return
+        self._waited += max(now - self._waiting_since, 0.0)
+        self._waiting_since = None
+        self._starting_worker = True
+
+    def end_worker_start(self, now: float) -> None:
+        """生成ワーカーの起動が終わった（失敗を含む）。まだ作り始めていなければ、また待ち始める。
+
+        起動のあとに、別のジョブ（質問など）が選ばれることがある。そのときの待ちを数え落とさない。
+        作り始める（mark_started）とき、または終わる（mark_finished）ときに、この待ちを締める。
+        """
+        if not self._starting_worker:
+            return
+        self._starting_worker = False
+        self._waiting_since = now
 
     def mark_waiting(self, now: float) -> None:
         """順番を譲った、または後回しにした。待ち始める。"""

@@ -315,11 +315,24 @@ class JobManager:
     async def _launch(self, chosen: JobView) -> None:
         """生成ワーカーを起動し、準備完了まで待つ。起動できなければ、選んだ作成ジョブを失敗にする。
 
-        失敗を 1 件ずつ数えるため、待機中の作成ジョブが残っていても、起動をやり直し続けない。
+        起動の間、選んだ作成ジョブは待機中のまま。起動の時間は、順番を待った時間に数えない
+        （モデルの読み込みを含む起動の時間は、終了の記録の startup_ms に分けて出す）。
         """
         record = self._registry.record(chosen.job_id)
         if record is None:
             return
+        self._registry.begin_worker_start(record.job_id)
+        try:
+            await self._start_worker(record)
+        finally:
+            self._registry.end_worker_start(record.job_id)
+
+    async def _start_worker(self, record: JobRecord) -> None:
+        """生成ワーカーを起動して、出力を読むスレッドをつなぐ。起動できなければ、作成ジョブを失敗にする。
+
+        失敗にするのは、起動を頼んだ作成ジョブ 1 件だけ。待機中のほかの作成ジョブは残り、
+        続く決め直し（_reconcile）が、次のジョブのために、もう一度起動を試みる。
+        """
         cpu_mode = CpuMode.MEETING if self._interpreting is not None else CpuMode.NORMAL
         client = self._launcher.create_client()
         started = self._monotonic()

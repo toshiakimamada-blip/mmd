@@ -169,6 +169,23 @@ class JobRegistry:
         """作成中にする（開始または再開）。待っていた時間を締める。終わったジョブは None。"""
         return self._change_status(job_id, JobStatus.RUNNING)
 
+    def begin_worker_start(self, job_id: str) -> None:
+        """生成ワーカーの起動を始めた。起動の間は、待機中のままでも、待った時間に数えない。
+
+        状況は変えない（通知も出さない）。起動が終わったら end_worker_start を呼ぶ。
+        """
+        with self._lock:
+            record = self._active.get(job_id)
+            if record is not None:
+                record.timeline.begin_worker_start(self._monotonic())
+
+    def end_worker_start(self, job_id: str) -> None:
+        """生成ワーカーの起動が終わった（失敗を含む）。終わったジョブには何もしない。"""
+        with self._lock:
+            record = self._active.get(job_id)
+            if record is not None:
+                record.timeline.end_worker_start(self._monotonic())
+
     def mark_queued(self, job_id: str, resume: ResumePoint | None) -> JobSnapshot | None:
         """待機中へ戻す（順番を譲った、または後回しにした）。続きの位置を覚える。
 
