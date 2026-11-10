@@ -293,6 +293,41 @@ class TestWaitTimes:
         assert "job_yielded" not in types
         assert types[-1] == "job_finished"
 
+    def test_should_log_yielding_when_a_question_waits_after_the_meeting_ends(self, capsys):
+        """
+        【テスト対象】処理ログ（止まったときの理由。止まるよう頼んだときの理由と、いまの状況が違う場合）
+        【テスト内容】要約の作成中に会議が始まり、区切りで止まるよう頼む。区切りに届く前に、質問を
+                    受け付け、会議が終わる。そのあと区切りまで進める
+        【期待結果】止まった時点の状況（質問が待っている）が優先され、要約の記録は「後回し」ではなく
+                    「順番を譲った」で出る。要約はそのあと再開して完成する
+        """
+
+        async def scenario():
+            clock = Clock()
+            gate = BlockGate("block 1")
+            launcher = InProcessLauncher(gate)
+            manager, outcomes = build(launcher, clock)
+            manager.start()
+            manager.submit_summary("m1", BLOCKS)
+            await wait_until(gate.reached.is_set, description="2 つ目のブロックの作成")
+            manager.meeting_started("m2")
+            await wait_until(
+                lambda: launcher.clients[0].interrupt_count >= 1, description="中断の要求"
+            )
+            manager.submit_questions("m1", QUESTION_INPUT)  # 区切りに届く前に、質問が届く。
+            manager.interpreter_stopped("m2")  # 区切りに届く前に、会議が終わる。
+            gate.release.set()
+            await wait_until(lambda: len(outcomes.order) == 2, description="2 件の完成")
+            await manager.shutdown()
+
+        asyncio.run(scenario())
+        summary = of(job_logs(capsys), "m1", "summary")
+        types = [line["process_type"] for line in summary]
+
+        assert "job_yielded" in types
+        assert "job_postponed" not in types
+        assert types[-1] == "job_finished"
+
 
 class TestWorkerStartIsNotWaiting:
     """生成ワーカーの起動の時間は、順番を待った時間に入らない（起動の時間は startup_ms に分ける）。

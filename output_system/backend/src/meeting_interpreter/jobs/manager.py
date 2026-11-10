@@ -465,8 +465,10 @@ class JobManager:
         if record is None:
             return
         resume = ResumePoint(memos=message.memos, next_block=message.next_block)
-        # 待機中へ戻す前の状態で、理由を決める。止まるよう頼んだあとに状況が変わっていたら
-        # （会議が先に終わった、など）、頼んだときの理由を使う。
+        # 待機中へ戻す前の状態で、理由を決める。いまの状況に理由があれば、それを使う
+        # （会議のために止めるよう頼んだあとで会議が終わり、質問が待っていれば、「譲った」になる）。
+        # いまの状況に理由が無いときだけ、止まるよう頼んだときの理由を使う
+        # （会議が終わり、質問も待っていなければ、「後回し」のまま）。
         reason = yield_reason(self._situation()) or self._interrupt_reason
         self._end_current()
         self._registry.mark_queued(record.job_id, resume)
