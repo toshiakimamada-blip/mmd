@@ -29,7 +29,10 @@ export interface StartMeetingDeps {
   readonly openInput: (source: AudioSource) => Promise<AudioInput>;
   /** 会議を作る。失敗は ApiError。 */
   readonly createMeeting: (request: MeetingStartRequest) => Promise<MeetingResponse>;
-  /** 取り込んだ音声を変換して、会議の音声の WebSocket へ送り始める。失敗したときは、取り込みの資源を解放済み。 */
+  /**
+   * 取り込んだ音声を変換して、会議の音声の WebSocket へ送り始める。失敗したときは、取り込みの資源を解放済み。
+   * 取り込みの準備の間に接続が閉じたときは、失敗を投げず、state が closed の取り込みを返す。
+   */
   readonly startCapture: (input: AudioInput, meetingId: string) => Promise<AudioCaptureSession>;
   /** 会議を終了する。音声の接続を始められなかった会議を、すぐ閉じるために使う。 */
   readonly endMeeting: (meetingId: string) => Promise<void>;
@@ -60,6 +63,24 @@ export type StartOutcome =
 function captureFailed(failure: unknown, source: AudioSource): StartOutcome {
   const error: AudioCaptureError = toAudioCaptureError(failure, source);
   return { kind: 'capture_failed', source, error: toDisplayErrorFromCode('system_error', error.code) };
+}
+
+/**
+ * 会議は作れたが、音声の接続を始められなかったときの後始末をして、失敗の結果を返す。
+ * 取り込みを止め、作った会議をすぐ終了する。
+ */
+async function abandonMeeting(
+  meetingId: string,
+  input: AudioInput,
+  deps: StartMeetingDeps,
+  outcome: StartOutcome,
+): Promise<StartOutcome> {
+  // 開始の部品が解放済みのはずだが、止まっていることを確かめる（2 回呼んでもよい）。
+  input.stop();
+  // 会議だけが作られて、音声が流れない。30 秒の中断を待たずに閉じて、すぐやり直せるようにする。
+  // 閉じられなくても、アプリサーバーが 30 秒で中断にする。
+  await deps.endMeeting(meetingId).catch(() => undefined);
+  return outcome;
 }
 
 /** 会議を作れなかったときの ApiError を、結果の種類にする。 */
@@ -116,12 +137,17 @@ export async function startMeeting(
   try {
     session = await deps.startCapture(input, meeting.meeting_id);
   } catch (failure) {
-    // 開始の部品が解放済みのはずだが、止まっていることを確かめる（2 回呼んでもよい）。
-    input.stop();
-    // 会議だけが作られて、音声が流れない。30 秒の中断を待たずに閉じて、すぐやり直せるようにする。
-    // 閉じられなくても、アプリサーバーが 30 秒で中断にする。
-    await deps.endMeeting(meeting.meeting_id).catch(() => undefined);
-    return captureFailed(failure, audioSource);
+    return abandonMeeting(meeting.meeting_id, input, deps, captureFailed(failure, audioSource));
+  }
+  if (session.state === 'closed') {
+    // 取り込みの準備の間に、音声の接続が閉じた（アプリサーバーが断った、など）。例外にはならず、閉じた取り込みが
+    // 返る。このまま「会議中」へ移ると、字幕が出ない会議を見せることになるため、つなげなかったものとして扱う。
+    return abandonMeeting(
+      meeting.meeting_id,
+      input,
+      deps,
+      captureFailed(new AudioCaptureError('AUDIO_CAPTURE_FAILED'), audioSource),
+    );
   }
   return { kind: 'started', meeting, session };
 }

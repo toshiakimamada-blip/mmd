@@ -3,10 +3,10 @@ import { describe, expect, it, vi } from 'vitest';
 import { ApiError } from '../../src/api/apiClient';
 import { type MeetingResponse } from '../../src/api/meetingsApi';
 import { AudioCaptureError } from '../../src/audio/audioErrors';
-import { type AudioCaptureSession } from '../../src/audio/audioCaptureSession';
+import { AudioCaptureSession } from '../../src/audio/audioCaptureSession';
 import { type MeetingStartRequest } from '../../src/meetings/meetingInput';
 import { startMeeting, type StartMeetingDeps } from '../../src/meetings/startMeeting';
-import { openFakeInput } from '../audio/fakes';
+import { createFakeEnvironment, openFakeInput, type FakeSocket } from '../audio/fakes';
 
 const REQUEST: MeetingStartRequest = { title: '週次の定例', audioSource: 'system_audio' };
 
@@ -238,6 +238,78 @@ describe('startMeeting', () => {
     const outcome = await startMeeting(REQUEST, deps);
 
     expect(outcome).toMatchObject({ kind: 'capture_failed', error: { code: 'AUDIO_CAPTURE_FAILED' } });
+  });
+
+  /**
+   * 【テスト対象】startMeeting（音声の接続が、開始の途中で閉じられる流れ）
+   * 【テスト内容】音声の接続の開始は例外を投げずに終わるが、返ってきた取り込みの状態が closed である
+   *             （アプリサーバーが接続を断ったなど、取り込みの準備の間に接続が閉じた場合）
+   * 【期待結果】「開始できた」とは扱わないこと。作った会議をすぐ終了し（中断を待たない）、取り込んだ音声は止まっていること。
+   *             結果は capture_failed で、AUDIO_CAPTURE_FAILED の画面の文言を返す（準備の画面に理由を出すため）
+   */
+  it('should end the created meeting when the audio connection is already closed at the start', async () => {
+    const closedSession = { state: 'closed' } as unknown as AudioCaptureSession;
+    const { deps, audio, order } = await setup({
+      startCapture: vi.fn(() => Promise.resolve(closedSession)),
+    });
+
+    const outcome = await startMeeting(REQUEST, deps);
+
+    expect(outcome).toMatchObject({
+      kind: 'capture_failed',
+      source: 'system_audio',
+      error: { code: 'AUDIO_CAPTURE_FAILED', category: 'system_error' },
+    });
+    expect(outcome.kind === 'capture_failed' && outcome.error.message.length).toBeGreaterThan(0);
+    expect(order).toEqual(['openInput', 'createMeeting', 'endMeeting']);
+    expect(deps.endMeeting).toHaveBeenCalledWith('abc123');
+    expect(audio.readyState).toBe('ended');
+  });
+
+  /**
+   * 【テスト対象】startMeeting（接続が閉じていて、会議の終了も失敗する流れ）
+   * 【テスト内容】取り込みの状態が closed で、作った会議の終了の要求も失敗する
+   * 【期待結果】終了の失敗は結果に出さず、結果は capture_failed のままであること
+   *             （閉じられなくても、アプリサーバーが 30 秒で会議を中断にする）
+   */
+  it('should still report the capture failure when the connection is closed and ending the meeting fails', async () => {
+    const closedSession = { state: 'closed' } as unknown as AudioCaptureSession;
+    const { deps } = await setup({
+      startCapture: vi.fn(() => Promise.resolve(closedSession)),
+      endMeeting: vi.fn(() => Promise.reject(apiError('system_error', 'SYSTEM_REQUEST_FAILED'))),
+    });
+
+    const outcome = await startMeeting(REQUEST, deps);
+
+    expect(outcome).toMatchObject({ kind: 'capture_failed', error: { code: 'AUDIO_CAPTURE_FAILED' } });
+  });
+
+  /**
+   * 【テスト対象】startMeeting と AudioCaptureSession.start（本物の取り込み）
+   * 【テスト内容】本物の AudioCaptureSession.start を使い、取り込みの準備の間に WebSocket が切れる（偽の環境）
+   * 【期待結果】startMeeting は started を返さず、作った会議を終了して capture_failed を返すこと。
+   *             取り込んだ音声のトラックと接続は閉じていること
+   */
+  it('should not report started when the real capture session loses its socket while preparing', async () => {
+    const fake = createFakeEnvironment();
+    const createSocket = fake.environment.createSocket;
+    fake.environment.createSocket = (url: string) => {
+      const socket = createSocket(url);
+      // 準備（処理部の読み込み）の間に、サーバーが接続を断る。
+      queueMicrotask(() => (socket as FakeSocket).drop());
+      return socket;
+    };
+    const { deps, audio, order } = await setup({
+      startCapture: (input, meetingId) => AudioCaptureSession.start({ input, meetingId }, fake.environment),
+    });
+
+    const outcome = await startMeeting(REQUEST, deps);
+
+    expect(outcome.kind).toBe('capture_failed');
+    expect(order).toContain('endMeeting');
+    expect(deps.endMeeting).toHaveBeenCalledWith('abc123');
+    expect(audio.readyState).toBe('ended');
+    expect(fake.sockets).toHaveLength(1);
   });
 
   /**
