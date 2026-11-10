@@ -32,11 +32,12 @@ export function FieldError({ id, error }: { readonly id: string; readonly error:
 
 /**
  * 領域の中に出すエラー。結果を表示するはずだった領域（要約・質問・AI モデルの準備状況）の中に置く。
- * 作る、またはやり直すボタンを 1 つ添える。やり直しが始まったら、呼び出し側が描画をやめる（消える）。
+ * 作る、またはやり直すボタンを 1 つ添えられる。やり直しが始まったら、呼び出し側が描画をやめる（消える）。
+ * ボタンを領域の別の場所に常に置くとき（押せない間も残す）は、ボタンを添えずにエラーだけを出す。
  *
  * @param error 表示するエラー
- * @param actionLabel ボタンの文字（例: 「要約を作り直す」）
- * @param onAction ボタンを押したときの処理
+ * @param actionLabel ボタンの文字（例: 「要約を作り直す」）。省略すると、ボタンを添えない
+ * @param onAction ボタンを押したときの処理。actionLabel と一緒に渡す
  */
 export function RegionError({
   error,
@@ -44,19 +45,21 @@ export function RegionError({
   onAction,
 }: {
   readonly error: DisplayError;
-  readonly actionLabel: string;
-  readonly onAction: () => void;
+  readonly actionLabel?: string;
+  readonly onAction?: () => void;
 }) {
   return (
     <div className="notice notice--error notice--region" role="alert">
       <NoticeIcon kind="error" />
       <div className="notice__body">
         <ErrorText error={error} />
-        <div className="notice__choices">
-          <button type="button" className="notice__button notice__choice" onClick={onAction}>
-            {actionLabel}
-          </button>
-        </div>
+        {actionLabel === undefined || onAction === undefined ? null : (
+          <div className="notice__choices">
+            <button type="button" className="notice__button notice__choice" onClick={onAction}>
+              {actionLabel}
+            </button>
+          </div>
+        )}
       </div>
     </div>
   );

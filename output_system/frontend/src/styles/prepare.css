@@ -156,3 +156,65 @@
 .prepare-form__cancel:disabled {
   color: #5b6875;
 }
+
+/* 領域の見出し（案内・AI モデルの準備状況） */
+.prepare__section-title {
+  margin: 0 0 0.5rem;
+  font-size: 1rem;
+  font-weight: 700;
+  line-height: 1.5;
+}
+
+/*
+ * 案内の領域。手順は左の紺の線でそろえる。
+ * 取り込みに失敗した出どころの手順は、線を赤くして太くし、「取り込めませんでした」の札と理由を添える
+ * （色だけに頼らない）。
+ */
+.prepare-guidance {
+  display: flex;
+  flex-direction: column;
+  gap: 0.75rem;
+  padding-top: 1rem;
+  border-top: 1px solid #c3ced8;
+}
+
+.prepare-guidance__source {
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+  padding: 0.25rem 0 0.25rem 1rem;
+  border-left: 0.25rem solid var(--color-band);
+}
+
+.prepare-guidance__source[data-failed='true'] {
+  padding-left: 0.875rem;
+  border-left-width: 0.5rem;
+  border-left-color: var(--notice-error-accent);
+}
+
+.prepare-guidance__prompt {
+  margin: 0;
+  color: var(--color-ink-muted);
+}
+
+.prepare-guidance__failed-label {
+  margin: 0;
+}
+
+.prepare-guidance__heading {
+  margin: 0;
+  font-size: 1rem;
+  font-weight: 700;
+  line-height: 1.5;
+}
+
+.prepare-guidance__steps,
+.prepare-guidance__notices {
+  margin: 0;
+  padding-left: 1.5rem;
+}
+
+.prepare-guidance__steps li + li,
+.prepare-guidance__notices li + li {
+  margin-top: 0.25rem;
+}
