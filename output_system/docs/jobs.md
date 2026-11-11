@@ -21,13 +21,13 @@
 
 ```mermaid
 flowchart LR
-    API["作成の依頼<br>（PBI 5.2・5.3 の API）"] -->|submit_summary<br>submit_questions| REG["registry.py<br>作成ジョブの置き場<br>重複の判定"]
+    API["作成の依頼<br>（要約: summary_requests.py。質問は PBI 5.3）"] -->|submit_summary<br>submit_questions| REG["registry.py<br>作成ジョブの置き場<br>重複の判定"]
     MEET["会議管理部"] -->|meeting_started<br>interpreter_stopped| MGR["manager.py<br>管理のタスク"]
     REG --> MGR
     POL["policy.py<br>実行順の規則（純粋）"] --> MGR
     MGR -->|依頼・中断・割り当て| WORKER["生成ワーカー<br>（別のプロセス）"]
     WORKER -->|進み具合・結果| MGR
-    MGR -->|結果・失敗| OUT["outcomes.py<br>結果の受け取り先<br>（保存は PBI 5.2・5.3）"]
+    MGR -->|結果・失敗| OUT["outcomes.py<br>結果の受け取り先<br>（要約: summary_outcomes.py。質問は PBI 5.3）"]
     REG -->|job.status_changed<br>job.progress_changed| HUB["通知部"]
 ```
 
@@ -36,10 +36,13 @@ flowchart LR
 | `models.py` | 種類・状況・スナップショット・待ち時間の計算（`JobTimeline`） |
 | `registry.py` | メモリの上の置き場。鍵で守る。重複の判定と、状況の変更 |
 | `notices.py` | 通知 `job.status_changed`・`job.progress_changed` |
-| `policy.py` | 実行順の規則。純粋な関数 `pick_next`・`yield_reason`・`needs_worker`。規則を見直すときは、このファイルだけを変える |
+| `policy.py` | 実行順の規則。純粋な関数 `pick_next`・`yield_reason`・`needs_worker`・`wait_reason`（待機中の理由）。規則を見直すときは、このファイルだけを変える |
 | `manager.py` | 管理のタスク。出来事（受け付け・会議の知らせ・ワーカーのメッセージ）のたびに、現在の状態から、やるべきことを決め直す |
 | `workers.py` | 生成ワーカーの起動の入口。本番は `ProductionGenerationLauncher`、テストは偽のエンジンの入口を渡す |
 | `outcomes.py` | 結果（要約・質問・要約の失敗）の受け取り先の窓口 |
+| `summary_requests.py` | 要約を作る・作り直す依頼の受け付け（`SummaryRequests`）。状態を「要約作成中」に確定してから、ジョブを登録する。会議の終了の直後の自動の作成も、ここから行う |
+| `summary_outcomes.py` | 要約の結果の保存（`SummaryOutcomes`）。要約と状態の完了を 1 回の確定で保存し、失敗では状態と失敗理由を保存する |
+| `meeting_state.py` | 作成ジョブ管理部が会議の状態を変えたときの通知 `meeting.state_changed` |
 | `errors.py` | `SUMMARY_*`・`QUESTION_*` のエラー（`docs/errors.md`） |
 
 ## 会議管理部とのつなぎ
@@ -53,29 +56,62 @@ flowchart LR
 
 `interpreter_stopped` が先に届くため、会議の終了の直後は、通訳ワーカーを止めてから、要約を始められます（2 つのワーカーのメモリが重ならない）。この順は `test/meeting_interpreter/jobs/test_job_meeting_integration.py` が確かめます。
 
-## 結果の受け取り先（PBI 5.2・5.3 が足す部分）
+## 要約の依頼と保存
 
-結果の保存と、会議の状態の変更は、この部では行いません。`JobOutcomeHandler`（`outcomes.py`）を実装した受け取り先を、`create_app(..., job_outcomes=...)` に渡します。省略すると、結果を捨てます。
+要約の作成は、2 回に分けて確定します（横断設計規約「保存の単位と順序」）。作成の途中でアプリが止まっても、状態（要約作成中）から失敗を判断できます。
 
-| 窓口 | 呼ぶ時点 | 受け取り先がやること |
+```mermaid
+sequenceDiagram
+    participant C as 画面
+    participant R as SummaryRequests
+    participant D as 記録データベース
+    participant J as 作成ジョブ管理部
+    participant O as SummaryOutcomes
+    C->>R: POST /api/meetings/{会議番号}/summary
+    R->>D: 状態を要約作成中にする（1 回目の確定）
+    R->>J: submit_summary（字幕のブロック）
+    J-->>C: job.status_changed・job.progress_changed
+    J->>O: summary_ready（4 項目）または summary_failed（エラーコード）
+    O->>D: 要約の作成または置き換えと、状態の完了（2 回目の確定）
+    O-->>C: meeting.state_changed
+```
+
+| 入口 | 動き |
+|---|---|
+| `POST /api/meetings/{会議番号}/summary`（202） | 中断・要約失敗・完了の会議で、字幕が 1 件以上あるとき受け付ける。同じ会議の要約が待機中か作成中なら、状態も字幕も見ずに、そのジョブを返す（重複を防ぐ規約。遷移規則より先）。字幕が 0 件は `SUMMARY_NO_CONTENT`、遷移規則に無い状態は `MEETING_INVALID_TRANSITION`、会議が無いときは `MEETING_NOT_FOUND`。応答は、会議と作成ジョブ（種類・状況・進み具合・待機中の理由） |
+| 会議の終了（`on_meeting_ended`） | 字幕が 1 件以上の会議は、終了の保存で状態が要約作成中になっている。`SummaryRequests.start_after_meeting_end` が、状態は変えずに、ジョブを登録する。字幕が 0 件の会議は完了のままで、要約を作らない。中断した会議は、自動では作らない |
+
+結果の受け取り先は `JobOutcomeHandler`（`outcomes.py`）です。`create_app` は、既定で `SummaryOutcomes` を渡します（`create_app(..., job_outcomes=...)` で替えられます）。質問の結果（`questions_ready`）は、PBI 5.3 が足すまで捨てます。
+
+| 窓口 | 呼ぶ時点 | `SummaryOutcomes` がやること |
 |---|---|---|
-| `summary_ready(会議番号, 要約)` | 要約ができた | 要約を保存し、会議の状態を `completed` にする（PBI 5.2 の Task 5.2.3） |
-| `questions_ready(会議番号, 質問の組)` | 質問ができた | 質問のまとまりを保存する（Task 5.3.2） |
-| `summary_failed(会議番号, エラーコード)` | 要約が失敗した | 会議の状態を `summary_failed` にし、失敗理由を保存する（Task 5.2.3）。質問の失敗は、会議の状態を変えないため、呼ばない |
+| `summary_ready(会議番号, 要約)` | 要約ができた | 要約の作成または置き換えと、状態の `completed` への変更を、1 回の確定で行う。失敗理由も空になる。空の項目は「該当なし」にする。処理ログ `summary_saved`（文字数だけ。本文なし）を出し、`meeting.state_changed` を通知する |
+| `summary_failed(会議番号, エラーコード)` | 要約が失敗した | 状態を `summary_failed` にし、失敗理由を保存し、`meeting.state_changed` を通知する。要約には触れないため、作り直しの失敗では、前の要約が残る |
+| `questions_ready(会議番号, 質問の組)` | 質問ができた | まだ何もしない（Task 5.3.2） |
 
-窓口の呼び出しが終わってから、ジョブを完了にして `job.status_changed`（`succeeded`）を通知します。窓口が例外を起こしたときは、ジョブを `*_SAVE_FAILED` で失敗にします。
-
-作成を依頼する側（API）は、入力を組み立てて渡します。要約は `generation.inputs.split_into_blocks`、質問は `build_question_input` を使います。会議の状態を先に `summarizing` に変えてから `submit_summary` を呼ぶのは、依頼する側の役目です（Task 5.2.1）。
+状態を変える前に、遷移規則の表（`meetings/transitions.py`）で確かめます。窓口の呼び出しが終わってから、ジョブを完了にして `job.status_changed`（`succeeded`）を通知します。窓口が例外を起こしたとき（保存の失敗）は、ジョブを `SUMMARY_SAVE_FAILED` で失敗にし、状態を要約失敗にします。ジョブを登録できなかったとき（会議の終了のあとに字幕を読み出せない、など）も、`SUMMARY_GENERATION_FAILED` で要約失敗にして、`error.occurred` を通知します。
 
 ## 通知
 
 | 通知 | 項目 |
 |---|---|
-| `job.status_changed` | `meeting_id`・`job_type`（`summary` か `questions`）・`status`（`queued`・`running`・`succeeded`・`failed`）・`done_blocks`・`total_blocks`（質問は `null`） |
+| `job.status_changed` | `meeting_id`・`job_type`（`summary` か `questions`）・`status`（`queued`・`running`・`succeeded`・`failed`）・`done_blocks`・`total_blocks`（質問は `null`）・`wait_reason`（待機中の理由） |
 | `job.progress_changed` | 同じ項目。要約で、処理したブロックの数が変わったとき |
 | `error.occurred` | 失敗したとき。`meeting_id`・`category`・`code`・`message`・`action` |
 
-受け付け・開始・順番を譲った・後回し・再開・完了・失敗のたびに `job.status_changed` が出ます。順番を譲ったときと後回しにしたときは、`queued` に戻ります。待機中の理由（ほかの作成か、進行中の会議か）の項目は、Task 5.2.4 が足します。
+受け付け・開始・順番を譲った・後回し・再開・完了・失敗のたびに `job.status_changed` が出ます。順番を譲ったときと後回しにしたときは、`queued` に戻ります。
+
+`wait_reason` は、待機中の間、何を待っているかを示します。
+
+| 値 | 意味 |
+|---|---|
+| `other_job` | ほかの作成が作成中、またはほかの作成が先に実行される |
+| `meeting_in_progress` | 通訳中の会議がある（要約の新しいブロックを始めない）。会議の終了または中断のあとに作る |
+| `null` | 順番を待っていない（作成中・完了・失敗、または次に実行される） |
+
+理由は、ほかの作成の終わりや、会議の開始と終了で変わります。状況が変わらなくても、理由が変われば、`job.status_changed` をもう一度出します。そのため、同じ `queued` の通知が続けて届くことがあります。進み具合は、要約でブロックを 1 つ処理するたびに `job.progress_changed` で届きます（時間の予測は出しません）。
+
+画面を開いた時点・再接続の時点では、会議ごとの待機中と作成中のジョブを `JobManager.active_jobs(会議番号)` で取得できます（通知と同じ項目は `jobs/notices.py` の `job_payload`）。この取得を会議の取得 API（Task 5.4.1）の応答に含めます。いまは、要約の依頼の応答（`POST /api/meetings/{会議番号}/summary`）だけが、作成ジョブを返します。
 
 ## 処理ログ
 
@@ -113,7 +149,7 @@ uv run pytest test/meeting_interpreter/jobs
 
 ## 出荷するコンテナでの確認
 
-2026-11-10 に、出荷するイメージを `docker compose build` で作り直し、コンテナを作り直したあと（`docker compose ps` が healthy）で、本物の AI モデルを使って確かめました。コンテナの中の Python（`/opt/venv`）で、`ProductionGenerationLauncher` と `JobManager` を直接動かし、要約と質問を作成ジョブとして受け付けました（アプリの API を通さない。作成を依頼する API は PBI 5.2・5.3）。
+2026-11-10 に、出荷するイメージを `docker compose build` で作り直し、コンテナを作り直したあと（`docker compose ps` が healthy）で、本物の AI モデルを使って確かめました。コンテナの中の Python（`/opt/venv`）で、`ProductionGenerationLauncher` と `JobManager` を直接動かし、要約と質問を作成ジョブとして受け付けました（アプリの API を通さない。要約の依頼を通した確認は、下の「要約の確認」）。
 
 | 確かめたこと | 結果 |
 |---|---|

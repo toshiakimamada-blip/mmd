@@ -210,6 +210,27 @@ class JobRegistry:
         self._notify(JobChange.PROGRESS_CHANGED, snapshot)
         return snapshot
 
+    def set_wait_reason(self, job_id: str, reason: str | None) -> JobSnapshot | None:
+        """待機中の理由を変える。変わったときだけ、状況の変化として通知する。
+
+        待機中でないジョブ（作成中）は、待っていないため、理由を持たない（None にする）。
+
+        Args:
+            job_id: 作成ジョブの識別子。
+            reason: 理由（policy.WaitReason の値）。待っていなければ None。
+        """
+        with self._lock:
+            record = self._active.get(job_id)
+            if record is None:
+                return None
+            wanted = reason if record.status is JobStatus.QUEUED else None
+            if record.wait_reason == wanted:
+                return record.snapshot()
+            record.wait_reason = wanted
+            snapshot = record.snapshot()
+        self._notify(JobChange.STATUS_CHANGED, snapshot)
+        return snapshot
+
     def finish(
         self, job_id: str, status: JobStatus, error_code: str | None = None
     ) -> JobSnapshot | None:
@@ -232,6 +253,7 @@ class JobRegistry:
             record.timeline.mark_finished(self._monotonic())
             record.status = status
             record.error_code = error_code if status is JobStatus.FAILED else None
+            record.wait_reason = None
             record.resume = None
             snapshot = record.snapshot()
         self._notify(JobChange.STATUS_CHANGED, snapshot)
@@ -262,6 +284,8 @@ class JobRegistry:
                 record.timeline.mark_waiting(now)
                 record.resume = resume
             record.status = status
+            # 理由は、待機中へ戻ったあとの決め直しで付く。作成中は、待っていない。
+            record.wait_reason = None
             snapshot = record.snapshot()
         self._notify(JobChange.STATUS_CHANGED, snapshot)
         return snapshot

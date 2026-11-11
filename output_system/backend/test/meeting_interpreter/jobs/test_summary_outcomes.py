@@ -69,15 +69,19 @@ class Harness:
         finally:
             connection.close()
 
-    async def meeting(self, status: MeetingStatus, *, summary: SummaryText | None = None) -> str:
-        """字幕が 1 件の会議を、指定の状態で作り、会議番号を返す。要約を渡すと保存済みにする。"""
+    async def meeting(
+        self,
+        status: MeetingStatus,
+        *,
+        summary: SummaryText | None = None,
+        subtitles: tuple[str, ...] = ("We agreed on the budget.",),
+    ) -> str:
+        """字幕つきの会議を、指定の状態で作り、会議番号を返す。要約を渡すと保存済みにする。"""
         created = await self.store.create_meeting(title="定例", audio_source=AudioSource.MICROPHONE)
-        await self.store.add_subtitle(
-            created.meeting_id,
-            original_text="We agreed on the budget.",
-            translated_text=None,
-            spoken_at=SPOKEN,
-        )
+        for text in subtitles:
+            await self.store.add_subtitle(
+                created.meeting_id, original_text=text, translated_text=None, spoken_at=SPOKEN
+            )
         await self.store.update_meeting(created.meeting_id, status=status, ended_at=ENDED)
         if summary is not None:
             await self.store.update_meeting(created.meeting_id, status=MeetingStatus.SUMMARIZING)
@@ -100,6 +104,7 @@ async def harness(
     *,
     store_class: type[RecordStore] = RecordStore,
     launcher: InProcessLauncher | None = None,
+    max_chars: int = 4000,
 ) -> AsyncIterator[Harness]:
     database = RecordDatabase(records_dir)
     await database.open()
@@ -110,7 +115,7 @@ async def harness(
     jobs = JobManager(launcher=launcher, publisher=publisher, outcomes=outcomes, policy=POLICY)
     jobs.start()
     requests = SummaryRequests(
-        store=store, jobs=jobs, publisher=publisher, outcomes=outcomes, max_chars=4000
+        store=store, jobs=jobs, publisher=publisher, outcomes=outcomes, max_chars=max_chars
     )
     try:
         yield Harness(records_dir, store, jobs, outcomes, requests, publisher, launcher)
@@ -310,6 +315,33 @@ class TestThroughTheJobManager:
         assert summary is not None and summary.overview == "新しい概要"
         assert (summary.key_points, summary.decisions) == ("話題 A: 要点\n話題 B: 要点", "該当なし")
         assert changed == ["summarizing", "completed"]
+
+    def test_should_notify_the_progress_for_each_block_of_the_request(self, records_dir):
+        """
+        【テスト対象】要約の依頼 → 作成ジョブ管理部 → 通知（job.progress_changed）
+        【テスト内容】字幕 3 件（ブロックの上限を小さくして、3 ブロックに分かれる）の要約を依頼する
+        【期待結果】進み具合の通知が、1 / 3、2 / 3、3 / 3 の順にブロックごとに届き、そのあとで
+                    ジョブの完了と、会議の状態の完了が通知されること
+        """
+        lines = tuple(f"Line {number}: " + "x" * 60 for number in range(3))
+
+        async def run():
+            async with harness(records_dir, max_chars=100) as h:
+                meeting_id = await h.meeting(MeetingStatus.INTERRUPTED, subtitles=lines)
+                await h.requests.request(meeting_id)
+                await wait_until(lambda: h.row(meeting_id)[0] == "completed", description="完了")
+                await wait_until(lambda: not h.jobs.has_active_job(meeting_id), description="終了")
+                return h.publisher
+
+        publisher = asyncio.run(run())
+
+        progress = publisher.named("job.progress_changed")
+        assert [(body["done_blocks"], body["total_blocks"]) for body in progress] == [
+            (1, 3),
+            (2, 3),
+            (3, 3),
+        ]
+        assert publisher.named("job.status_changed")[-1]["status"] == "succeeded"
 
     def test_should_fail_the_meeting_and_keep_the_previous_summary_when_generation_fails(
         self, records_dir

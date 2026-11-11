@@ -53,6 +53,8 @@ class JobSnapshot:
     accepted_at: datetime
     # 失敗のエラーコード。失敗以外は None。
     error_code: str | None
+    # 待機中の理由（policy.WaitReason の値）。待機中でない、または順番を待っていなければ None。
+    wait_reason: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -198,6 +200,8 @@ class JobRecord:
     done_blocks: int | None = None
     total_blocks: int | None = None
     error_code: str | None = None
+    # 待機中の理由（policy.WaitReason の値）。待機中でなければ None。
+    wait_reason: str | None = None
     # 順番を譲った、または後回しにした要約の、続きの位置。要約が終わったら捨てる。
     resume: ResumePoint | None = field(default=None, repr=False)
     # この作成ジョブのために生成ワーカーを起動した回数。起動しなかったジョブは 0。
@@ -219,4 +223,5 @@ class JobRecord:
             total_blocks=self.total_blocks,
             accepted_at=self.accepted_at,
             error_code=self.error_code,
+            wait_reason=self.wait_reason,
         )

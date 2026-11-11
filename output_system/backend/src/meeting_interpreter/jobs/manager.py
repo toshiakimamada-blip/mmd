@@ -62,7 +62,15 @@ from .models import (
 )
 from .notices import JobNotifier, JobPublisher
 from .outcomes import JobOutcomeHandler, NullOutcomeHandler
-from .policy import JobView, Situation, YieldReason, needs_worker, pick_next, yield_reason
+from .policy import (
+    JobView,
+    Situation,
+    YieldReason,
+    needs_worker,
+    pick_next,
+    wait_reason,
+    yield_reason,
+)
 from .registry import JobRegistry, Registration
 from .workers import GenerationLauncher
 
@@ -194,6 +202,8 @@ class JobManager:
             record = self._registry.record(registration.job.job_id)
             if record is not None:
                 self._log_job("job_accepted", record)
+            # 受け付けた時点で、何を待つのかを通知する（生成ワーカーの起動を待たない）。
+            self._refresh_wait_reasons()
             self._wake()
         return registration
 
@@ -265,6 +275,7 @@ class JobManager:
                 if isinstance(event, _FromWorker):
                     await self._on_worker_message(event)
                 await self._reconcile()
+                self._refresh_wait_reasons()
             except asyncio.CancelledError:
                 raise
             except Exception as error:  # noqa: BLE001 (想定外の失敗は、種類と発生場所だけを残して続ける)
@@ -289,6 +300,17 @@ class JobManager:
             for record in self._registry.active_records()
         )
         return Situation(jobs=jobs, interpreting_meeting_id=self._interpreting)
+
+    def _refresh_wait_reasons(self) -> None:
+        """待機中の作成ジョブごとに、待っている理由を決め直す。変わったものは、通知される。
+
+        理由は、ほかの作成の終わりや、会議の開始と終了で変わる。状況（待機中・作成中）が
+        変わらなくても、理由が変われば、状況の通知をもう一度出す。
+        """
+        situation = self._situation()
+        for job in situation.jobs:
+            reason = wait_reason(job, situation)
+            self._registry.set_wait_reason(job.job_id, None if reason is None else reason.value)
 
     async def _reconcile(self) -> None:
         """現在の状態に合わせて、ワーカーの起動・依頼・割り当て・停止を行う。

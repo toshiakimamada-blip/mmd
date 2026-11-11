@@ -10,9 +10,11 @@ from meeting_interpreter.jobs.models import JobKind
 from meeting_interpreter.jobs.policy import (
     JobView,
     Situation,
+    WaitReason,
     YieldReason,
     needs_worker,
     pick_next,
+    wait_reason,
     yield_reason,
 )
 
@@ -317,3 +319,79 @@ class TestPurity:
             state.interpreting_meeting_id = "m9"  # type: ignore[misc]
         with pytest.raises(AttributeError):
             state.jobs[0].running = True  # type: ignore[misc]
+
+
+class TestWaitReason:
+    """待機中の作成ジョブが、何を待っているか。画面は、ほかの作成を待つのか、進行中の会議を待つのかを案内する。"""
+
+    def test_should_have_no_reason_for_a_running_job(self):
+        """
+        【テスト対象】wait_reason（作成中のジョブ）
+        【テスト内容】作成中の要約を渡す
+        【期待結果】None（待っていない）
+        """
+        running = summary("s1", "m1", 1, running=True)
+
+        assert wait_reason(running, situation(running)) is None
+
+    def test_should_have_no_reason_for_the_job_that_runs_next(self):
+        """
+        【テスト対象】wait_reason（次に実行されるジョブ）
+        【テスト内容】ほかに作成ジョブが無い、待機中の要約を渡す（生成ワーカーの起動を待つだけ）
+        【期待結果】None（順番を待っているわけではない）
+        """
+        waiting = summary("s1", "m1", 1)
+
+        assert wait_reason(waiting, situation(waiting)) is None
+
+    def test_should_wait_for_another_job_while_one_is_running(self):
+        """
+        【テスト対象】wait_reason（ほかの作成が作成中）
+        【テスト内容】要約が作成中で、別の会議の要約が待機中
+        【期待結果】待機中の要約の理由は「ほかの作成」
+        """
+        running = summary("s1", "m1", 1, running=True)
+        waiting = summary("s2", "m2", 2)
+
+        assert wait_reason(waiting, situation(running, waiting)) is WaitReason.OTHER_JOB
+
+    def test_should_wait_for_another_job_that_is_ahead_in_the_order(self):
+        """
+        【テスト対象】wait_reason（ほかの作成が先）
+        【テスト内容】作成中のジョブが無く、質問と要約が待機中（質問が先に実行される）
+        【期待結果】要約の理由は「ほかの作成」。質問は、次に実行されるため、理由が無い
+        """
+        waiting_summary = summary("s1", "m1", 1)
+        waiting_questions = questions("q1", "m2", 2)
+        state = situation(waiting_summary, waiting_questions)
+
+        assert wait_reason(waiting_summary, state) is WaitReason.OTHER_JOB
+        assert wait_reason(waiting_questions, state) is None
+
+    def test_should_wait_for_the_meeting_when_a_summary_is_blocked_by_it(self):
+        """
+        【テスト対象】wait_reason（進行中の会議）
+        【テスト内容】通訳中の会議があり、要約が待機中。ほかには作成ジョブが無い
+        【期待結果】要約の理由は「進行中の会議」。ほかの作成が先でも、会議に止められているなら「進行中の会議」
+        """
+        waiting = summary("s1", "m1", 1)
+        other = questions("q1", "m2", 2)
+
+        assert (
+            wait_reason(waiting, situation(waiting, interpreting="m3"))
+            is WaitReason.MEETING_IN_PROGRESS
+        )
+        assert (
+            wait_reason(waiting, situation(waiting, other, interpreting="m3"))
+            is WaitReason.MEETING_IN_PROGRESS
+        )
+
+    def test_should_not_make_a_question_wait_for_the_meeting(self):
+        """
+        【テスト対象】wait_reason（会議中の質問）
+        【テスト内容】通訳中の会議があり、質問が待機中（質問は会議中も実行できる）
+        【期待結果】理由が無い
+        """
+        waiting = questions("q1", "m1", 1)
+
+        assert wait_reason(waiting, situation(waiting, interpreting="m2")) is None

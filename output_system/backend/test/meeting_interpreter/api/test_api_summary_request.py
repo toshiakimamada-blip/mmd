@@ -91,6 +91,8 @@ class TestRequestSummary:
         assert job["status"] in {"queued", "running"}
         assert job["total_blocks"] == 1
         assert job["done_blocks"] == 0
+        # 順番を待っていない間は、待機中の理由が null。
+        assert job["wait_reason"] is None
 
     def test_should_return_the_same_job_for_a_repeated_request(self, api):
         """

@@ -151,6 +151,9 @@ class JobResponse(BaseModel):
     # 要約で、処理したブロックの数と、全体のブロックの数。質問は null。
     done_blocks: int | None
     total_blocks: int | None
+    # 待機中の理由。ほかの作成を待つ（other_job）か、進行中の会議を待つ（meeting_in_progress）か。
+    # 順番を待っていない間は null。
+    wait_reason: Literal["other_job", "meeting_in_progress"] | None
 
 
 def to_job_response(job: JobSnapshot) -> JobResponse:
@@ -161,6 +164,7 @@ def to_job_response(job: JobSnapshot) -> JobResponse:
         status=job.status.value,
         done_blocks=job.done_blocks,
         total_blocks=job.total_blocks,
+        wait_reason=job.wait_reason,  # type: ignore[arg-type]
     )
 
 
