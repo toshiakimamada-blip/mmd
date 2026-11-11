@@ -440,6 +440,92 @@ class TestThroughTheJobManager:
         assert jobs == []
 
 
+class TestEdgeCases:
+    """起こりにくい失敗でも、状態を要約作成中のまま残さず、例外を外へ出さない。"""
+
+    def test_should_refuse_a_failure_for_a_missing_meeting(self, records_dir):
+        """
+        【テスト対象】SummaryOutcomes.summary_failed（会議が無い）
+        【テスト内容】存在しない会議番号の要約失敗を伝える
+        【期待結果】業務エラー MEETING_NOT_FOUND で断ること
+        """
+
+        async def run():
+            async with harness(records_dir) as h:
+                with pytest.raises(BusinessAppError) as caught:
+                    await h.outcomes.summary_failed("0" * 32, "SUMMARY_WORKER_STOPPED")
+                return caught.value.body.code
+
+        assert asyncio.run(run()) == "MEETING_NOT_FOUND"
+
+    def test_should_save_the_summary_even_when_the_state_notice_cannot_be_sent(self, records_dir):
+        """
+        【テスト対象】SummaryOutcomes.summary_ready（通知の送り先の失敗）
+        【テスト内容】通知の送り先が例外を起こす状態で、要約を保存する
+        【期待結果】要約の保存と状態の完了は済み、例外は外へ出ないこと（確定は取り消さない）
+        """
+
+        class BrokenPublisher:
+            def publish(self, name, payload) -> None:
+                raise RuntimeError("通知の送り先の失敗")
+
+        async def run():
+            async with harness(records_dir) as h:
+                meeting_id = await h.meeting(MeetingStatus.SUMMARIZING)
+                outcomes = SummaryOutcomes(h.store, BrokenPublisher())
+                await outcomes.summary_ready(meeting_id, SUMMARY)
+                return h.row(meeting_id)
+
+        assert asyncio.run(run()) == ("completed", None)
+
+    def test_should_fail_the_meeting_when_the_subtitles_are_only_blank(self, records_dir):
+        """
+        【テスト対象】会議の終了 → 要約の開始（ブロックが 1 つもできない）
+        【テスト内容】字幕が空白だけの、要約作成中の会議の要約を始める
+        【期待結果】状態が要約失敗、失敗理由が SUMMARY_GENERATION_FAILED になり、ジョブは作らない
+                    こと
+        """
+
+        async def run():
+            async with harness(records_dir) as h:
+                meeting_id = await h.meeting(MeetingStatus.SUMMARIZING, subtitles=("   ",))
+                meeting = await h.store.get_meeting(meeting_id)
+                await h.requests.start_after_meeting_end(meeting)
+                return h.row(meeting_id), h.jobs.active_jobs()
+
+        row, jobs = asyncio.run(run())
+
+        assert row == ("summary_failed", "SUMMARY_GENERATION_FAILED")
+        assert jobs == []
+
+    def test_should_not_raise_when_the_failure_cannot_be_saved_either(self, records_dir, capsys):
+        """
+        【テスト対象】会議の終了 → 要約の開始（要約失敗の保存も失敗する）
+        【テスト内容】字幕の読み出しにも、状態の保存にも失敗する記録保存部で、要約を始める
+        【期待結果】例外は外へ出ず、エラーログ SYSTEM_JOB_OUTCOME_FAILED が出ること（会議の終了の
+                    結果を変えない）
+        """
+        configure_logging("info")
+
+        class BrokenStore(RecordStore):
+            async def list_subtitles(self, meeting_id):
+                raise sqlite3.OperationalError("disk I/O error")
+
+            async def update_meeting(self, meeting_id, **kwargs):
+                raise RecordSaveError(meeting_id=meeting_id)
+
+        async def run():
+            async with harness(records_dir, store_class=BrokenStore) as h:
+                created = await h.store.create_meeting(
+                    title="定例", audio_source=AudioSource.MICROPHONE
+                )
+                await h.requests.start_after_meeting_end(created)
+
+        asyncio.run(run())
+
+        assert "SYSTEM_JOB_OUTCOME_FAILED" in capsys.readouterr().out
+
+
 def _responder(request, overview: str | None) -> str:
     """偽の生成ワーカーの応答。overview が None なら、決めた形に合わない出力を返す。"""
     if request.task == "memo":
