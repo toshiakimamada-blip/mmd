@@ -21,6 +21,7 @@ from job_fakes import InProcessLauncher, RecordingOutcomes, RecordingPublisher, 
 from meeting_interpreter.errors import BusinessAppError
 from meeting_interpreter.jobs.manager import JobManager, JobPolicy
 from meeting_interpreter.jobs.models import JobKind, JobStatus
+from meeting_interpreter.jobs.summary_outcomes import SummaryOutcomes
 from meeting_interpreter.jobs.summary_requests import SummaryRequests
 from meeting_interpreter.records.database import DATABASE_FILE_NAME, RecordDatabase
 from meeting_interpreter.records.errors import RecordSaveError
@@ -106,7 +107,13 @@ async def harness(
     outcomes = RecordingOutcomes()
     jobs = JobManager(launcher=launcher, publisher=publisher, outcomes=outcomes, policy=POLICY)
     jobs.start()
-    requests = SummaryRequests(store=store, jobs=jobs, publisher=publisher, max_chars=max_chars)
+    requests = SummaryRequests(
+        store=store,
+        jobs=jobs,
+        publisher=publisher,
+        outcomes=SummaryOutcomes(store, publisher),
+        max_chars=max_chars,
+    )
     try:
         yield Harness(records_dir, store, jobs, requests, publisher, outcomes, launcher)
     finally:

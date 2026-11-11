@@ -1,4 +1,4 @@
-"""記録保存部が受け渡す値（会議・字幕）と、区分コード。
+"""記録保存部が受け渡す値（会議・字幕・要約）と、区分コード。
 
 区分のコード値は、データモデル設計書の「区分コード」のとおり。日時は UTC の時間帯を持つ
 datetime で受け渡す（保存の形は times.py）。
@@ -62,3 +62,20 @@ class Subtitle:
     translated_text: str | None
     # 話された時刻（UTC）。発話の区切りの先頭の音声が、アプリサーバーへ届いた日時。
     spoken_at: datetime
+
+
+@dataclass(frozen=True, slots=True)
+class Summary:
+    """要約 1 件。会議に 1 つだけ持ち、作り直すと置き換わる。会議の内容を含む。"""
+
+    meeting_id: str
+    # 全体の概要。
+    overview: str
+    # 話題ごとの要点。1 行に 1 項目。
+    key_points: str
+    # 決定事項。1 行に 1 項目。該当が無いときは「該当なし」。
+    decisions: str
+    # 宿題。1 行に 1 項目。該当が無いときは「該当なし」。
+    action_items: str
+    # 作成日時（UTC）。作り直すと新しい日時に変わる。
+    created_at: datetime

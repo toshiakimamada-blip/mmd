@@ -316,6 +316,11 @@ def read_meeting(settings: Settings, meeting_id: str) -> dict | None:
     return rows[0] if rows else None
 
 
+def read_summaries(settings: Settings, meeting_id: str) -> list[dict]:
+    """会議の要約を、保存された値のまま読む。要約が無ければ空の一覧。日時は UTC のミリ秒。"""
+    return _read_rows(settings, "SELECT * FROM summaries WHERE meeting_id = ?", (meeting_id,))
+
+
 def read_subtitles(settings: Settings, meeting_id: str) -> list[dict]:
     """会議の字幕を、順番の昇順で、保存された値のまま読む。"""
     return _read_rows(

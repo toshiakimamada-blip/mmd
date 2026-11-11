@@ -17,16 +17,19 @@
 import asyncio
 from dataclasses import dataclass
 
+from ..errors import describe_origin
 from ..generation.inputs import split_into_blocks
+from ..logs import log_error
 from ..meetings.errors import invalid_transition, meeting_not_found
-from ..meetings.session import Publisher
+from ..meetings.session import ERROR_OCCURRED, Publisher, error_payload
 from ..meetings.transitions import Trigger, resolve_transition
 from ..records.models import Meeting, MeetingStatus
 from ..records.store import RecordStore
-from .errors import summary_no_content
+from .errors import COMPONENT, JobFailure, error_code, job_error, summary_no_content
 from .manager import JobManager
 from .meeting_state import publish_meeting_state
 from .models import JobKind, JobSnapshot
+from .summary_outcomes import SummaryOutcomes
 
 # 要約を作る依頼の契機。遷移元の状態ごとに決まる（遷移規則の表）。
 _REQUEST_TRIGGERS = {
@@ -57,6 +60,7 @@ class SummaryRequests:
         store: RecordStore,
         jobs: JobManager,
         publisher: Publisher,
+        outcomes: SummaryOutcomes,
         max_chars: int,
     ) -> None:
         """
@@ -64,11 +68,13 @@ class SummaryRequests:
             store: 記録保存部。
             jobs: 作成ジョブ管理部。
             publisher: 通知の送り先（通知部）。
+            outcomes: 要約の結果の保存。ジョブを登録できなかったときに、要約失敗を保存する。
             max_chars: 字幕のブロックの文字数の上限（調整値 generation_input_max_chars）。
         """
         self._store = store
         self._jobs = jobs
         self._publisher = publisher
+        self._outcomes = outcomes
         self._max_chars = max_chars
         # 依頼を 1 つずつ処理する。同時に届いた依頼が、状態の確認から登録の間に割り込まないため。
         self._lock = asyncio.Lock()
@@ -125,14 +131,49 @@ class SummaryRequests:
         Args:
             meeting: 終了した会議（状態は要約作成中）。
 
-        Raises:
-            BusinessAppError: 字幕が空白だけで、ブロックが 1 つもできない（SUMMARY_NO_CONTENT）。
+        ジョブを登録できなかったときは、状態を要約失敗にして、失敗理由を保存し、エラーを通知する
+        （要約作成中のまま残さない）。この関数は、例外を起こさない。
+
+        Args:
+            meeting: 終了した会議（状態は要約作成中）。
         """
         async with self._lock:
-            _, blocks = await self._blocks(meeting.meeting_id)
-            if not blocks:
-                raise summary_no_content(meeting.meeting_id)
-            self._jobs.submit_summary(meeting.meeting_id, blocks)
+            try:
+                _, blocks = await self._blocks(meeting.meeting_id)
+                if not blocks:
+                    raise summary_no_content(meeting.meeting_id)
+                self._jobs.submit_summary(meeting.meeting_id, blocks)
+            except Exception as error:  # noqa: BLE001 (登録できない理由は問わず、要約失敗にする)
+                await self._fail_to_start(meeting.meeting_id, error)
+
+    async def _fail_to_start(self, meeting_id: str, cause: Exception) -> None:
+        """ジョブを登録できなかった。状態を要約失敗にして、失敗理由を保存し、エラーを通知する。"""
+        _, location = describe_origin(cause)
+        code = error_code(JobKind.SUMMARY, JobFailure.GENERATION_FAILED)
+        log_error(
+            code,
+            COMPONENT,
+            meeting_id=meeting_id,
+            exception_type=type(cause).__name__,
+            location=location,
+        )
+        try:
+            await self._outcomes.summary_failed(meeting_id, code)
+            self._publisher.publish(
+                ERROR_OCCURRED,
+                error_payload(
+                    meeting_id, job_error(JobKind.SUMMARY, JobFailure.GENERATION_FAILED, meeting_id)
+                ),
+            )
+        except Exception as failure:  # noqa: BLE001 (保存の失敗は、種類と発生場所だけを残す)
+            _, where = describe_origin(failure)
+            log_error(
+                "SYSTEM_JOB_OUTCOME_FAILED",
+                COMPONENT,
+                meeting_id=meeting_id,
+                exception_type=type(failure).__name__,
+                location=where,
+            )
 
     async def _blocks(self, meeting_id: str) -> tuple[int, list[str]]:
         """会議の字幕（英語の原文）の件数と、話された順にブロックへ分けた字幕。

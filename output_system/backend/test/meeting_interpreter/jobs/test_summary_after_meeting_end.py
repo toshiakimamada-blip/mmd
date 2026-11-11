@@ -19,6 +19,7 @@ from meeting_fakes import (
     make_app,
     read_meeting,
     read_subtitles,
+    read_summaries,
     running_app,
     speak,
     start_meeting,
@@ -96,6 +97,71 @@ class TestSummaryStartsWhenTheMeetingEnds:
         ]
         assert changed == ["interpreting", "summarizing"]
         assert read_meeting(settings, meeting_id)["status"] == "summarizing"
+
+
+class TestEndToEndWithTheRealOutcomes:
+    """終了 → 要約の作成 → 保存 → 完了。結果の受け取り先も、本番のものを使う。"""
+
+    def test_should_complete_the_meeting_with_a_saved_summary_and_replace_it_on_a_rebuild(
+        self, settings: Settings
+    ):
+        """
+        【テスト対象】会議の終了 → 作成ジョブ管理部 → 要約の保存 → 完了（本番の組み立て）
+        【テスト内容】字幕を 1 件作って会議を終了し、完了したあとで、要約を作り直す
+        【期待結果】- 終了のあと、要約が 4 項目で保存され、状態が完了になること。状態の通知は
+                      通訳中 → 要約作成中 → 完了の順
+                    - 作り直しで、状態が要約作成中を経て完了に戻り、要約が置き換わる（1 つだけ）こと
+        """
+        generation = InProcessLauncher()
+        app = make_app(
+            settings,
+            FakeEngineLauncher(settings),
+            on_meeting_ended=None,
+            generation_launcher=generation,
+        )
+        with running_app(app) as handle:
+            try:
+                events = handle.events()
+                meeting_id = start_meeting(handle)
+                with handle.audio(meeting_id) as audio:
+                    speak(audio, 1.0)
+                    events.wait_for_count("subtitle.created", 1)
+                    handle.post(f"/api/meetings/{meeting_id}/end")
+                wait_for(
+                    lambda: (read_meeting(settings, meeting_id) or {}).get("status") == "completed",
+                    what="完了",
+                )
+                first = read_summaries(settings, meeting_id)
+                status, _ = handle.post(f"/api/meetings/{meeting_id}/summary")
+                wait_for(
+                    lambda: (
+                        len(
+                            [
+                                i
+                                for i in events.of_type("meeting.state_changed")
+                                if i["status"] == "completed"
+                            ]
+                        )
+                        >= 2
+                    ),
+                    what="作り直しの完了",
+                )
+                second = read_summaries(settings, meeting_id)
+            finally:
+                handle.close_all()
+
+        assert len(first) == 1 and len(second) == 1
+        assert first[0]["overview"] and first[0]["key_points"]
+        assert first[0]["decisions"] and first[0]["action_items"]
+        assert status == 202
+        assert second[0]["created_at"] >= first[0]["created_at"]
+        changed = [
+            item["status"]
+            for item in events.of_type("meeting.state_changed")
+            if item["meeting_id"] == meeting_id
+        ]
+        assert changed == ["interpreting", "summarizing", "completed", "summarizing", "completed"]
+        assert read_meeting(settings, meeting_id)["summary_failure_reason"] is None
 
 
 class TestNoSummaryWithoutSubtitles:
