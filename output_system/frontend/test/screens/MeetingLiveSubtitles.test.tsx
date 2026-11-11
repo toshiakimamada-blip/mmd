@@ -4,6 +4,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { routes } from '../../src/router';
 import { FakeEventSocket } from '../events/fakeWebSocket';
+import { wireRecord } from './record/recordTestKit';
 
 /** 会議の開始の応答と同じ形。開始の画面が、移動の状態に載せて渡す。 */
 const MEETING = {
@@ -73,6 +74,10 @@ beforeEach(() => {
       if (path === '/api/meetings/abc123/subtitles') {
         subtitleRequests += 1;
         return answerSubtitles();
+      }
+      // 「会議の記録」へ移ったあとの、会議の記録の取得。移った先は本物の画面なので、答えを返す
+      if (path === '/api/meetings/abc123') {
+        return Promise.resolve(jsonResponse(wireRecord()));
       }
       return Promise.reject(new Error(`想定していない呼び出し: ${path}`));
     }),

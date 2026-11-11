@@ -234,3 +234,69 @@
   font-size: 0.875rem;
   font-weight: 700;
 }
+
+/* 質問のまとまり（「会議中」と「会議の記録」で使い回す） */
+.question-sets {
+  display: flex;
+  flex-direction: column;
+  gap: 1.25rem;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.question-set {
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+  max-width: 48rem;
+  padding-left: 0.875rem;
+  border-left: 4px solid var(--color-band);
+}
+
+.question-set__meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.25rem 1rem;
+  margin: 0;
+  color: var(--color-ink-muted);
+  font-size: 0.875rem;
+  font-weight: 700;
+}
+
+.question-set__questions {
+  display: flex;
+  flex-direction: column;
+  gap: 0.625rem;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.question {
+  display: flex;
+  gap: 0.75rem;
+}
+
+.question__number {
+  flex: none;
+  width: 1.5rem;
+  color: var(--color-ink-muted);
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+  text-align: right;
+}
+
+.question__texts {
+  min-width: 0;
+}
+
+.question__texts p {
+  margin: 0;
+  overflow-wrap: anywhere;
+}
+
+/* 英語の質問は、そのまま話し手へ尋ねる文。日本語より少し強く見せる */
+.question__english {
+  font-weight: 700;
+}

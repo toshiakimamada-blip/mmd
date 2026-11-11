@@ -1,7 +1,5 @@
+import { jobStatusLabel, WAITING_NOTE } from '../../records/jobTexts';
 import { type RecordJob } from '../../records/recordTypes';
-
-/** 待機中に添える固定の文章（基本設計書の画面設計書: 要約の作成状況）。 */
-const WAITING_NOTE = 'ほかの作成、または進行中の会議が終わったあとに作ります。';
 
 /**
  * 要約の作成状況と進み具合。
@@ -25,7 +23,7 @@ export function SummaryProgress({ job }: { readonly job: RecordJob | undefined }
   return (
     <div className="summary-progress" role="status">
       <p className="summary-progress__status">
-        作成状況: <strong>{job.status === 'queued' ? '待機中' : '作成中'}</strong>
+        作成状況: <strong>{jobStatusLabel(job.status)}</strong>
       </p>
       {job.status === 'queued' ? <p>{WAITING_NOTE}</p> : <p>要約を作っています。</p>}
       {showProgress ? (
