@@ -197,8 +197,8 @@ def create_app(
             テストが、偽のエンジンで動かす入口を渡すために使う。
         meeting_policy: 会議のセッションの、時間と回数の決め。省略すると、既定の決め。
             テストが、短い時間を渡すために使う。
-        on_meeting_ended: 会議を終了して要約作成中になったあとに呼ぶ。作成ジョブ管理部への口。
-            省略すると、何もしない。
+        on_meeting_ended: 会議を終了して要約作成中になったあとに呼ぶ。省略すると、作成ジョブ管理部へ
+            つなぎ、字幕から要約の作成ジョブを登録する。テストが、別の動きを渡すために使う。
         generation_launcher: 生成ワーカーの起動の入口。省略すると、本物の AI モデルで動かす。
             テストが、偽のエンジンで動かす入口を渡すために使う。
         job_policy: 作成ジョブ管理部の、時間の決め。省略すると、調整値から作る。
@@ -248,7 +248,8 @@ def create_app(
         launcher=interpreter_launcher or ProductionLauncher(settings),
         models_ready=lambda: app.state.model_manager.snapshot.status is ModelStatus.READY,
         policy=meeting_policy or SessionPolicy.from_tuning(settings.tuning),
-        on_meeting_ended=on_meeting_ended,
+        # 会議の終了で、字幕が 1 件以上あれば、利用者の操作なしで要約を始める。
+        on_meeting_ended=on_meeting_ended or app.state.summary_requests.start_after_meeting_end,
         # 会議の開始で、ほかの会議の要約を区切りで後回しにし、通訳ワーカーを止めたら、再開する。
         on_meeting_started=app.state.job_manager.meeting_started,
         on_interpreter_stopped=app.state.job_manager.interpreter_stopped,

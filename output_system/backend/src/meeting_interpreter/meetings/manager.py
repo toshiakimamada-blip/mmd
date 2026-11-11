@@ -80,8 +80,8 @@ class MeetingManager:
             policy: セッションの時間と回数の決め（SessionPolicy.from_tuning で調整値から作る）。
             clock: アプリサーバーの時計。
             on_meeting_ended: 会議を終了し、状態が要約作成中になったあとに呼ぶ。要約を始める
-                呼び出しで、作成ジョブ管理部につなぐ口。つなぐまでは何もしない（字幕が 1 件以上の
-                会議は、要約作成中のまま残る）。
+                呼び出しで、作成ジョブ管理部につなぐ口（本番は、SummaryRequests の
+                start_after_meeting_end）。省略すると何もしない（テスト用）。
             on_meeting_started: 会議を開始し、通訳ワーカーの起動を始めたあとに、会議番号を渡して
                 呼ぶ。作成ジョブ管理部が、ほかの会議の要約を後回しにする口。
             on_interpreter_stopped: 通訳ワーカーを止めたあとに、会議番号を渡して呼ぶ（会議の

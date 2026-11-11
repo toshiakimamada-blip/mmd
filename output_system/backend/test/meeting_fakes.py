@@ -323,10 +323,20 @@ def read_subtitles(settings: Settings, meeting_id: str) -> list[dict]:
     )
 
 
+async def _start_no_summary(meeting) -> None:
+    """会議の終了で要約を始めない。既定の on_meeting_ended。"""
+
+
 def make_app(settings: Settings, launcher, policy: SessionPolicy = FAST, **kwargs) -> FastAPI:
-    """準備完了のモデル管理部と、偽のエンジンの入口で、アプリ全体を組み立てる。"""
+    """準備完了のモデル管理部と、偽のエンジンの入口で、アプリ全体を組み立てる。
+
+    会議の終了で要約を始める呼び出し（on_meeting_ended）は、既定では何もしない。会議の終了を
+    確かめるテストが、要約の作成の進み具合に左右されないため。本番と同じく、作成ジョブ管理部へ
+    つなぐときは、on_meeting_ended=None を渡す（生成ワーカーの偽 generation_launcher も渡すこと）。
+    """
     from meeting_interpreter.app import create_app
 
+    kwargs.setdefault("on_meeting_ended", _start_no_summary)
     return create_app(
         settings,
         model_manager=ready_model_manager(settings),

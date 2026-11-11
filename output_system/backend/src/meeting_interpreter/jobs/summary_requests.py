@@ -114,6 +114,26 @@ class SummaryRequests:
             registration = self._jobs.submit_summary(meeting_id, blocks)
             return SummaryRequest(updated, registration.job, registration.created)
 
+    async def start_after_meeting_end(self, meeting: Meeting) -> None:
+        """会議の終了で、要約の作成ジョブを登録する。利用者の操作は待たない。
+
+        会議管理部の on_meeting_ended に渡す。状態は、会議の終了の保存（終了日時と一緒の 1 回の
+        確定）で、すでに「要約作成中」になっている。ここでは状態を変えずに、ジョブを登録する。
+        字幕が 0 件の会議は、状態が「完了」になり、この関数は呼ばれない。中断した会議も呼ばれない
+        （利用者が要約を作る操作をするまで、要約を作らない）。
+
+        Args:
+            meeting: 終了した会議（状態は要約作成中）。
+
+        Raises:
+            BusinessAppError: 字幕が空白だけで、ブロックが 1 つもできない（SUMMARY_NO_CONTENT）。
+        """
+        async with self._lock:
+            _, blocks = await self._blocks(meeting.meeting_id)
+            if not blocks:
+                raise summary_no_content(meeting.meeting_id)
+            self._jobs.submit_summary(meeting.meeting_id, blocks)
+
     async def _blocks(self, meeting_id: str) -> tuple[int, list[str]]:
         """会議の字幕（英語の原文）の件数と、話された順にブロックへ分けた字幕。
 
