@@ -8,8 +8,8 @@
 - summary_failed: 状態を要約失敗にして、失敗理由（エラーコード）を保存する。要約には触れないため、
   作り直しに失敗したときは、前の要約が残る
 
-状態を変える前に、遷移規則の表（meetings/transitions.py）で確かめる。質問の保存は、質問の作成の
-作業が、この部を受け継いで足す（questions_ready は、いまは結果を捨てる）。
+状態を変える前に、遷移規則の表（meetings/transitions.py）で確かめる。質問の保存は、質問の
+受け取り先（question_outcomes.py）が行う。この部は、質問の結果を受け取らない（捨てる）。
 """
 
 from typing import Final
@@ -35,7 +35,7 @@ def _fill(text: str) -> str:
 
 
 class SummaryOutcomes(NullOutcomeHandler):
-    """要約の結果の受け取り先。保存して、会議の状態を変える。質問の結果は、いまは捨てる。"""
+    """要約の結果の受け取り先。保存して、会議の状態を変える。質問の結果は捨てる（別の受け取り先の役目）。"""
 
     def __init__(self, store: RecordStore, publisher: Publisher) -> None:
         """

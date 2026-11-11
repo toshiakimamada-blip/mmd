@@ -8,6 +8,7 @@
 | 字幕の作成 | add_subtitle | 字幕 1 件の作成（順番を同じ確定の中で振る） |
 | 会議の終了・状態の変更 | update_meeting | 終了日時の記録と、状態の変更 |
 | 要約の完成 | save_summary | 要約の作成または置き換えと、状態の完了への変更 |
+| 質問の完成 | save_question_set | 質問のまとまり 1 件と、質問 5 件の作成 |
 
 読み出し（get_meeting・list_subtitles・get_summary・get_record）は確定を作らない。get_record は、
 会議の記録の画面のために、会議・字幕・要約・質問のまとまりを、同じ時点の内容として 1 回で読む。
@@ -40,7 +41,7 @@ import functools
 import re
 import sqlite3
 import uuid
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Sequence
 from datetime import datetime
 from enum import StrEnum
 from typing import Final
@@ -62,6 +63,8 @@ from .models import (
 )
 from .schema import (
     ERROR_CODE_MAX_CHARS,
+    QUESTION_MAX_CHARS,
+    QUESTIONS_PER_SET,
     SUBTITLE_TEXT_MAX_CHARS,
     SUMMARY_LIST_MAX_CHARS,
     SUMMARY_OVERVIEW_MAX_CHARS,
@@ -548,6 +551,97 @@ class RecordStore:
         except _MeetingMissing:
             raise RecordValueError("meeting_id", meeting_id=meeting_id) from None
         return _meeting_from_row(row)
+
+    @_log_record_errors
+    async def save_question_set(
+        self,
+        meeting_id: str,
+        *,
+        created_phase: QuestionPhase | str,
+        questions: Sequence[tuple[str, str]],
+    ) -> QuestionSet:
+        """質問のまとまりを作る（質問の完成）。まとまり 1 件と質問 5 件を、1 回の確定で保存する。
+
+        質問の完成の確定（横断設計規約「保存の単位と順序」）。5 問がそろわない、1 問でも桁の上限を
+        超える、確定に失敗する、のどれでも、まとまりも質問も 1 件も保存しない。
+        まとまりの順番は、同じ確定の中で、その会議の最大 + 1 を振る（会議の中で作成した順。
+        1 から始まり、欠けず重ならない）。作成日時は、アプリサーバーの時計。
+        まとまりと質問は、作成後に変更しない。
+
+        Args:
+            meeting_id: まとまりが属する会議。
+            created_phase: 作成した時点。会議の状態が通訳中のとき（during_meeting）か、それ以外
+                （after_meeting）。質問の作成を受け付けた時点の状態で決める。
+            questions: 英語と日本語の組（英語の質問, 日本語の質問）。ちょうど 5 組。話し手へ尋ねる
+                順に並べる。1 問は 1 から 500 文字。
+
+        Returns:
+            保存したまとまり（振った順番と質問を含む）。
+
+        Raises:
+            RecordValueError: 組が 5 つでないとき（項目は questions）。質問が桁の上限に合わないとき
+                （空・501 文字以上・NUL 文字を含む）。区分コードに無い時点のとき。会議番号に合う
+                会議が無いとき（項目は meeting_id）。何も保存しない。
+            RecordSaveError: データベースの操作が失敗したとき。何も保存しない。
+        """
+        phase = _coerce(QuestionPhase, "created_phase", created_phase, meeting_id=meeting_id)
+        if len(questions) != QUESTIONS_PER_SET:
+            raise RecordValueError("questions", meeting_id=meeting_id)
+        checked = [
+            (
+                str(_check_text("question_en", english, QUESTION_MAX_CHARS, meeting_id=meeting_id)),
+                str(
+                    _check_text("question_ja", japanese, QUESTION_MAX_CHARS, meeting_id=meeting_id)
+                ),
+            )
+            for english, japanese in questions
+        ]
+        created_ms = _check_moment("created_at", self._clock(), meeting_id=meeting_id)
+
+        def work(connection: sqlite3.Connection) -> int:
+            # 会議の有無の確認、順番の読み取り、まとまりと質問の書き込みを、同じ確定の中で行う
+            # （確定の最初に書き込みの権利を取る）。
+            if (
+                connection.execute(
+                    "SELECT 1 FROM meetings WHERE meeting_id = ?", (meeting_id,)
+                ).fetchone()
+                is None
+            ):
+                raise _MeetingMissing
+            (set_number,) = connection.execute(
+                "SELECT COALESCE(MAX(set_number), 0) + 1 FROM question_sets WHERE meeting_id = ?",
+                (meeting_id,),
+            ).fetchone()
+            connection.execute(
+                "INSERT INTO question_sets (meeting_id, set_number, created_at, created_phase)"
+                " VALUES (?, ?, ?, ?)",
+                (meeting_id, set_number, created_ms, phase.value),
+            )
+            connection.executemany(
+                "INSERT INTO questions"
+                " (meeting_id, set_number, sequence, question_en, question_ja)"
+                " VALUES (?, ?, ?, ?, ?)",
+                [
+                    (meeting_id, set_number, sequence, english, japanese)
+                    for sequence, (english, japanese) in enumerate(checked, start=1)
+                ],
+            )
+            return set_number
+
+        try:
+            set_number = await self._write(work, meeting_id=meeting_id)
+        except _MeetingMissing:
+            raise RecordValueError("meeting_id", meeting_id=meeting_id) from None
+        return QuestionSet(
+            meeting_id=meeting_id,
+            set_number=set_number,
+            created_at=from_epoch_millis(created_ms),
+            created_phase=phase,
+            questions=tuple(
+                Question(sequence=sequence, english=english, japanese=japanese)
+                for sequence, (english, japanese) in enumerate(checked, start=1)
+            ),
+        )
 
     async def get_summary(self, meeting_id: str) -> Summary | None:
         """会議の要約を読み出す。要約がまだ無い、または会議が無いときは None。"""
