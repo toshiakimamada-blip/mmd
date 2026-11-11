@@ -4,6 +4,9 @@
     会議を開始する（201）。会議を作り、通訳ワーカーの起動を始める
 - POST /api/meetings/{会議番号}/end
     会議を終了する（200）。届いている音声を字幕にしてから閉じる
+- GET /api/meetings/{会議番号}
+    会議の記録（会議・字幕・要約・質問のまとまり・待機中か作成中の作成ジョブ）を返す（200）。
+    会議の記録の画面が、開いた時点と、通知を受けた時点で読む。通訳中の会議も取得できる
 - GET /api/meetings/{会議番号}/subtitles
     会議の字幕を、順番の昇順で返す（200）。画面が、再接続のあとに読み直す
 - POST /api/meetings/{会議番号}/summary
@@ -14,21 +17,25 @@
 音声は /ws/audio/{会議番号}、字幕などの通知は /ws/events（api/ws.py）。
 """
 
+import re
 from typing import Annotated, Literal
 
 from fastapi import APIRouter, Path, Request
 from pydantic import BaseModel, ConfigDict
 
+from ..jobs.manager import JobManager
 from ..jobs.models import JobSnapshot
 from ..jobs.summary_requests import SummaryRequests
 from ..logs.events import format_timestamp
+from ..meetings.errors import meeting_not_found
 from ..meetings.manager import MeetingManager
-from ..records.models import Meeting, Subtitle
+from ..records.models import Meeting, MeetingRecord, QuestionSet, Subtitle, Summary
 
 router = APIRouter(tags=["meetings"])
 
 # 会議番号の形。英数字・アンダースコア・ハイフン（ログに書ける識別子の形）。
-MeetingId = Annotated[str, Path(pattern=r"^[A-Za-z0-9_-]{1,64}$")]
+MEETING_ID_PATTERN = r"^[A-Za-z0-9_-]{1,64}$"
+MeetingId = Annotated[str, Path(pattern=MEETING_ID_PATTERN)]
 
 
 class StartMeetingRequest(BaseModel):
@@ -175,6 +182,11 @@ class SummaryRequestResponse(BaseModel):
     job: JobResponse
 
 
+def _job_manager(request: Request) -> JobManager:
+    """アプリが持つ作成ジョブ管理部を返す。"""
+    return request.app.state.job_manager  # type: ignore[no-any-return]
+
+
 def _summary_requests(request: Request) -> SummaryRequests:
     """アプリが持つ、要約の依頼の受け付けを返す。"""
     return request.app.state.summary_requests  # type: ignore[no-any-return]
@@ -199,3 +211,117 @@ async def request_summary(meeting_id: MeetingId, request: Request) -> SummaryReq
     return SummaryRequestResponse(
         meeting=to_response(result.meeting), job=to_job_response(result.job)
     )
+
+
+class RecordMeetingResponse(MeetingResponse):
+    """会議の記録の画面が読む会議。会議の項目に、要約の失敗理由（エラーコード）を足す。"""
+
+    # 状態が要約失敗のときだけ入る。画面を開き直しても、何が起きたかを表示するために保存している。
+    summary_failure_reason: str | None
+
+
+class SummaryResponse(BaseModel):
+    """要約。4 項目は保存した文字列のまま返す（箇条書きは 1 行 1 項目）。会議の内容を含む。"""
+
+    overview: str
+    key_points: str
+    decisions: str
+    action_items: str
+    created_at: str
+
+
+class QuestionResponse(BaseModel):
+    """質問 1 問。英語と日本語の組。"""
+
+    sequence: int
+    question_en: str
+    question_ja: str
+
+
+class QuestionSetResponse(BaseModel):
+    """質問のまとまり。作成した時点は、会議中（during_meeting）か会議後（after_meeting）。"""
+
+    set_number: int
+    created_at: str
+    created_phase: Literal["during_meeting", "after_meeting"]
+    questions: list[QuestionResponse]
+
+
+class MeetingRecordResponse(BaseModel):
+    """会議の記録。会議の長さは保存しないため含めない（画面が開始日時と終了日時から求める）。"""
+
+    meeting: RecordMeetingResponse
+    # 話された順。
+    subtitles: list[SubtitleResponse]
+    # まだ作っていなければ null。
+    summary: SummaryResponse | None
+    # 新しい順。
+    question_sets: list[QuestionSetResponse]
+    # 待機中か作成中の作成ジョブ。受け付けた順。
+    jobs: list[JobResponse]
+
+
+def _to_summary_response(summary: Summary) -> SummaryResponse:
+    """要約を、画面へ返す形にする。文字列は変換しない（文字として表示するのは画面の役目）。"""
+    return SummaryResponse(
+        overview=summary.overview,
+        key_points=summary.key_points,
+        decisions=summary.decisions,
+        action_items=summary.action_items,
+        created_at=format_timestamp(summary.created_at),
+    )
+
+
+def _to_question_set_response(question_set: QuestionSet) -> QuestionSetResponse:
+    """質問のまとまりを、画面へ返す形にする。"""
+    return QuestionSetResponse(
+        set_number=question_set.set_number,
+        created_at=format_timestamp(question_set.created_at),
+        created_phase=question_set.created_phase.value,
+        questions=[
+            QuestionResponse(
+                sequence=question.sequence,
+                question_en=question.english,
+                question_ja=question.japanese,
+            )
+            for question in question_set.questions
+        ],
+    )
+
+
+def to_record_response(record: MeetingRecord, jobs: list[JobSnapshot]) -> MeetingRecordResponse:
+    """会議の記録と作成ジョブを、画面へ返す形にする。"""
+    meeting = record.meeting
+    return MeetingRecordResponse(
+        meeting=RecordMeetingResponse(
+            **to_response(meeting).model_dump(),
+            summary_failure_reason=meeting.summary_failure_reason,
+        ),
+        subtitles=[to_subtitle_response(item) for item in record.subtitles],
+        summary=None if record.summary is None else _to_summary_response(record.summary),
+        question_sets=[_to_question_set_response(item) for item in record.question_sets],
+        jobs=[to_job_response(job) for job in jobs],
+    )
+
+
+@router.get("/meetings/{meeting_id}", response_model=MeetingRecordResponse)
+async def get_meeting_record(meeting_id: str, request: Request) -> MeetingRecordResponse:
+    """会議の記録を返す。通訳中の会議も取得できる（それまでの字幕と質問を返す）。
+
+    1 回の取得で、全字幕（2 時間で最大 約 1,500 件。字幕は作成後に変更しない）を返す。
+    作成ジョブは、保存した記録より先に読む。要約の保存と作成ジョブの完了の間に取得が入っても、
+    「完了の会議に、作成中のジョブが付く」食い違いで済む（逆だと、要約作成中の会議にジョブが無い）。
+    食い違いは、画面が受ける通知（job.status_changed の完了）で読み直して直る。
+
+    会議番号の形に合わない値も、会議が無いときと同じ MEETING_NOT_FOUND にする。利用者が URL を
+    書き換えて開いた場合も、画面が「記録が見つからない」として扱えるようにするため
+    （入力エラー 422 にしない）。
+
+    Raises:
+        BusinessAppError: 会議が無い、または会議番号の形が誤り（MEETING_NOT_FOUND、404）。
+    """
+    if re.fullmatch(MEETING_ID_PATTERN, meeting_id) is None:
+        raise meeting_not_found()
+    jobs = _job_manager(request).active_jobs(meeting_id)
+    record = await _manager(request).get_record(meeting_id)
+    return to_record_response(record, jobs)

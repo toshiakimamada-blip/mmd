@@ -1,4 +1,4 @@
-"""記録保存部が受け渡す値（会議・字幕・要約）と、区分コード。
+"""記録保存部が受け渡す値（会議・字幕・要約・質問のまとまり）と、区分コード。
 
 区分のコード値は、データモデル設計書の「区分コード」のとおり。日時は UTC の時間帯を持つ
 datetime で受け渡す（保存の形は times.py）。
@@ -79,3 +79,51 @@ class Summary:
     action_items: str
     # 作成日時（UTC）。作り直すと新しい日時に変わる。
     created_at: datetime
+
+
+class QuestionPhase(StrEnum):
+    """質問を作成した時点。"""
+
+    # 会議中。会議の状態が通訳中のときに作った。
+    DURING_MEETING = "during_meeting"
+    # 会議後。会議の状態が通訳中以外のときに作った。
+    AFTER_MEETING = "after_meeting"
+
+
+@dataclass(frozen=True, slots=True)
+class Question:
+    """質問 1 問。英語と日本語の組。作成後に変更しない。会議の内容を含む。"""
+
+    # まとまりの中の並び順。1 から 5。
+    sequence: int
+    # 英語の質問。話し手へそのまま尋ねられる問い。
+    english: str
+    # 日本語の質問。英語の質問と同じ意味の問い。
+    japanese: str
+
+
+@dataclass(frozen=True, slots=True)
+class QuestionSet:
+    """質問のまとまり。質問を作る操作 1 回分の質問（5 問）。作成後に変更しない。"""
+
+    meeting_id: str
+    # まとまりの順番。会議の中で作成した順。1 から始まる。
+    set_number: int
+    # 作成日時（UTC）。
+    created_at: datetime
+    created_phase: QuestionPhase
+    # 質問。番号の順。
+    questions: tuple[Question, ...]
+
+
+@dataclass(frozen=True, slots=True)
+class MeetingRecord:
+    """会議の記録の画面が読む内容。同じ時点の、会議・字幕・要約・質問のまとまり。"""
+
+    meeting: Meeting
+    # 字幕。話された順（順番の昇順）。
+    subtitles: tuple[Subtitle, ...]
+    # 要約。まだ無ければ None。
+    summary: Summary | None
+    # 質問のまとまり。新しい順（まとまりの順番の降順）。
+    question_sets: tuple[QuestionSet, ...]

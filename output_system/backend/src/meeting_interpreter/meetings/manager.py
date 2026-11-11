@@ -28,7 +28,7 @@ from typing import Final
 from ..logs import log_error, log_processing
 from ..logs.events import format_timestamp
 from ..records.errors import RecordError
-from ..records.models import Meeting, MeetingStatus, Subtitle
+from ..records.models import Meeting, MeetingRecord, MeetingStatus, Subtitle
 from ..records.store import RecordStore
 from .errors import (
     COMPONENT,
@@ -286,6 +286,24 @@ class MeetingManager:
         if await self._store.get_meeting(meeting_id) is None:
             raise meeting_not_found(meeting_id)
         return await self._store.list_subtitles(meeting_id)
+
+    # --- 会議の記録の読み出し ------------------------------------------------------------
+
+    async def get_record(self, meeting_id: str) -> MeetingRecord:
+        """会議の記録（会議・字幕・要約・質問のまとまり）を、同じ時点の内容として返す。
+
+        通訳中の会議も取得できる（それまでの字幕と質問を返す）。会議の長さは保存していないため、
+        返さない（開始日時と終了日時から、画面が求める）。
+
+        Raises:
+            BusinessAppError: 会議が無い（MEETING_NOT_FOUND）。
+        """
+        record = await self._store.get_record(meeting_id)
+        if record is None:
+            # 無い会議の番号は、利用者が URL に書いた値そのもの。会議の内容を URL に載せた場合に、
+            # エラーログへ残さないよう、会議番号を付けずに返す。
+            raise meeting_not_found()
+        return record
 
     # --- 音声の接続 ---------------------------------------------------------------------
 

@@ -9,6 +9,9 @@
 | 会議の終了・状態の変更 | update_meeting | 終了日時の記録と、状態の変更 |
 | 要約の完成 | save_summary | 要約の作成または置き換えと、状態の完了への変更 |
 
+読み出し（get_meeting・list_subtitles・get_summary・get_record）は確定を作らない。get_record は、
+会議の記録の画面のために、会議・字幕・要約・質問のまとまりを、同じ時点の内容として 1 回で読む。
+
 関数は、保存する前に、桁の上限・区分コード・日時の形を確かめる。合わない値は
 `RecordValueError` で断り、何も保存しない。表の制約（schema.py）も同じ内容を守るが、
 そちらは最後の防ぎ。先に確かめるのは、どの値が合わなかったかを呼び出し側が区別できるようにするため。
@@ -28,7 +31,8 @@
 - 書き込みの関数（作成・追加・更新）が `RecordError` で終わるときは、エラーログを 1 件出す。
   出す項目は、エラーコード・コンポーネント・会議番号・例外の種類・発生場所だけ。例外の文面と
   会議の内容は出さない。
-- 読み出しの関数（get_meeting・list_subtitles）は、データベースの例外を変換しない。
+- 読み出しの関数（get_meeting・list_subtitles・get_summary・get_record）は、データベースの例外を
+  変換しない。
   読み出しの失敗は、保存の失敗とは別の扱いで、閲覧の機能が決める。
 """
 
@@ -45,7 +49,17 @@ from ..errors import describe_origin
 from ..logs import log_error
 from .database import RecordDatabase
 from .errors import COMPONENT, RecordError, RecordSaveError, RecordValueError
-from .models import AudioSource, Meeting, MeetingStatus, Subtitle, Summary
+from .models import (
+    AudioSource,
+    Meeting,
+    MeetingRecord,
+    MeetingStatus,
+    Question,
+    QuestionPhase,
+    QuestionSet,
+    Subtitle,
+    Summary,
+)
 from .schema import (
     ERROR_CODE_MAX_CHARS,
     SUBTITLE_TEXT_MAX_CHARS,
@@ -188,6 +202,55 @@ def _meeting_from_row(row: tuple) -> Meeting:
         audio_source=AudioSource(audio_source),
         status=MeetingStatus(status),
         summary_failure_reason=reason,
+    )
+
+
+def _record_from_rows(
+    meeting_row: tuple,
+    subtitle_rows: list[tuple],
+    summary_row: tuple | None,
+    set_rows: list[tuple],
+    question_rows: list[tuple],
+) -> MeetingRecord:
+    """get_record が読んだ行を、会議の記録にする。質問は、まとまりの順番ごとに振り分ける。"""
+    meeting = _meeting_from_row(meeting_row)
+    questions_by_set: dict[int, list[Question]] = {}
+    for set_number, sequence, english, japanese in question_rows:
+        questions_by_set.setdefault(set_number, []).append(
+            Question(sequence=sequence, english=english, japanese=japanese)
+        )
+    return MeetingRecord(
+        meeting=meeting,
+        subtitles=tuple(
+            Subtitle(
+                meeting_id=row[0],
+                sequence=row[1],
+                original_text=row[2],
+                translated_text=row[3],
+                spoken_at=from_epoch_millis(row[4]),
+            )
+            for row in subtitle_rows
+        ),
+        summary=None
+        if summary_row is None
+        else Summary(
+            meeting_id=summary_row[0],
+            overview=summary_row[1],
+            key_points=summary_row[2],
+            decisions=summary_row[3],
+            action_items=summary_row[4],
+            created_at=from_epoch_millis(summary_row[5]),
+        ),
+        question_sets=tuple(
+            QuestionSet(
+                meeting_id=meeting.meeting_id,
+                set_number=set_number,
+                created_at=from_epoch_millis(created_at),
+                created_phase=QuestionPhase(created_phase),
+                questions=tuple(questions_by_set.get(set_number, ())),
+            )
+            for set_number, created_at, created_phase in set_rows
+        ),
     )
 
 
@@ -507,3 +570,47 @@ class RecordStore:
             action_items=row[4],
             created_at=from_epoch_millis(row[5]),
         )
+
+    async def get_record(self, meeting_id: str) -> MeetingRecord | None:
+        """会議の記録（会議・字幕・要約・質問のまとまり）を、同じ時点の内容として 1 回で読み出す。
+
+        会議の記録の画面（GET /api/meetings/{会議番号}）が使う。4 つの読み出しを 1 回の読み取りの
+        取引の中で行うため、要約が保存される前後で、会議の状態と要約が食い違わない。
+        字幕は話された順（順番の昇順）、質問のまとまりは新しい順（まとまりの順番の降順）。
+        質問は、まとまりの中で番号の順。会議の長さは保存しないため、返さない。
+
+        Returns:
+            会議の記録。会議が無ければ None。
+        """
+
+        def work(connection: sqlite3.Connection) -> MeetingRecord | None:
+            meeting_row = connection.execute(
+                f"SELECT {_MEETING_COLUMNS} FROM meetings WHERE meeting_id = ?", (meeting_id,)
+            ).fetchone()
+            if meeting_row is None:
+                return None
+            subtitle_rows = connection.execute(
+                "SELECT meeting_id, sequence, original_text, translated_text, spoken_at"
+                " FROM subtitles WHERE meeting_id = ? ORDER BY sequence",
+                (meeting_id,),
+            ).fetchall()
+            summary_row = connection.execute(
+                "SELECT meeting_id, overview, key_points, decisions, action_items, created_at"
+                " FROM summaries WHERE meeting_id = ?",
+                (meeting_id,),
+            ).fetchone()
+            set_rows = connection.execute(
+                "SELECT set_number, created_at, created_phase FROM question_sets"
+                " WHERE meeting_id = ? ORDER BY set_number DESC",
+                (meeting_id,),
+            ).fetchall()
+            question_rows = connection.execute(
+                "SELECT set_number, sequence, question_en, question_ja FROM questions"
+                " WHERE meeting_id = ? ORDER BY set_number DESC, sequence",
+                (meeting_id,),
+            ).fetchall()
+            return _record_from_rows(
+                meeting_row, subtitle_rows, summary_row, set_rows, question_rows
+            )
+
+        return await self._database.run(work, write=False)
