@@ -3,6 +3,7 @@ import { useId } from 'react';
 import { type MeetingRecord } from '../../records/recordTypes';
 import { decideRecordView } from '../../records/recordView';
 import { useMeetingRecord } from '../../records/useMeetingRecord';
+import { useSummaryRequest } from '../../records/useSummaryRequest';
 import { SCREENS } from '../../routes';
 import { RecordHeader } from './RecordHeader';
 import { SubtitleRegion } from './SubtitleRegion';
@@ -23,7 +24,8 @@ import { QuestionRegion } from './QuestionRegion';
  * @param meetingId 表示する会議の番号
  */
 export function MeetingRecordView({ meetingId }: { readonly meetingId: string }) {
-  const { load } = useMeetingRecord(meetingId);
+  const { load, reload } = useMeetingRecord(meetingId);
+  const { requesting, request } = useSummaryRequest(meetingId, reload);
   const statusId = useId();
 
   return (
@@ -37,13 +39,23 @@ export function MeetingRecordView({ meetingId }: { readonly meetingId: string })
       {load.phase === 'failed' ? (
         <p className="record__loading">記録を読み込めませんでした。</p>
       ) : null}
-      {load.phase === 'ready' ? <RecordBody record={load.record} /> : null}
+      {load.phase === 'ready' ? (
+        <RecordBody record={load.record} requesting={requesting} onRequestSummary={() => void request()} />
+      ) : null}
     </section>
   );
 }
 
 /** 読み込めた会議の記録を、領域ごとに並べる。 */
-function RecordBody({ record }: { readonly record: MeetingRecord }) {
+function RecordBody({
+  record,
+  requesting,
+  onRequestSummary,
+}: {
+  readonly record: MeetingRecord;
+  readonly requesting: boolean;
+  readonly onRequestSummary: () => void;
+}) {
   const view = decideRecordView({
     status: record.meeting.status,
     subtitleCount: record.subtitles.length,
@@ -53,7 +65,7 @@ function RecordBody({ record }: { readonly record: MeetingRecord }) {
   return (
     <>
       <RecordHeader meeting={record.meeting} />
-      <SummaryRegion record={record} view={view} />
+      <SummaryRegion record={record} view={view} requesting={requesting} onRequest={onRequestSummary} />
       <QuestionRegion record={record} />
       <SubtitleRegion subtitles={record.subtitles} />
     </>

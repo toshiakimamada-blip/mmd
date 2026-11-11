@@ -121,3 +121,116 @@
 .record__region > p {
   margin: 0;
 }
+
+/* 要約の領域 */
+.record__actions {
+  margin: 0;
+}
+
+.record__button {
+  min-width: 9rem;
+  min-height: 2.75rem;
+  padding: 0 1.25rem;
+  border: 2px solid var(--color-band);
+  border-radius: 0.25rem;
+  background: var(--color-band);
+  color: var(--color-band-ink);
+  font: inherit;
+  font-weight: 700;
+  cursor: pointer;
+}
+
+.record__button:hover:not(:disabled) {
+  background: #0f2438;
+}
+
+/* 押せない間は、枠と文字を薄くして残す（操作の場所を見失わないため） */
+.record__button:disabled {
+  border-color: #8794a1;
+  background: #fff;
+  color: #5b6875;
+  cursor: not-allowed;
+}
+
+.summary {
+  display: flex;
+  flex-direction: column;
+  gap: 1rem;
+  /* 1 行を読める長さに収める */
+  max-width: 48rem;
+}
+
+.summary__created {
+  margin: 0;
+  color: var(--color-ink-muted);
+  font-size: 0.875rem;
+}
+
+.summary__item {
+  display: flex;
+  flex-direction: column;
+  gap: 0.25rem;
+}
+
+.summary__heading {
+  margin: 0;
+  font-size: 1rem;
+  font-weight: 700;
+}
+
+/* 全体の概要の文は、改行をそのまま見せる（保存した文字列の改行を、文字として残す） */
+.summary__overview {
+  margin: 0;
+  white-space: pre-line;
+  overflow-wrap: anywhere;
+}
+
+.summary__list {
+  margin: 0;
+  padding-left: 1.5rem;
+}
+
+.summary__list li {
+  overflow-wrap: anywhere;
+}
+
+/* 作成状況と進み具合 */
+.summary-progress {
+  display: flex;
+  flex-direction: column;
+  gap: 0.375rem;
+  max-width: 48rem;
+  padding: 0.75rem 1rem;
+  border-left: 4px solid var(--color-caption);
+  background: #fff;
+}
+
+.summary-progress p {
+  margin: 0;
+}
+
+.summary-progress__status strong {
+  font-weight: 700;
+}
+
+.summary-progress__bar {
+  width: 100%;
+  max-width: 24rem;
+  height: 0.75rem;
+}
+
+/* 作り直しの途中、または失敗のあとに残っている、前の要約 */
+.summary-previous {
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+  padding-top: 0.75rem;
+  border-top: 1px solid #c5ced6;
+}
+
+.summary-previous__label {
+  margin: 0;
+  color: var(--color-ink-muted);
+  font-size: 0.875rem;
+  font-weight: 700;
+}
