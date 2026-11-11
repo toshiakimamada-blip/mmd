@@ -47,6 +47,7 @@ output_system/
 │   ├── src/{api,meetings,subtitles}/ # api: apiClient.ts（ApiError・requestJson）と meetingsApi.ts。meetings: liveMeeting.ts（「会議中」が受け取る会議）・経過時間。subtitles: 字幕の型・mergeSubtitles・useMeetingSubtitles・formatClockTime
 │   ├── src/screens/prepare/ + src/meetings/ + src/models/ # 「会議の準備」: PrepareForm（入力・二度押しの防止）・PrepareGuidance・ModelStatusPanel。meetings/: meetingInput.ts（検査）・startMeeting.ts（開始の流れ）・MeetingCaptureProvider.tsx（取り込みの預け先）・guidanceTexts.ts（案内の文言を集めた 1 か所）。models/: modelStatus.ts・useModelStatus.ts。docs/prepare-screen.md
 │   ├── src/screens/live/ + src/components/subtitles/ # 「会議中」の中身と字幕の行・一覧・追いかける領域（SubtitleRow は「会議の記録」でも使い回す）。docs/live-screen.md
+│   ├── src/screens/record/ + src/records/ + src/components/questions/ # 「会議の記録」: MeetingRecordView（領域の組み立て）・RecordHeader・SummaryRegion/SummaryContent/SummaryProgress・QuestionRegion・SubtitleRegion。records/: recordTypes.ts（`GET /api/meetings/{会議番号}` の応答の検査と読み替え）・recordView.ts（状態別の表示と操作の表。純粋な関数）・useMeetingRecord.ts（読み込みと通知での更新）・useSummaryRequest.ts（要約の依頼）・summaryLines.ts・jobTexts.ts・formatDateTime.ts。QuestionSetList は「会議中」でも使い回す。docs/record-screen.md
 │   ├── scripts/              # ビルドした dist/ に外部の URL への参照が無いかの検査（npm run build の最後に走る）
 │   ├── src/errors/           # エラーの型と、エラーコードごとの文言の一覧（errorMessages.ts）
 │   ├── src/audio/            # ブラウザーの音声の取り込み。audioInput.ts（画面共有・マイク）、audioErrors.ts（理由の種類）、pcmConversion.ts（16kHz・モノラル・16 ビットへの変換）、pcmCaptureWorklet.ts（AudioWorklet の処理部）、audioPipeline.ts、audioSender.ts（順序つきの送信）、audioCaptureSession.ts（会議 1 回ぶん。停止の検知・やり直し）、browserEnvironment.ts（実ブラウザーの部品の作り方）。使い方・確かめた結果は docs/audio-capture.md
@@ -54,7 +55,7 @@ output_system/
 │   └── test/                 # src と同じ構造。test/browser/capture-check/ は実ブラウザーで音声の取り込みを確かめる確認用のページ（ビルドの対象外。出荷しない）。test/audio/fakes.ts は偽のトラック・ストリーム・WebSocket・AudioContext・処理部
 ├── tools/with-pinned-node.sh # Dockerfile と同じ版の Node.js で、渡されたコマンド（npm install など）を実行する
 ├── config/                   # tuning.toml（調整値の仮置き）、models.toml（3 つの AI モデルの定義）、translation_alternatives.md（翻訳モデルの代わりの候補）
-├── docs/                     # errors.md（エラーの扱い・コード一覧）、notices.md（画面の部品の使い方）、models.md（入手・変換）、interpreter.md（通訳ワーカー・測定値）、generation.md（生成ワーカー・測定値）、meetings.md（会議の開始と終了・通知・実機での確認）、events.md（通知の受信と再接続）、live-screen.md（「会議中」の画面と確認）、prepare-screen.md（「会議の準備」の画面と確認）、jobs.md（作成ジョブ管理部）
+├── docs/                     # errors.md（エラーの扱い・コード一覧）、notices.md（画面の部品の使い方）、models.md（入手・変換）、interpreter.md（通訳ワーカー・測定値）、generation.md（生成ワーカー・測定値）、meetings.md（会議の開始と終了・通知・実機での確認）、events.md（通知の受信と再接続）、record-screen.md（「会議の記録」の画面と確認）、live-screen.md（「会議中」の画面と確認）、prepare-screen.md（「会議の準備」の画面と確認）、jobs.md（作成ジョブ管理部）
 ```
 
 ## ビルド・起動方法
@@ -150,6 +151,8 @@ output_system/
 - 開始の流れは `meetings/startMeeting.ts`: 取り込み → 会議を作る → 音声の接続（応答の直後）。結果は `StartOutcome`（started・capture_failed・rejected・invalid_input）。取り込めない失敗は案内の領域（失敗した出どころの手順を強調）、開始を断られた失敗（`MEETING_ALREADY_RUNNING`・`MODEL_NOT_READY` など）はお知らせ帯、アプリサーバーの入力の再検査は項目の下に出す。音声の接続を始められなければ（準備の間に接続が閉じて、`state` が `closed` の取り込みが返ったときも）、作った会議をすぐ終了して取り込みを止める。どの失敗でも入力は残る
 - 準備状況（`useModelStatus`）は、取得・通知 `model.status_changed`・つなぎ直しの読み直しで更新する。取得の応答より新しい通知が先に届いたら、通知を優先する（古い応答で上書きしない）。案内の文言は `meetings/guidanceTexts.ts` の 1 か所
 - 字幕の領域は、最下部から 24px 以内かで追いかけているかを決める。字幕の取得は `cache: 'no-store'`（会議の内容を HTTP キャッシュに残さない）。失敗は `ApiError` にそろえ、画面は `toDisplayError` で文言を引く。経過時間は、秒の切り替わりで更新し（`setInterval` だと秒がとぶ）、タブが見えたときに直す
+- 「会議の記録」の取得は `GET /api/meetings/{会議番号}` の 1 回（会議・字幕・要約・質問のまとまり・作成ジョブ）。字幕の別取得は、再接続の抜けを埋める「会議中」の用。状態ごとの表示と操作は `records/recordView.ts` の純粋な関数 1 つ（表の全行を `test/records/recordView.test.ts` が検査）。質問を作るボタンと削除は、暫定版では画面に置かないが、関数は表のとおりに答える（ボタンを足すときに出し分けを作り直さない）。「質問を作る」ボタンを今作らないのは、PBI #108 のコメント（質問の作成を暫定版のあとに回した）による
+- 「会議の記録」の更新は、通知で記録を読み直す（`meeting.state_changed`・`job.status_changed`）。`job.progress_changed` は読み直さず、処理したブロックの数だけ差し替える（ブロックごとに届くため）。読み込みは最後に送った 1 件の結果だけを使い、画面を離れたあとの応答は捨てる。要約の依頼は、読み直しを終えてからボタンを押せる状態へ戻す（先に戻すと、押せる状態が一瞬見える）
 
 ## はまりポイント
 - `.gitignore` の `tools/`（gaido 管理）が `output_system/tools/` にも当たる。`!/output_system/tools/` で打ち消している
@@ -216,6 +219,7 @@ output_system/
 - `make_app`（`test/meeting_fakes.py`）の既定は、会議の終了で要約を始めない。要約まで確かめるテストは `on_meeting_ended=None` を渡す（`setdefault` なので、None を渡すと本番の組み立てになる）。本番の組み立てで、結果の受け取り先も本物にすると、終了のあと状態が非同期で `completed` になる
 - 実機の確認のスクリプトで、音声の WebSocket を `with` で先に閉じると、サーバーが接続切れとみなして会議を中断にする（終了の応答は `interrupted`）。終了の API を呼んでから閉じる。中断した会議の要約を確かめるときは、この動きを使える
 - `test_audio_and_subtitles.py` の 2 つ（`test_should_pass_audio_to_the_worker_in_order_with_the_arrival_time`、`TestNotificationHub::test_should_not_let_a_screen_that_does_not_read_block_the_others`）は、この環境で 5 回に 1 回ほど落ちる（前者は時刻の比較、後者は websockets の `recv` が別のスレッドと重なる）。変更の前の main でも同じ失敗が出た。再実行で通る
+- 要約の作成中（状態が要約作成中）にコンテナを再起動すると、作成ジョブ（メモリだけ）が消え、会議は要約作成中のまま残る（起動時の復旧 PBI 7.1 が暫定版で未実装）。実機の確認では、再起動しない。要約の作成は、この開発環境で約 2 分（字幕 3 件）。確認のスクリプトは、`POST /api/meetings` と `/ws/audio/…` に `Origin: http://<コンテナ名>:3001` を付ける（付けないと 403）。`playwright-cli` は root では `--config` で `channel: chrome`・`chromiumSandbox: false` を指定する
 
 ## 実装済み機能
 - PBI #2: コンテナの起動、共通の枠と 4 画面の骨組み、`GET /api/health`、配信部、名前付きボリューム 2 つ、自動再起動
@@ -232,3 +236,4 @@ output_system/
 - PBI #68: 「会議の準備」の画面（タイトルと音声の出どころの入力と検査、取り込み手順の案内と注意書き、AI モデルの準備状況・入手のやり直し、開始の流れ: 取り込み → 会議を作る → 音声の接続 → 「会議中」、取り込めない・開始できないときの案内とお知らせ、取りやめる）。「会議の一覧」に「新しい会議を始める」の入口。「会議中」の終了で取り込みを止める。出荷するコンテナを Chromium の疑似入力で確認した（`docs/prepare-screen.md`）。会議の一覧の表示（PBI 6.1）、取り込み停止の選択（PBI 4.3）、会議の中断の表示、ディスクの空きの警告は含まない
 - PBI #92: 作成ジョブ管理部（要約と質問の作成を、メモリの上で受け付け、生成ワーカーで 1 件ずつ実行）。質問が要約より先、同じ種類は受け付けた順。同じ会議・同じ種類の待機中か作成中は 1 件まで（2 回目は既存のジョブを返す）。作成中の要約は、質問が待てばブロックの区切りで順番を譲り、通訳中の会議があれば後回しにして、続きのブロックから再開する。会議の終了の直後は通訳ワーカーを止めてから要約を始め、実行できるジョブが無くなったら生成ワーカーを止める。生成ワーカーが止まったら作成中のジョブを失敗にする。受け付け・開始・譲る・後回し・再開・終了を、待った時間つきで処理ログへ出す。生成ワーカーの部品を、出荷するイメージへ入れた。結果の保存と会議の状態の変更（PBI 5.2・5.3）、作成の依頼の API、画面への表示、終了時のメモリ使用量の記録（PBI 4.1 の後）は含まない
 - PBI #99: 会議の終了から要約へのつなぎ。字幕が 1 件以上の会議は、終了で自動で要約のジョブが登録され、4 項目の日本語の要約が保存されて、状態が完了になる（字幕 0 件は完了のまま、中断は自動では作らない）。`POST /api/meetings/{会議番号}/summary` が、中断・要約失敗・完了の会議の要約を作る・作り直す（202。同じ会議の要約のジョブがあれば、それを返す。字幕 0 件は `SUMMARY_NO_CONTENT`）。失敗では、状態が要約失敗になり、失敗理由（エラーコード）が保存され、作り直しの失敗では前の要約が残る。`job.status_changed` に待機中の理由 `wait_reason`、ブロックごとの `job.progress_changed`。出荷するコンテナで本物のモデルを動かして確かめた（`docs/jobs.md`「要約の確認」）。画面（要約を作るボタン・進み具合の表示）、会議の取得 API、起動時の復旧（PBI 7.1）、質問の保存（PBI 5.3）は含まない
+- PBI #108: 「会議の記録」の画面（`GET /api/meetings/{会議番号}`、S-04）。タイトル・開始日時・会議の長さ・状態、要約の 4 項目（1 行ずつ箇条書き・文字として表示・「該当なし」）、作成状況と進み具合（待機中の添え書き）、失敗の表示（前の要約も併せて）、「要約を作る」「要約を作り直す」、質問のまとまり（新しい順・英日・作成した時点。無いときは「質問はまだありません。」）、字幕、通知での更新、記録が無いときは一覧へ移ってお知らせ帯。出荷するコンテナで確かめた（docs/record-screen.md）。質問を作るボタン・削除・書き出し・コピーは含まない
