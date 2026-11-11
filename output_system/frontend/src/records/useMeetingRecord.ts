@@ -5,8 +5,9 @@ import { ApiError } from '../api/apiClient';
 import { fetchMeetingRecord } from '../api/meetingsApi';
 import { useNoticeActions } from '../components/notices';
 import { toDisplayError } from '../errors/errorMessages';
+import { useEvent, useReloadOnConnect } from '../events/EventsProvider';
 import { screenPaths } from '../routes';
-import { type MeetingRecord } from './recordTypes';
+import { type MeetingRecord, type RecordJob } from './recordTypes';
 
 /** 会議の記録を読み込めなかったときのお知らせの識別子。次に読み込めると消える。 */
 const LOAD_FAILED_NOTICE_ID = 'record-load-failed';
@@ -37,6 +38,11 @@ export interface UseMeetingRecord {
  * - 会議が無いときは、「会議の一覧」へ移り、お知らせ帯に記録が見つからないことを出す。履歴は置き換える
  *   （戻るボタンで、見つからない記録へ戻らない）
  * - 読み込みに失敗したら、お知らせ帯にエラーを出す。次に読み込めると消す
+ * - 通知で、開いたまま更新する（表示中の会議の通知だけを使い、ほかの会議の通知は読み捨てる）
+ *   - 会議の状態・作成ジョブの状況の通知: 記録を読み直す（要約・質問の結果と、状態の表示が変わるため）
+ *   - 進み具合の通知: 作成ジョブの処理したブロックの数だけを差し替える。ブロックごとに届くため、読み直さない。
+ *     記録が知らない作成ジョブの通知なら、読み直す
+ *   - 通知の接続がつながったとき（つなぎ直しを含む）: 記録を読み直す（切れていた間の通知の分を埋める）
  * - 読み込みを重ねたときは、最後に送った読み込みの結果だけを使う（古い応答で、新しい内容を上書きしない）
  * - 画面から離れたあとに届いた応答では、何もしない
  *
@@ -97,5 +103,51 @@ export function useMeetingRecord(meetingId: string): UseMeetingRecord {
     void reload();
   }, [reload]);
 
+  // 進み具合の通知が、いまの記録の作成ジョブに当たるかを、通知を受けた時点の記録で調べるために持つ。
+  const recordRef = useRef<MeetingRecord | null>(null);
+  useEffect(() => {
+    recordRef.current = loadState.phase === 'ready' ? loadState.record : null;
+  });
+
+  useEvent('meeting.state_changed', (event) => {
+    if (event.meetingId === meetingId) {
+      void reload();
+    }
+  });
+  useEvent('job.status_changed', (event) => {
+    if (event.meetingId === meetingId) {
+      void reload();
+    }
+  });
+  useEvent('job.progress_changed', (event) => {
+    if (event.meetingId !== meetingId) {
+      return;
+    }
+    const known = recordRef.current?.jobs.some((job) => job.jobType === event.job.jobType) ?? false;
+    if (!known) {
+      void reload();
+      return;
+    }
+    setLoadState((current) =>
+      current.phase === 'ready'
+        ? { phase: 'ready', record: withJobProgress(current.record, event.job) }
+        : current,
+    );
+  });
+  useReloadOnConnect(reload);
+
   return { load: loadState, reload };
+}
+
+/**
+ * 作成ジョブの進み具合を、記録の同じ種類の作成ジョブへ差し替える。
+ *
+ * @param record いまの記録
+ * @param updated 通知が届けた作成ジョブ
+ */
+function withJobProgress(record: MeetingRecord, updated: RecordJob): MeetingRecord {
+  return {
+    ...record,
+    jobs: record.jobs.map((job) => (job.jobType === updated.jobType ? updated : job)),
+  };
 }
