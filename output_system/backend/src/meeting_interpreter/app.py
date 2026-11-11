@@ -29,6 +29,7 @@ from .errors import (
 from .frontend import INDEX_FILE, FrontendFiles
 from .jobs.manager import JobManager, JobPolicy
 from .jobs.outcomes import JobOutcomeHandler
+from .jobs.summary_requests import SummaryRequests
 from .jobs.workers import GenerationLauncher, ProductionGenerationLauncher
 from .logs import STARTUP_LOGGER, log_error
 from .logs.asgi import TraceIdMiddleware
@@ -232,8 +233,17 @@ def create_app(
         policy=job_policy or JobPolicy.from_tuning(settings.tuning),
         outcomes=job_outcomes,
     )
+    record_store = RecordStore(app.state.record_database)
+    # 要約の作成の依頼。利用者の操作（POST /api/meetings/{会議番号}/summary）と、会議の終了の
+    # 直後の自動の作成が使う。
+    app.state.summary_requests = SummaryRequests(
+        store=record_store,
+        jobs=app.state.job_manager,
+        publisher=notification_hub,
+        max_chars=settings.tuning.generation_input_max_chars,
+    )
     app.state.meeting_manager = MeetingManager(
-        store=RecordStore(app.state.record_database),
+        store=record_store,
         publisher=notification_hub,
         launcher=interpreter_launcher or ProductionLauncher(settings),
         models_ready=lambda: app.state.model_manager.snapshot.status is ModelStatus.READY,

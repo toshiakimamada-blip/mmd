@@ -203,6 +203,10 @@ class JobManager:
         """会議に、待機中または作成中の作成ジョブがあるか。種類は問わない。"""
         return self._registry.has_active_job(meeting_id)
 
+    def find_active_job(self, meeting_id: str, kind: JobKind) -> JobSnapshot | None:
+        """会議の、その種類の、待機中か作成中のジョブ。無ければ None。重複の依頼の判定に使う。"""
+        return self._registry.find_active(meeting_id, kind)
+
     def active_jobs(self, meeting_id: str | None = None) -> list[JobSnapshot]:
         """待機中と作成中の作成ジョブ。受け付けた順。会議番号を渡すと、その会議のものだけ。"""
         return self._registry.active_jobs(meeting_id)

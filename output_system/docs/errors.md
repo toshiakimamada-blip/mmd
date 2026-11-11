@@ -176,6 +176,17 @@ FastAPI が自動で返す応答も、共通の形に変えています。
 - 音声の WebSocket の接続を断る 3 つ（`MEETING_NOT_FOUND`・`MEETING_NOT_RUNNING`・`MEETING_AUDIO_ALREADY_CONNECTED`）は、接続を受け付ける前に起こすため、画面には HTTP の 403 として見えます。エラーコードは、サーバーのエラーログにだけ出ます。
 - エラーの通知（`error.occurred`）は、`/ws/events` で届きます。項目は `meeting_id`・`category`・`code`・`message`・`action` です。画面は、`code` から画面側の文言を引きます。
 
+### 要約の作成の依頼（SUMMARY_NO_CONTENT）
+
+`POST /api/meetings/{会議番号}/summary`（要約を作る・作り直す）が返すエラーです。
+
+| コード | 分類 | 何が起きたか |
+|---|---|---|
+| `SUMMARY_NO_CONTENT` | 業務エラー（409） | 字幕が 0 件の会議の要約を依頼した。要約は作らず、状態も変えない。画面は「内容がありません」と表示する |
+
+- 会議が無いときは `MEETING_NOT_FOUND`（404）、状態が遷移規則の表に無いとき（通訳中の会議など）は `MEETING_INVALID_TRANSITION`（409）です。
+- 同じ会議の要約が待機中か作成中のときは、エラーにせず、そのジョブを返します（重複を防ぐ規約）。
+
 ### 要約と質問の作成（SUMMARY_*・QUESTION_*）
 
 作成ジョブ管理部（`backend/src/meeting_interpreter/jobs/`）が、要約と質問の作成に失敗したときに返すエラーです。HTTP の応答ではなく、`error.occurred` の通知で届きます。分類はすべてシステムエラーです。文言に、会議の内容は入れません。コードは `jobs/errors.py` の `error_code` が作ります（領域は、要約が `SUMMARY`、質問が `QUESTION`）。

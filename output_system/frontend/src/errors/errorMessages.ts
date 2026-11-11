@@ -153,6 +153,10 @@ export const ERROR_WORDINGS: Readonly<Record<string, ErrorWording>> = Object.fre
     message: '要約を作れましたが、保存できませんでした。',
     action: `会議の記録で、要約を作るボタンを押してください。${REPORT_IF_NOT_FIXED}`,
   },
+  SUMMARY_NO_CONTENT: {
+    message: '内容がありません。字幕が 1 件も無いため、要約を作れません。',
+    action: '字幕がある会議で、要約を作ってください。',
+  },
   QUESTION_GENERATION_FAILED: {
     message: '質問を作れませんでした。',
     action: `もう一度、質問を作るボタンを押してください。${REPORT_IF_NOT_FIXED}`,
