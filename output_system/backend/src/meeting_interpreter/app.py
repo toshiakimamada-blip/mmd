@@ -28,7 +28,9 @@ from .errors import (
 )
 from .frontend import INDEX_FILE, FrontendFiles
 from .jobs.manager import JobManager, JobPolicy
-from .jobs.outcomes import JobOutcomeHandler
+from .jobs.outcomes import JobOutcomeHandler, JobOutcomes
+from .jobs.question_outcomes import QuestionOutcomes
+from .jobs.question_requests import QuestionRequests
 from .jobs.summary_outcomes import SummaryOutcomes
 from .jobs.summary_requests import SummaryRequests
 from .jobs.workers import GenerationLauncher, ProductionGenerationLauncher
@@ -204,8 +206,8 @@ def create_app(
             テストが、偽のエンジンで動かす入口を渡すために使う。
         job_policy: 作成ジョブ管理部の、時間の決め。省略すると、調整値から作る。
         job_outcomes: 作成の結果（要約・質問・失敗）の受け取り先。省略すると、要約を保存して会議の
-            状態を変える受け取り先（質問の結果は、いまは捨てる）。テストが、結果を記録するだけの
-            受け取り先を渡すために使う。
+            状態を変える受け取り先と、質問を保存する受け取り先をまとめたもの。テストが、結果を
+            記録するだけの受け取り先を渡すために使う。
 
     Returns:
         経路をすべて登録した FastAPI のアプリ。
@@ -231,12 +233,15 @@ def create_app(
     record_store = RecordStore(app.state.record_database)
     # 要約の結果の保存。要約の完成と失敗で、要約と会議の状態を保存する（2 回目の確定）。
     summary_outcomes = SummaryOutcomes(record_store, notification_hub)
+    # 質問の結果の保存。質問のまとまり 1 件と質問 5 件を、1 回の確定で保存する。
+    # 会議の状態は変えない。
+    question_outcomes = QuestionOutcomes(record_store)
     # 作成ジョブ管理部。要約と質問の作成を、決めた順に 1 件ずつ実行する。起動は _lifespan で行う。
     app.state.job_manager = JobManager(
         launcher=generation_launcher or ProductionGenerationLauncher(settings),
         publisher=notification_hub,
         policy=job_policy or JobPolicy.from_tuning(settings.tuning),
-        outcomes=job_outcomes or summary_outcomes,
+        outcomes=job_outcomes or JobOutcomes(summary_outcomes, question_outcomes),
     )
     # 要約の作成の依頼。利用者の操作（POST /api/meetings/{会議番号}/summary）と、会議の終了の
     # 直後の自動の作成が使う。
@@ -245,6 +250,12 @@ def create_app(
         jobs=app.state.job_manager,
         publisher=notification_hub,
         outcomes=summary_outcomes,
+        max_chars=settings.tuning.generation_input_max_chars,
+    )
+    # 質問の作成の依頼。利用者の操作（POST /api/meetings/{会議番号}/question-sets）が使う。
+    app.state.question_requests = QuestionRequests(
+        store=record_store,
+        jobs=app.state.job_manager,
         max_chars=settings.tuning.generation_input_max_chars,
     )
     app.state.meeting_manager = MeetingManager(

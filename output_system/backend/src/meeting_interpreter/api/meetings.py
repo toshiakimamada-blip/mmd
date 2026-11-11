@@ -9,6 +9,9 @@
     会議の記録の画面が、開いた時点と、通知を受けた時点で読む。通訳中の会議も取得できる
 - GET /api/meetings/{会議番号}/subtitles
     会議の字幕を、順番の昇順で返す（200）。画面が、再接続のあとに読み直す
+- POST /api/meetings/{会議番号}/question-sets
+    質問を作る依頼を受け付ける（202）。会議の状態は問わない。字幕が 1 件以上あること。
+    同じ会議の質問が待機中か作成中なら、新しく作らず、そのジョブを返す
 - POST /api/meetings/{会議番号}/summary
     要約を作る・作り直す依頼を受け付ける（202）。同じ会議の要約が待機中か作成中なら、
     新しく作らず、そのジョブを返す
@@ -25,6 +28,7 @@ from pydantic import BaseModel, ConfigDict
 
 from ..jobs.manager import JobManager
 from ..jobs.models import JobSnapshot
+from ..jobs.question_requests import QuestionRequests
 from ..jobs.summary_requests import SummaryRequests
 from ..logs.events import format_timestamp
 from ..meetings.errors import meeting_not_found
@@ -211,6 +215,36 @@ async def request_summary(meeting_id: MeetingId, request: Request) -> SummaryReq
     return SummaryRequestResponse(
         meeting=to_response(result.meeting), job=to_job_response(result.job)
     )
+
+
+class QuestionRequestResponse(BaseModel):
+    """質問の依頼の結果。受け付けた質問の作成ジョブ。会議の状態は変わらないため、会議は含めない。"""
+
+    job: JobResponse
+
+
+def _question_requests(request: Request) -> QuestionRequests:
+    """アプリが持つ、質問の依頼の受け付けを返す。"""
+    return request.app.state.question_requests  # type: ignore[no-any-return]
+
+
+@router.post(
+    "/meetings/{meeting_id}/question-sets", response_model=QuestionRequestResponse, status_code=202
+)
+async def request_question_set(meeting_id: MeetingId, request: Request) -> QuestionRequestResponse:
+    """質問を作る依頼を受け付ける。結果は待たずに、受け付けたジョブを返す。
+
+    会議の状態は問わない（通訳中でも、会議のあとでも受け付ける）。字幕が 1 件以上あること。
+    同じ会議の質問が待機中か作成中なら、新しく作らず、そのジョブを返す。会議の状態は変えない。
+    進み具合と完了は、/ws/events の通知で届く。質問のまとまりは、完了の通知のあとで、
+    会議の記録（GET /api/meetings/{会議番号}）から読み直す。
+
+    Raises:
+        BusinessAppError: 会議が無い（MEETING_NOT_FOUND、404）。字幕が 0 件
+            （QUESTION_NO_CONTENT、409）。
+    """
+    result = await _question_requests(request).request(meeting_id)
+    return QuestionRequestResponse(job=to_job_response(result.job))
 
 
 class RecordMeetingResponse(MeetingResponse):

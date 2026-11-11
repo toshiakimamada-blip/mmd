@@ -157,6 +157,10 @@ export const ERROR_WORDINGS: Readonly<Record<string, ErrorWording>> = Object.fre
     message: '内容がありません。字幕が 1 件も無いため、要約を作れません。',
     action: '字幕がある会議で、要約を作ってください。',
   },
+  QUESTION_NO_CONTENT: {
+    message: '字幕が 1 件も無いため、質問を作れません。',
+    action: '字幕が 1 件以上できてから、質問を作ってください。',
+  },
   QUESTION_GENERATION_FAILED: {
     message: '質問を作れませんでした。',
     action: `もう一度、質問を作るボタンを押してください。${REPORT_IF_NOT_FIXED}`,

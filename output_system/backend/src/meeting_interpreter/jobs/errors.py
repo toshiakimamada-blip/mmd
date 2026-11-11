@@ -10,6 +10,7 @@ frontend/src/errors/errorMessages.ts に、同じコードで足してある。
 - *_WORKER_START_FAILED: 生成ワーカーを起動できなかった（AI モデルを読み込めない、など）
 - *_SAVE_FAILED: 作成できたが、結果を保存できなかった
 - SUMMARY_NO_CONTENT: 字幕が 0 件の会議の要約を依頼した（業務エラー。要約を作らない）
+- QUESTION_NO_CONTENT: 字幕が 0 件の会議の質問を依頼した（業務エラー。質問を作らない）
 """
 
 from typing import Final
@@ -83,6 +84,17 @@ def summary_no_content(meeting_id: str) -> BusinessAppError:
         "SUMMARY_NO_CONTENT",
         "内容がありません。字幕が 1 件も無いため、要約を作れません。",
         "字幕がある会議で、要約を作ってください。",
+        component=COMPONENT,
+        meeting_id=meeting_id,
+    )
+
+
+def question_no_content(meeting_id: str) -> BusinessAppError:
+    """字幕が 0 件の会議の質問を依頼した。質問は作らず、会議の状態も変えない。"""
+    return BusinessAppError(
+        "QUESTION_NO_CONTENT",
+        "字幕が 1 件も無いため、質問を作れません。",
+        "字幕が 1 件以上できてから、質問を作ってください。",
         component=COMPONENT,
         meeting_id=meeting_id,
     )
