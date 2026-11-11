@@ -7,6 +7,7 @@ import './styles/frame.css';
 import './styles/live.css';
 import './styles/notices.css';
 import './styles/prepare.css';
+import './styles/record.css';
 
 const root = document.getElementById('root');
 if (root === null) {

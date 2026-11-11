@@ -1,0 +1,123 @@
+/*
+ * 「会議の記録」の画面（S-04）の見た目。
+ *
+ * 見た目の方針
+ * - 会議のあとに、要約・質問・字幕を読み返す画面。見出しの領域は「会議中」の状況の領域と同じ紺の線で
+ *   区切り、領域ごとの見出しで、読む場所を見失わないようにする。
+ * - 色は frame.css の変数を使う。文字と背景の明るさの差は AA（通常の文字で 4.5 対 1 以上）を満たす。
+ * - 文字の大きさと余白は rem で決め、ブラウザーの拡大に追従させる。アニメーションは使わない。
+ */
+
+.record {
+  display: flex;
+  flex-direction: column;
+  gap: 1.5rem;
+}
+
+.record__loading {
+  margin: 0;
+  color: var(--color-ink-muted);
+}
+
+/* 見出しの領域: タイトル・開始日時・会議の長さ・状態・一覧へ戻る */
+.record__header {
+  display: flex;
+  flex-direction: column;
+  gap: 0.625rem;
+  padding-bottom: 1rem;
+  border-bottom: 2px solid var(--color-band);
+}
+
+.record__headline {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 0.75rem 1.5rem;
+}
+
+.record__title {
+  flex: 1 1 20rem;
+  min-width: 0;
+  margin: 0;
+  font-size: 1.5rem;
+  font-weight: 700;
+  line-height: 1.4;
+  /* 100 文字のタイトルや、区切りの無い長い文字列でも、領域からはみ出させない */
+  overflow-wrap: anywhere;
+}
+
+/* ボタンの見た目のリンク。画面の移動は、リンクの意味のほうが合う */
+.record__back {
+  display: inline-flex;
+  align-items: center;
+  min-width: 9rem;
+  min-height: 2.75rem;
+  justify-content: center;
+  padding: 0 1.25rem;
+  border: 2px solid var(--color-band);
+  border-radius: 0.25rem;
+  background: #fff;
+  color: var(--color-band);
+  font-weight: 700;
+  text-decoration: none;
+}
+
+.record__back:hover {
+  background: rgb(23 50 77 / 0.1);
+}
+
+.record__facts-list {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.25rem 2rem;
+  margin: 0;
+}
+
+.record__fact {
+  display: flex;
+  align-items: baseline;
+  gap: 0.5rem;
+}
+
+.record__fact dt {
+  color: var(--color-ink-muted);
+  font-size: 0.875rem;
+  font-weight: 700;
+}
+
+.record__fact dd {
+  margin: 0;
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+}
+
+/* 画面には出さず、読み上げソフトだけが読む見出し */
+.visually-hidden {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  margin: -1px;
+  padding: 0;
+  overflow: hidden;
+  clip-path: inset(50%);
+  white-space: nowrap;
+}
+
+/* 領域（要約・質問・字幕） */
+.record__region {
+  display: flex;
+  flex-direction: column;
+  gap: 0.75rem;
+}
+
+.record__region-title {
+  margin: 0;
+  font-size: 1.125rem;
+  font-weight: 700;
+  line-height: 1.5;
+}
+
+.record__region > p {
+  margin: 0;
+}
