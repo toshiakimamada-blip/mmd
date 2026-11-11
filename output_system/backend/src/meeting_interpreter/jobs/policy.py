@@ -14,6 +14,7 @@
 - 作成中の要約は、通訳中の会議があれば、ブロックの区切りで止めて後回しにする: yield_reason
 - 実行できる作成ジョブが無くなったら、生成ワーカーを止める。
   後回しの要約だけなら止めたまま: needs_worker
+- 待機中の作成ジョブが、ほかの作成を待つのか、進行中の会議を待つのか: wait_reason
 
 どの関数も純粋: 現在の状態（Situation）だけを入力にして、答えを返す。入力を変えず、時計も
 ファイルも見ない。
@@ -31,6 +32,15 @@ class YieldReason(StrEnum):
     # 質問が待っている。質問のあとに、続きのブロックから再開する（順番を譲る）。
     QUESTION_WAITING = "question_waiting"
     # 通訳中の会議がある。会議の終了または中断のあとに、続きから再開する（後回し）。
+    MEETING_IN_PROGRESS = "meeting_in_progress"
+
+
+class WaitReason(StrEnum):
+    """待機中の作成ジョブが待っている理由。値は、通知に載せる英小文字の語。"""
+
+    # ほかの作成ジョブが作成中、またはほかの作成ジョブが先に実行される。
+    OTHER_JOB = "other_job"
+    # 通訳中の会議がある。会議の終了または中断のあとに作る。
     MEETING_IN_PROGRESS = "meeting_in_progress"
 
 
@@ -117,3 +127,20 @@ def needs_worker(situation: Situation) -> bool:
     if any(job.running for job in situation.jobs):
         return True
     return any(not is_blocked_by_meeting(job, situation) for job in situation.jobs)
+
+
+def wait_reason(job: JobView, situation: Situation) -> WaitReason | None:
+    """待機中の作成ジョブが待っている理由を返す。待っていなければ None。
+
+    作成中のジョブと、次に実行されるジョブ（生成ワーカーの起動を待つだけ）は、待っていない。
+    通訳中の会議に止められている要約は、ほかの作成ジョブが先でも「進行中の会議」を返す
+    （会議が終わらない限り、ほかの作成ジョブが終わっても始まらないため）。
+    """
+    if job.running:
+        return None
+    if is_blocked_by_meeting(job, situation):
+        return WaitReason.MEETING_IN_PROGRESS
+    chosen = pick_next(situation)
+    if chosen is not None and chosen.job_id == job.job_id:
+        return None
+    return WaitReason.OTHER_JOB

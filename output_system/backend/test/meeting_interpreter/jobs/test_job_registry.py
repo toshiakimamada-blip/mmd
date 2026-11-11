@@ -378,3 +378,53 @@ class TestThreadSafety:
 
         numbers = sorted(registry.record(job.job_id).sequence for job in registry.active_jobs())
         assert numbers == list(range(1, 33))
+
+
+class TestWaitReason:
+    """待機中の理由。変わったときだけ、状況の変化として通知する。"""
+
+    def test_should_notify_a_status_change_only_when_the_wait_reason_changes(self):
+        """
+        【テスト対象】JobRegistry.set_wait_reason
+        【テスト内容】待機中のジョブに、同じ理由を 2 回、別の理由を 1 回、理由なしを 1 回設定する
+        【期待結果】登録の通知のあと、理由が変わるたびに 1 回ずつ状況の通知が出て（同じ理由の
+                    2 回目は出ない）、スナップショットが理由を持つこと
+        """
+        registry, changes, _ = make_registry()
+        job_id = registry.register("m1", JobKind.SUMMARY, SUMMARY).job.job_id
+
+        registry.set_wait_reason(job_id, "other_job")
+        registry.set_wait_reason(job_id, "other_job")
+        registry.set_wait_reason(job_id, "meeting_in_progress")
+        registry.set_wait_reason(job_id, None)
+
+        assert [(change, snap.wait_reason) for change, snap in changes] == [
+            (JobChange.STATUS_CHANGED, None),
+            (JobChange.STATUS_CHANGED, "other_job"),
+            (JobChange.STATUS_CHANGED, "meeting_in_progress"),
+            (JobChange.STATUS_CHANGED, None),
+        ]
+
+    def test_should_clear_the_wait_reason_when_the_job_starts_or_finishes(self):
+        """
+        【テスト対象】JobRegistry（理由の持ち方）
+        【テスト内容】理由を持つ待機中のジョブを作成中にする。別のジョブは、理由を持ったまま
+                    完了にする
+        【期待結果】作成中と完了のスナップショットは、理由を持たないこと。作成中のジョブに理由を
+                    設定しても、無視すること（待っていないため）
+        """
+        registry, changes, _ = make_registry()
+        first = registry.register("m1", JobKind.SUMMARY, SUMMARY).job.job_id
+        second = registry.register("m2", JobKind.SUMMARY, SUMMARY).job.job_id
+        registry.set_wait_reason(first, "other_job")
+        registry.set_wait_reason(second, "other_job")
+
+        running = registry.mark_running(first)
+        registry.set_wait_reason(first, "other_job")
+        finished = registry.finish(second, JobStatus.FAILED, "SUMMARY_WORKER_STOPPED")
+
+        assert running is not None and running.wait_reason is None
+        assert finished is not None and finished.wait_reason is None
+        assert registry.find_active("m1", JobKind.SUMMARY).wait_reason is None  # type: ignore[union-attr]
+        # 理由の設定を無視したため、登録 2 件・理由 2 件・開始 1 件・完了 1 件の通知だけ。
+        assert len(changes) == 6

@@ -29,6 +29,8 @@ from .errors import (
 from .frontend import INDEX_FILE, FrontendFiles
 from .jobs.manager import JobManager, JobPolicy
 from .jobs.outcomes import JobOutcomeHandler
+from .jobs.summary_outcomes import SummaryOutcomes
+from .jobs.summary_requests import SummaryRequests
 from .jobs.workers import GenerationLauncher, ProductionGenerationLauncher
 from .logs import STARTUP_LOGGER, log_error
 from .logs.asgi import TraceIdMiddleware
@@ -196,13 +198,14 @@ def create_app(
             テストが、偽のエンジンで動かす入口を渡すために使う。
         meeting_policy: 会議のセッションの、時間と回数の決め。省略すると、既定の決め。
             テストが、短い時間を渡すために使う。
-        on_meeting_ended: 会議を終了して要約作成中になったあとに呼ぶ。作成ジョブ管理部への口。
-            省略すると、何もしない。
+        on_meeting_ended: 会議を終了して要約作成中になったあとに呼ぶ。省略すると、作成ジョブ管理部へ
+            つなぎ、字幕から要約の作成ジョブを登録する。テストが、別の動きを渡すために使う。
         generation_launcher: 生成ワーカーの起動の入口。省略すると、本物の AI モデルで動かす。
             テストが、偽のエンジンで動かす入口を渡すために使う。
         job_policy: 作成ジョブ管理部の、時間の決め。省略すると、調整値から作る。
-        job_outcomes: 作成の結果（要約・質問・失敗）の受け取り先。省略すると、結果を捨てる
-            （保存を行う部をつなぐまでの既定）。
+        job_outcomes: 作成の結果（要約・質問・失敗）の受け取り先。省略すると、要約を保存して会議の
+            状態を変える受け取り先（質問の結果は、いまは捨てる）。テストが、結果を記録するだけの
+            受け取り先を渡すために使う。
 
     Returns:
         経路をすべて登録した FastAPI のアプリ。
@@ -225,20 +228,33 @@ def create_app(
     )
     # 記録データベースは、起動のとき（_lifespan）に開く。組み立てるだけでは、ディスクに触れない。
     app.state.record_database = RecordDatabase(settings.records_dir)
+    record_store = RecordStore(app.state.record_database)
+    # 要約の結果の保存。要約の完成と失敗で、要約と会議の状態を保存する（2 回目の確定）。
+    summary_outcomes = SummaryOutcomes(record_store, notification_hub)
     # 作成ジョブ管理部。要約と質問の作成を、決めた順に 1 件ずつ実行する。起動は _lifespan で行う。
     app.state.job_manager = JobManager(
         launcher=generation_launcher or ProductionGenerationLauncher(settings),
         publisher=notification_hub,
         policy=job_policy or JobPolicy.from_tuning(settings.tuning),
-        outcomes=job_outcomes,
+        outcomes=job_outcomes or summary_outcomes,
+    )
+    # 要約の作成の依頼。利用者の操作（POST /api/meetings/{会議番号}/summary）と、会議の終了の
+    # 直後の自動の作成が使う。
+    app.state.summary_requests = SummaryRequests(
+        store=record_store,
+        jobs=app.state.job_manager,
+        publisher=notification_hub,
+        outcomes=summary_outcomes,
+        max_chars=settings.tuning.generation_input_max_chars,
     )
     app.state.meeting_manager = MeetingManager(
-        store=RecordStore(app.state.record_database),
+        store=record_store,
         publisher=notification_hub,
         launcher=interpreter_launcher or ProductionLauncher(settings),
         models_ready=lambda: app.state.model_manager.snapshot.status is ModelStatus.READY,
         policy=meeting_policy or SessionPolicy.from_tuning(settings.tuning),
-        on_meeting_ended=on_meeting_ended,
+        # 会議の終了で、字幕が 1 件以上あれば、利用者の操作なしで要約を始める。
+        on_meeting_ended=on_meeting_ended or app.state.summary_requests.start_after_meeting_end,
         # 会議の開始で、ほかの会議の要約を区切りで後回しにし、通訳ワーカーを止めたら、再開する。
         on_meeting_started=app.state.job_manager.meeting_started,
         on_interpreter_stopped=app.state.job_manager.interpreter_stopped,

@@ -6,6 +6,9 @@
     会議を終了する（200）。届いている音声を字幕にしてから閉じる
 - GET /api/meetings/{会議番号}/subtitles
     会議の字幕を、順番の昇順で返す（200）。画面が、再接続のあとに読み直す
+- POST /api/meetings/{会議番号}/summary
+    要約を作る・作り直す依頼を受け付ける（202）。同じ会議の要約が待機中か作成中なら、
+    新しく作らず、そのジョブを返す
 
 どの経路も、会議の内容（タイトルを含む）を URL に載せない。タイトルは本文で受け取る。
 音声は /ws/audio/{会議番号}、字幕などの通知は /ws/events（api/ws.py）。
@@ -16,6 +19,8 @@ from typing import Annotated, Literal
 from fastapi import APIRouter, Path, Request
 from pydantic import BaseModel, ConfigDict
 
+from ..jobs.models import JobSnapshot
+from ..jobs.summary_requests import SummaryRequests
 from ..logs.events import format_timestamp
 from ..meetings.manager import MeetingManager
 from ..records.models import Meeting, Subtitle
@@ -135,3 +140,62 @@ async def list_subtitles(meeting_id: MeetingId, request: Request) -> SubtitleLis
     """
     subtitles = await _manager(request).list_subtitles(meeting_id)
     return SubtitleListResponse(subtitles=[to_subtitle_response(item) for item in subtitles])
+
+
+class JobResponse(BaseModel):
+    """作成ジョブ 1 件の状況。項目は、通知 job.status_changed と同じ。会議番号は経路が持つ。"""
+
+    job_id: str
+    job_type: Literal["summary", "questions"]
+    status: Literal["queued", "running", "succeeded", "failed"]
+    # 要約で、処理したブロックの数と、全体のブロックの数。質問は null。
+    done_blocks: int | None
+    total_blocks: int | None
+    # 待機中の理由。ほかの作成を待つ（other_job）か、進行中の会議を待つ（meeting_in_progress）か。
+    # 順番を待っていない間は null。
+    wait_reason: Literal["other_job", "meeting_in_progress"] | None
+
+
+def to_job_response(job: JobSnapshot) -> JobResponse:
+    """作成ジョブを、画面へ返す形にする。会議の内容は含まない。"""
+    return JobResponse(
+        job_id=job.job_id,
+        job_type=job.kind.value,
+        status=job.status.value,
+        done_blocks=job.done_blocks,
+        total_blocks=job.total_blocks,
+        wait_reason=job.wait_reason,  # type: ignore[arg-type]
+    )
+
+
+class SummaryRequestResponse(BaseModel):
+    """要約の依頼の結果。依頼を受け付けたあとの会議と、要約の作成ジョブ。"""
+
+    meeting: MeetingResponse
+    job: JobResponse
+
+
+def _summary_requests(request: Request) -> SummaryRequests:
+    """アプリが持つ、要約の依頼の受け付けを返す。"""
+    return request.app.state.summary_requests  # type: ignore[no-any-return]
+
+
+@router.post(
+    "/meetings/{meeting_id}/summary", response_model=SummaryRequestResponse, status_code=202
+)
+async def request_summary(meeting_id: MeetingId, request: Request) -> SummaryRequestResponse:
+    """要約を作る・作り直す依頼を受け付ける。結果は待たずに、受け付けたジョブを返す。
+
+    受け付けるのは、中断・要約失敗・完了の会議で、字幕が 1 件以上あるとき。会議の状態を
+    「要約作成中」にしてから、作成ジョブを登録する。同じ会議の要約が待機中か作成中なら、
+    新しく作らず、そのジョブを返す。進み具合と完了は、/ws/events の通知で届く。
+
+    Raises:
+        BusinessAppError: 会議が無い（MEETING_NOT_FOUND、404）。状態が遷移規則に無い
+            （MEETING_INVALID_TRANSITION、409）。字幕が 0 件（SUMMARY_NO_CONTENT、409）。
+        RecordError: 状態を保存できなかったとき（500）。
+    """
+    result = await _summary_requests(request).request(meeting_id)
+    return SummaryRequestResponse(
+        meeting=to_response(result.meeting), job=to_job_response(result.job)
+    )

@@ -32,10 +32,16 @@ def build(launcher: InProcessLauncher):
 
 
 def statuses(publisher: RecordingPublisher, meeting_id: str, job_type: str) -> list[str]:
-    return [
+    """状況の通知を、届いた順に並べる。待機中の理由だけが変わった通知は、1 つにまとめる。"""
+    sequence = [
         str(body["status"])
         for body in publisher.named(JOB_STATUS_CHANGED)
         if body["meeting_id"] == meeting_id and body["job_type"] == job_type
+    ]
+    return [
+        status
+        for index, status in enumerate(sequence)
+        if index == 0 or status != sequence[index - 1]
     ]
 
 

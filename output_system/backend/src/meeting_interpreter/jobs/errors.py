@@ -9,11 +9,12 @@ frontend/src/errors/errorMessages.ts に、同じコードで足してある。
 - *_WORKER_STOPPED: 作成の途中で、生成ワーカーが止まった
 - *_WORKER_START_FAILED: 生成ワーカーを起動できなかった（AI モデルを読み込めない、など）
 - *_SAVE_FAILED: 作成できたが、結果を保存できなかった
+- SUMMARY_NO_CONTENT: 字幕が 0 件の会議の要約を依頼した（業務エラー。要約を作らない）
 """
 
 from typing import Final
 
-from ..errors import SystemAppError
+from ..errors import BusinessAppError, SystemAppError
 from .models import JobKind
 
 # エラーログに書くコンポーネントの名前。
@@ -71,6 +72,17 @@ def job_error(kind: JobKind, failure: str, meeting_id: str) -> SystemAppError:
         error_code(kind, failure),
         message,
         _retry_action(kind),
+        component=COMPONENT,
+        meeting_id=meeting_id,
+    )
+
+
+def summary_no_content(meeting_id: str) -> BusinessAppError:
+    """字幕が 0 件の会議の要約を依頼した。要約は作らず、画面は「内容がありません」と表示する。"""
+    return BusinessAppError(
+        "SUMMARY_NO_CONTENT",
+        "内容がありません。字幕が 1 件も無いため、要約を作れません。",
+        "字幕がある会議で、要約を作ってください。",
         component=COMPONENT,
         meeting_id=meeting_id,
     )

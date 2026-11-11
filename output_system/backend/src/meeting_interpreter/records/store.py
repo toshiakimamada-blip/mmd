@@ -7,6 +7,7 @@
 | 会議の開始 | create_meeting | 会議 1 件の作成（状態は通訳中） |
 | 字幕の作成 | add_subtitle | 字幕 1 件の作成（順番を同じ確定の中で振る） |
 | 会議の終了・状態の変更 | update_meeting | 終了日時の記録と、状態の変更 |
+| 要約の完成 | save_summary | 要約の作成または置き換えと、状態の完了への変更 |
 
 関数は、保存する前に、桁の上限・区分コード・日時の形を確かめる。合わない値は
 `RecordValueError` で断り、何も保存しない。表の制約（schema.py）も同じ内容を守るが、
@@ -44,8 +45,14 @@ from ..errors import describe_origin
 from ..logs import log_error
 from .database import RecordDatabase
 from .errors import COMPONENT, RecordError, RecordSaveError, RecordValueError
-from .models import AudioSource, Meeting, MeetingStatus, Subtitle
-from .schema import ERROR_CODE_MAX_CHARS, SUBTITLE_TEXT_MAX_CHARS, TITLE_MAX_CHARS
+from .models import AudioSource, Meeting, MeetingStatus, Subtitle, Summary
+from .schema import (
+    ERROR_CODE_MAX_CHARS,
+    SUBTITLE_TEXT_MAX_CHARS,
+    SUMMARY_LIST_MAX_CHARS,
+    SUMMARY_OVERVIEW_MAX_CHARS,
+    TITLE_MAX_CHARS,
+)
 from .times import from_epoch_millis, to_epoch_millis, utc_now
 
 # 要約の失敗理由として保存できる、エラーコードの形。英大文字・数字・アンダースコアだけ。
@@ -410,3 +417,93 @@ class RecordStore:
             # 会議番号が、記録データベースにある会議と合わない。何も更新していない。
             raise RecordValueError("meeting_id", meeting_id=meeting_id) from None
         return _meeting_from_row(row)
+
+    @_log_record_errors
+    async def save_summary(
+        self,
+        meeting_id: str,
+        *,
+        overview: str,
+        key_points: str,
+        decisions: str,
+        action_items: str,
+    ) -> Meeting:
+        """要約を作る（または置き換える）。同じ確定で、会議の状態を完了にし、失敗理由を空にする。
+
+        要約の完成の確定（横断設計規約「保存の単位と順序」）。要約と状態は、一緒に変わる。
+        途中で失敗したら、どちらも変わらない（作り直しなら、前の要約が残る）。
+        作成日時は、アプリサーバーの時計。作り直すと新しい日時になる。
+
+        Args:
+            meeting_id: 要約が属する会議。
+            overview: 全体の概要。1 から 2,000 文字。
+            key_points: 話題ごとの要点。1 から 4,000 文字。
+            decisions: 決定事項。1 から 4,000 文字。該当が無いときは「該当なし」を渡す。
+            action_items: 宿題。1 から 4,000 文字。該当が無いときは「該当なし」を渡す。
+
+        Returns:
+            状態を完了にした会議。
+
+        Raises:
+            RecordValueError: 項目が桁の上限に合わないとき（空・NUL 文字を含む）。会議番号に合う
+                会議が無いとき（項目は meeting_id）。何も保存しない。
+            RecordSaveError: データベースの操作が失敗したとき。何も保存しない。
+        """
+        checked = (
+            _check_text("overview", overview, SUMMARY_OVERVIEW_MAX_CHARS, meeting_id=meeting_id),
+            _check_text("key_points", key_points, SUMMARY_LIST_MAX_CHARS, meeting_id=meeting_id),
+            _check_text("decisions", decisions, SUMMARY_LIST_MAX_CHARS, meeting_id=meeting_id),
+            _check_text(
+                "action_items", action_items, SUMMARY_LIST_MAX_CHARS, meeting_id=meeting_id
+            ),
+        )
+        created_ms = _check_moment("created_at", self._clock(), meeting_id=meeting_id)
+
+        def work(connection: sqlite3.Connection) -> tuple:
+            cursor = connection.execute(
+                "UPDATE meetings SET status = ?, summary_failure_reason = NULL"
+                " WHERE meeting_id = ?",
+                (MeetingStatus.COMPLETED.value, meeting_id),
+            )
+            if cursor.rowcount == 0:
+                raise _MeetingMissing
+            connection.execute(
+                "INSERT INTO summaries"
+                " (meeting_id, overview, key_points, decisions, action_items, created_at)"
+                " VALUES (?, ?, ?, ?, ?, ?)"
+                " ON CONFLICT (meeting_id) DO UPDATE SET overview = excluded.overview,"
+                " key_points = excluded.key_points, decisions = excluded.decisions,"
+                " action_items = excluded.action_items, created_at = excluded.created_at",
+                (meeting_id, *checked, created_ms),
+            )
+            return connection.execute(
+                f"SELECT {_MEETING_COLUMNS} FROM meetings WHERE meeting_id = ?", (meeting_id,)
+            ).fetchone()
+
+        try:
+            row = await self._write(work, meeting_id=meeting_id)
+        except _MeetingMissing:
+            raise RecordValueError("meeting_id", meeting_id=meeting_id) from None
+        return _meeting_from_row(row)
+
+    async def get_summary(self, meeting_id: str) -> Summary | None:
+        """会議の要約を読み出す。要約がまだ無い、または会議が無いときは None。"""
+
+        def work(connection: sqlite3.Connection) -> tuple | None:
+            return connection.execute(
+                "SELECT meeting_id, overview, key_points, decisions, action_items, created_at"
+                " FROM summaries WHERE meeting_id = ?",
+                (meeting_id,),
+            ).fetchone()
+
+        row = await self._database.run(work, write=False)
+        if row is None:
+            return None
+        return Summary(
+            meeting_id=row[0],
+            overview=row[1],
+            key_points=row[2],
+            decisions=row[3],
+            action_items=row[4],
+            created_at=from_epoch_millis(row[5]),
+        )

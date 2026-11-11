@@ -6,8 +6,9 @@
     job.progress_changed  進み具合が変わった（要約で、処理したブロックの数）
 
 項目: type・meeting_id（会議番号）・job_type（summary か questions）・status（queued・running・
-succeeded・failed）・done_blocks・total_blocks（要約のブロック数。質問は null）。
-会議の内容は載せない。通知の送り先の失敗で、作成ジョブを止めない。
+succeeded・failed）・done_blocks・total_blocks（要約のブロック数。質問は null）・wait_reason
+（待機中の理由。other_job は、ほかの作成を待つ。meeting_in_progress は、進行中の会議を待つ。
+順番を待っていない間は null）。会議の内容は載せない。通知の送り先の失敗で、作成ジョブを止めない。
 """
 
 from collections.abc import Mapping
@@ -38,13 +39,14 @@ class JobPublisher(Protocol):
 
 
 def job_payload(snapshot: JobSnapshot) -> dict[str, object]:
-    """通知の項目。会議番号・種類・状況・進み具合。"""
+    """通知の項目。会議番号・種類・状況・進み具合・待機中の理由。"""
     return {
         "meeting_id": snapshot.meeting_id,
         "job_type": snapshot.kind.value,
         "status": snapshot.status.value,
         "done_blocks": snapshot.done_blocks,
         "total_blocks": snapshot.total_blocks,
+        "wait_reason": snapshot.wait_reason,
     }
 
 

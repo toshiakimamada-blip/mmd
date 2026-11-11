@@ -62,6 +62,7 @@ class TestJobNotifier:
                     "status": "queued",
                     "done_blocks": 0,
                     "total_blocks": 3,
+                    "wait_reason": None,
                 },
             ),
             (
@@ -72,6 +73,7 @@ class TestJobNotifier:
                     "status": "running",
                     "done_blocks": 0,
                     "total_blocks": 3,
+                    "wait_reason": None,
                 },
             ),
         ]
@@ -100,8 +102,29 @@ class TestJobNotifier:
                     "status": "queued",
                     "done_blocks": 1,
                     "total_blocks": 3,
+                    "wait_reason": None,
                 },
             )
+        ]
+
+    def test_should_send_the_wait_reason_of_a_queued_job(self):
+        """
+        【テスト対象】JobNotifier（待機中の理由）
+        【テスト内容】待機中の要約に、理由「ほかの作成」を設定して、作成中にする
+        【期待結果】理由を設定したときの状況の通知が、wait_reason に理由を持つこと。作成中の通知は
+                    wait_reason が null（待っていない）
+        """
+        publisher = RecordingPublisher()
+        registry = make_registry(publisher)
+        job_id = registry.register("m1", JobKind.SUMMARY, SummaryPayload(("a",))).job.job_id
+        publisher.sent.clear()
+
+        registry.set_wait_reason(job_id, "other_job")
+        registry.mark_running(job_id)
+
+        assert [(name, body["status"], body["wait_reason"]) for name, body in publisher.sent] == [
+            (JOB_STATUS_CHANGED, "queued", "other_job"),
+            (JOB_STATUS_CHANGED, "running", None),
         ]
 
     def test_should_send_null_progress_for_questions(self):

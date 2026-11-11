@@ -363,3 +363,18 @@ describe('ERROR_WORDINGS for summary and question jobs', () => {
     }
   });
 });
+
+describe('ERROR_WORDINGS for a summary request without subtitles', () => {
+  /**
+   * 【テスト対象】ERROR_WORDINGS（SUMMARY_NO_CONTENT）
+   * 【テスト内容】字幕が 0 件の会議の要約を依頼したときの文言を調べる
+   * 【期待結果】「内容がありません」と伝え、会議の字幕を作ってから要約を作る案内であること
+   *            （字幕が 0 件のときは要約を作るボタンを出さないため、ボタンを押す案内にはしない）
+   */
+  it('should tell the user there is no content to summarize', () => {
+    const wording = ERROR_WORDINGS.SUMMARY_NO_CONTENT;
+
+    expect(wording.message).toContain('内容がありません');
+    expect(wording.action).not.toContain('ボタン');
+  });
+});
