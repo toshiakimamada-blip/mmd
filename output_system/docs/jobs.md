@@ -6,7 +6,7 @@
 
 | やること | 動き |
 |---|---|
-| 受け付け | `submit_summary(会議番号, ブロック)`・`submit_questions(会議番号, 質問の入力)`。同じ会議の同じ種類で、待機中か作成中のジョブがあれば、新しく作らず、そのジョブを返す（返り値の `created` が `False`） |
+| 受け付け | `submit_summary(会議番号, ブロック)`・`submit_questions(会議番号, 質問の入力, 作成した時点)`。同じ会議の同じ種類で、待機中か作成中のジョブがあれば、新しく作らず、そのジョブを返す（返り値の `created` が `False`） |
 | 1 件ずつ実行 | 作成中のジョブは同時に 1 件。ほかは待機中 |
 | 実行順 | 質問を要約より先に。同じ種類は受け付けた順 |
 | 順番を譲る | 作成中の要約は、質問が待っていれば、ブロックの区切りで止まって待機中へ戻る。質問のあと、続きのブロックから再開する |
@@ -21,13 +21,13 @@
 
 ```mermaid
 flowchart LR
-    API["作成の依頼<br>（要約: summary_requests.py。質問は PBI 5.3）"] -->|submit_summary<br>submit_questions| REG["registry.py<br>作成ジョブの置き場<br>重複の判定"]
+    API["作成の依頼<br>（要約: summary_requests.py<br>質問: question_requests.py）"] -->|submit_summary<br>submit_questions| REG["registry.py<br>作成ジョブの置き場<br>重複の判定"]
     MEET["会議管理部"] -->|meeting_started<br>interpreter_stopped| MGR["manager.py<br>管理のタスク"]
     REG --> MGR
     POL["policy.py<br>実行順の規則（純粋）"] --> MGR
     MGR -->|依頼・中断・割り当て| WORKER["生成ワーカー<br>（別のプロセス）"]
     WORKER -->|進み具合・結果| MGR
-    MGR -->|結果・失敗| OUT["outcomes.py<br>結果の受け取り先<br>（要約: summary_outcomes.py。質問は PBI 5.3）"]
+    MGR -->|結果・失敗| OUT["outcomes.py<br>結果の受け取り先<br>（要約: summary_outcomes.py<br>質問: question_outcomes.py）"]
     REG -->|job.status_changed<br>job.progress_changed| HUB["通知部"]
 ```
 
@@ -39,9 +39,11 @@ flowchart LR
 | `policy.py` | 実行順の規則。純粋な関数 `pick_next`・`yield_reason`・`needs_worker`・`wait_reason`（待機中の理由）。規則を見直すときは、このファイルだけを変える |
 | `manager.py` | 管理のタスク。出来事（受け付け・会議の知らせ・ワーカーのメッセージ）のたびに、現在の状態から、やるべきことを決め直す |
 | `workers.py` | 生成ワーカーの起動の入口。本番は `ProductionGenerationLauncher`、テストは偽のエンジンの入口を渡す |
-| `outcomes.py` | 結果（要約・質問・要約の失敗）の受け取り先の窓口 |
+| `outcomes.py` | 結果（要約・質問・要約の失敗）の受け取り先の窓口（`JobOutcomeHandler`）。要約用と質問用をまとめる `JobOutcomes`。受け取り先が結果を決めた形に合わないとして断る `OutcomeRejected` |
 | `summary_requests.py` | 要約を作る・作り直す依頼の受け付け（`SummaryRequests`）。状態を「要約作成中」に確定してから、ジョブを登録する。会議の終了の直後の自動の作成も、ここから行う |
 | `summary_outcomes.py` | 要約の結果の保存（`SummaryOutcomes`）。要約と状態の完了を 1 回の確定で保存し、失敗では状態と失敗理由を保存する |
+| `question_requests.py` | 質問を作る依頼の受け付け（`QuestionRequests`）。会議の状態を問わず、字幕が 1 件以上あれば受け付ける。会議の状態は変えない |
+| `question_outcomes.py` | 質問の結果の保存（`QuestionOutcomes`）。質問のまとまり 1 件と質問 5 件を 1 回の確定で保存する |
 | `meeting_state.py` | 作成ジョブ管理部が会議の状態を変えたときの通知 `meeting.state_changed` |
 | `errors.py` | `SUMMARY_*`・`QUESTION_*` のエラー（`docs/errors.md`） |
 
@@ -81,15 +83,60 @@ sequenceDiagram
 | `POST /api/meetings/{会議番号}/summary`（202） | 中断・要約失敗・完了の会議で、字幕が 1 件以上あるとき受け付ける。同じ会議の要約が待機中か作成中なら、状態も字幕も見ずに、そのジョブを返す（重複を防ぐ規約。遷移規則より先）。字幕が 0 件は `SUMMARY_NO_CONTENT`、遷移規則に無い状態は `MEETING_INVALID_TRANSITION`、会議が無いときは `MEETING_NOT_FOUND`。応答は、会議と作成ジョブ（種類・状況・進み具合・待機中の理由） |
 | 会議の終了（`on_meeting_ended`） | 字幕が 1 件以上の会議は、終了の保存で状態が要約作成中になっている。`SummaryRequests.start_after_meeting_end` が、状態は変えずに、ジョブを登録する。字幕が 0 件の会議は完了のままで、要約を作らない。中断した会議は、自動では作らない |
 
-結果の受け取り先は `JobOutcomeHandler`（`outcomes.py`）です。`create_app` は、既定で `SummaryOutcomes` を渡します（`create_app(..., job_outcomes=...)` で替えられます）。質問の結果（`questions_ready`）は、PBI 5.3 が足すまで捨てます。
+結果の受け取り先は `JobOutcomeHandler`（`outcomes.py`）です。`create_app` は、既定で、`SummaryOutcomes`（要約）と `QuestionOutcomes`（質問）を `JobOutcomes` にまとめて渡します（`create_app(..., job_outcomes=...)` で替えられます）。
 
 | 窓口 | 呼ぶ時点 | `SummaryOutcomes` がやること |
 |---|---|---|
 | `summary_ready(会議番号, 要約)` | 要約ができた | 要約の作成または置き換えと、状態の `completed` への変更を、1 回の確定で行う。失敗理由も空になる。空の項目は「該当なし」にする。処理ログ `summary_saved`（文字数だけ。本文なし）を出し、`meeting.state_changed` を通知する |
 | `summary_failed(会議番号, エラーコード)` | 要約が失敗した | 状態を `summary_failed` にし、失敗理由を保存し、`meeting.state_changed` を通知する。要約には触れないため、作り直しの失敗では、前の要約が残る |
-| `questions_ready(会議番号, 質問の組)` | 質問ができた | まだ何もしない（Task 5.3.2） |
 
 状態を変える前に、遷移規則の表（`meetings/transitions.py`）で確かめます。窓口の呼び出しが終わってから、ジョブを完了にして `job.status_changed`（`succeeded`）を通知します。窓口が例外を起こしたとき（保存の失敗）は、ジョブを `SUMMARY_SAVE_FAILED` で失敗にし、状態を要約失敗にします。ジョブを登録できなかったとき（会議の終了のあとに字幕を読み出せない、など）も、`SUMMARY_GENERATION_FAILED` で要約失敗にして、`error.occurred` を通知します。
+
+## 質問の依頼と保存
+
+質問の作成は、要約と違い、会議の状態を変えません。質問が失敗しても、会議の状態は変わらず、利用者はもう一度押せます。
+
+```mermaid
+sequenceDiagram
+    participant C as 画面
+    participant R as QuestionRequests
+    participant D as 記録データベース
+    participant J as 作成ジョブ管理部
+    participant O as QuestionOutcomes
+    C->>R: POST /api/meetings/{会議番号}/question-sets
+    R->>D: 会議・字幕（会議後は要約も）を読む
+    R->>J: submit_questions（入力・作成した時点）
+    J-->>C: job.status_changed（queued・running）
+    J->>O: questions_ready（5 組・作成した時点）
+    O->>D: まとまり 1 件と質問 5 件を保存（1 回の確定）
+    J-->>C: job.status_changed（succeeded）
+    C->>D: 会議の記録を読み直す（GET /api/meetings/{会議番号}）
+```
+
+| 入口 | 動き |
+|---|---|
+| `POST /api/meetings/{会議番号}/question-sets`（202） | 会議の状態を問わず、字幕が 1 件以上あれば受け付ける。同じ会議の質問が待機中か作成中なら、字幕も見ずに、そのジョブを返す（重複を防ぐ規約）。字幕が 0 件（空白だけを含む）は `QUESTION_NO_CONTENT`（409）、会議が無いときは `MEETING_NOT_FOUND`（404）。応答は、作成ジョブ（`job`）だけ。会議の状態は変わらない |
+
+- 作成した時点は、依頼を受けた時点の会議の状態で決めます。通訳中なら `during_meeting`、それ以外は `after_meeting`。作成が終わる前に会議の状態が変わっても、依頼のときの値を保存します（作成ジョブが持ちます）。
+- 入力は 3 つの場面で組み立てます（`generation/inputs.py` の `build_question_input`）。通訳中は、その時点までの字幕（量の上限を超えるときは直近）。会議後で要約があるときは、要約と直近の字幕。会議後で要約が無いときは、字幕（直近）。要約の作り直し中（状態が要約作成中）は、前の要約があればそれを使います。量の上限は調整値 `generation_input_max_chars` です。
+- 処理ログの受け付け（`job_accepted`）は、ジョブを登録した時点で出ます。質問の作成時間の目標（ボタンを押してから 3 分以内）は、この受け付けから数えます。
+- 保存は `RecordStore.save_question_set`（質問の完成の 1 回の確定）です。まとまりの順番は、同じ確定の中で、その会議の最大 + 1 を振ります（1 から始まり、欠けず重ならない）。5 組に満たない・1 問が 500 文字を超える・確定に失敗する場合は、1 問も保存しません。保存後に、処理ログ `question_set_saved`（件数 5。本文なし）を出し、ジョブを完了にして `job.status_changed`（`succeeded`）を通知します。画面は、この通知で会議の記録を読み直します。
+- 失敗の分け方: 5 組に満たない・桁の上限を超える（生成ワーカーの検証をすり抜けた場合）は `QUESTION_GENERATION_FAILED`、保存の失敗は `QUESTION_SAVE_FAILED`、生成ワーカーが止まったときは `QUESTION_WORKER_STOPPED`。どれも `error.occurred` で通知し、ジョブは `failed` です。質問は 1 問も保存せず、会議の状態も変えません。
+- 質問は、文字として保存し、文字として返します。HTML や記号の変換はしません。表示は、画面が文字として行います（ADR-15）。
+
+## 会議中の CPU の割り当て
+
+通訳中の会議がある間は、生成ワーカーの CPU の割り当て（スレッド数と nice 値）を「会議中」にして、字幕の処理（通訳ワーカー）を優先します。
+
+| 場面 | 動き |
+|---|---|
+| 通訳中の会議があるときに、生成ワーカーを起動する | `Start` の `cpu_mode` を「会議中」にして起動する（`manager.py` の `_start_worker`） |
+| 作成中に、会議が始まる・終わる（中断を含む） | `meeting_started`・`interpreter_stopped` のあとの決め直し（`_sync_cpu`）で、ワーカーへ `SetCpu` を頼む。ワーカーは、次の文章生成の前に反映する（生成の途中では変えない） |
+| 作成が終わり、実行できるジョブが無くなる | ワーカーを止める。次の起動は、そのときの会議の有無で割り当てを決める（会議中の割り当てが残らない） |
+
+会議中に質問を作っているあいだの状況は、`job.status_changed`（`job_type` が `questions`、`status` が `running`）で届きます。画面が「字幕が遅れることがあります」を出す根拠です（表示は会議中の画面の作業）。
+
+自動テスト: `test/meeting_interpreter/jobs/test_question_cpu_allocation.py`（会議管理部と作成ジョブ管理部をつなぎ、本物の uvicorn で動かす結合テスト）。
 
 ## 通知
 
