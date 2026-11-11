@@ -59,8 +59,8 @@ def meeting_not_found(meeting_id: str | None = None) -> BusinessAppError:
     """会議番号に合う会議が無い。"""
     return BusinessAppError(
         "MEETING_NOT_FOUND",
-        "会議が見つかりません。",
-        f"会議の一覧を開き直して、会議を確かめてください。{_REPORT_IF_NOT_FIXED}",
+        "会議の記録が見つかりません。",
+        f"会議の一覧から、開きたい記録を選んでください。{_REPORT_IF_NOT_FIXED}",
         status_code=404,
         component=COMPONENT,
         meeting_id=meeting_id,

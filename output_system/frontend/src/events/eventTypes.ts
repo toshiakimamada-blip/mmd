@@ -8,10 +8,12 @@
  *
  * 通知の種類を足すには、AppEvent に型を足し、parseAppEvent の switch に読み替えを足す。
  * 通知部が送る通知の一覧は、output_system/docs/meetings.md の「通知」にある。
- * 使われない通知の型は、使う作業で足す。いまは subtitle.created と model.status_changed。
+ * 使われない通知の型は、使う作業で足す。いまは subtitle.created・model.status_changed・
+ * meeting.state_changed・job.status_changed・job.progress_changed。
  */
 
 import { parseModelStatus, type ModelStatus } from '../models/modelStatus';
+import { isMeetingStatus, parseRecordJob, type MeetingStatus, type RecordJob } from '../records/recordTypes';
 import { parseSubtitle, type Subtitle } from '../subtitles/subtitleTypes';
 
 /** 字幕の保存が確定したときの通知。 */
@@ -28,8 +30,35 @@ export interface ModelStatusChangedEvent {
   readonly status: ModelStatus;
 }
 
+/** 会議の状態が変わったとき（開始・終了・中断・要約の作成の結果）の通知。 */
+export interface MeetingStateChangedEvent {
+  readonly type: 'meeting.state_changed';
+  /** 状態が変わった会議。画面は、表示している会議の通知だけを使う。 */
+  readonly meetingId: string;
+  readonly status: MeetingStatus;
+}
+
+/** 作成ジョブの状況（待機中・作成中・完了・失敗）が変わったときの通知。項目は、記録の作成ジョブと同じ。 */
+export interface JobStatusChangedEvent {
+  readonly type: 'job.status_changed';
+  readonly meetingId: string;
+  readonly job: RecordJob;
+}
+
+/** 作成ジョブの進み具合（処理したブロックの数）が変わったときの通知。 */
+export interface JobProgressChangedEvent {
+  readonly type: 'job.progress_changed';
+  readonly meetingId: string;
+  readonly job: RecordJob;
+}
+
 /** 画面が受け取る通知。type で見分ける。 */
-export type AppEvent = SubtitleCreatedEvent | ModelStatusChangedEvent;
+export type AppEvent =
+  | SubtitleCreatedEvent
+  | ModelStatusChangedEvent
+  | MeetingStateChangedEvent
+  | JobStatusChangedEvent
+  | JobProgressChangedEvent;
 
 /** 通知の種類の名前（subtitle.created など）。 */
 export type AppEventType = AppEvent['type'];
@@ -65,6 +94,20 @@ export function parseAppEvent(text: string): AppEvent | null {
     case 'model.status_changed': {
       const status = parseModelStatus(record);
       return status === null ? null : { type: 'model.status_changed', status };
+    }
+    case 'meeting.state_changed': {
+      if (typeof record.meeting_id !== 'string' || record.meeting_id === '' || !isMeetingStatus(record.status)) {
+        return null;
+      }
+      return { type: 'meeting.state_changed', meetingId: record.meeting_id, status: record.status };
+    }
+    case 'job.status_changed':
+    case 'job.progress_changed': {
+      const job = parseRecordJob(record);
+      if (job === null || typeof record.meeting_id !== 'string' || record.meeting_id === '') {
+        return null;
+      }
+      return { type: record.type, meetingId: record.meeting_id, job };
     }
     default:
       return null;

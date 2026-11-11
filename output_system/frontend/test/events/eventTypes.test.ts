@@ -81,6 +81,68 @@ describe('parseAppEvent', () => {
   });
 
   /**
+   * 【テスト対象】parseAppEvent（meeting.state_changed）
+   * 【テスト内容】会議の状態の通知を渡す
+   * 【期待結果】会議番号と状態を持つ通知になること
+   */
+  it('should read a meeting.state_changed notification', () => {
+    const text = JSON.stringify({
+      type: 'meeting.state_changed',
+      meeting_id: 'abc123',
+      status: 'summarizing',
+      ended_at: '2026-11-05T02:30:15.000Z',
+    });
+
+    expect(parseAppEvent(text)).toEqual({
+      type: 'meeting.state_changed',
+      meetingId: 'abc123',
+      status: 'summarizing',
+    });
+  });
+
+  /**
+   * 【テスト対象】parseAppEvent（job.status_changed・job.progress_changed）
+   * 【テスト内容】作成ジョブの通知を渡す（要約の作成中。質問は進み具合の項目が null）
+   * 【期待結果】会議番号と、記録の作成ジョブと同じ形の作成ジョブを持つ通知になること
+   */
+  it.each(['job.status_changed', 'job.progress_changed'] as const)('should read a %s notification', (type) => {
+    const text = JSON.stringify({
+      type,
+      meeting_id: 'abc123',
+      job_type: 'summary',
+      status: 'running',
+      done_blocks: 2,
+      total_blocks: 4,
+      wait_reason: null,
+    });
+
+    expect(parseAppEvent(text)).toEqual({
+      type,
+      meetingId: 'abc123',
+      job: { jobType: 'summary', status: 'running', doneBlocks: 2, totalBlocks: 4, waitReason: null },
+    });
+  });
+
+  /**
+   * 【テスト対象】parseAppEvent（形が合わない会議・作成ジョブの通知）
+   * 【テスト内容】会議番号が無い、状態や種類が知らない値、ブロックの数が整数でない通知を渡す
+   * 【期待結果】どれも null を返すこと
+   */
+  it.each([
+    ['state without meeting id', JSON.stringify({ type: 'meeting.state_changed', status: 'completed' })],
+    ['state unknown', JSON.stringify({ type: 'meeting.state_changed', meeting_id: 'a', status: 'bogus' })],
+    ['job without meeting id', JSON.stringify({ type: 'job.status_changed', job_type: 'summary', status: 'running' })],
+    ['job unknown type', JSON.stringify({ type: 'job.status_changed', meeting_id: 'a', job_type: 'x', status: 'running' })],
+    ['job unknown status', JSON.stringify({ type: 'job.progress_changed', meeting_id: 'a', job_type: 'summary', status: 'x' })],
+    [
+      'job broken blocks',
+      JSON.stringify({ type: 'job.progress_changed', meeting_id: 'a', job_type: 'summary', status: 'running', done_blocks: 'two' }),
+    ],
+  ])('should return null for %s', (_name, text) => {
+    expect(parseAppEvent(text)).toBeNull();
+  });
+
+  /**
    * 【テスト対象】parseAppEvent（読めない通知）
    * 【テスト内容】JSON でない文字列、形が合わない通知、知らない種類の通知を渡す
    * 【期待結果】どれも null を返すこと（例外にしない。知らない種類は、あとの版のアプリサーバーが

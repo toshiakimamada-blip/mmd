@@ -117,8 +117,8 @@ export const ERROR_WORDINGS: Readonly<Record<string, ErrorWording>> = Object.fre
     action: '進行中の会議を終了してから、新しい会議を開始してください。',
   },
   MEETING_NOT_FOUND: {
-    message: '会議が見つかりません。',
-    action: `会議の一覧を開き直して、会議を確かめてください。${REPORT_IF_NOT_FIXED}`,
+    message: '会議の記録が見つかりません。',
+    action: `会議の一覧から、開きたい記録を選んでください。${REPORT_IF_NOT_FIXED}`,
   },
   MEETING_NOT_RUNNING: {
     message: 'この会議は通訳中ではないため、音声を受け付けられません。',

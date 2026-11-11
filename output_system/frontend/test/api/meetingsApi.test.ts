@@ -1,7 +1,7 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
 import { ApiError } from '../../src/api/apiClient';
-import { endMeeting, fetchSubtitles } from '../../src/api/meetingsApi';
+import { endMeeting, fetchMeetingRecord, fetchSubtitles, requestSummary } from '../../src/api/meetingsApi';
 
 /** JSON の応答を作る。 */
 function jsonResponse(body: unknown, status = 200): Response {
@@ -104,5 +104,110 @@ describe('endMeeting', () => {
     await endMeeting('a/b');
 
     expect(fetchMock).toHaveBeenCalledWith('/api/meetings/a%2Fb/end', { method: 'POST' });
+  });
+});
+
+
+describe('fetchMeetingRecord', () => {
+  /** アプリサーバーが返す会議の記録（最小）。 */
+  const WIRE_RECORD = {
+    meeting: {
+      meeting_id: 'abc123',
+      title: '定例',
+      started_at: '2026-11-05T01:00:00.000Z',
+      ended_at: null,
+      audio_source: 'microphone',
+      status: 'interpreting',
+      summary_failure_reason: null,
+    },
+    subtitles: [wireSubtitle(1)],
+    summary: null,
+    question_sets: [],
+    jobs: [],
+  };
+
+  /**
+   * 【テスト対象】fetchMeetingRecord
+   * 【テスト内容】会議の記録を取得する
+   * 【期待結果】
+   * - GET /api/meetings/{会議番号} を、会議番号を 1 つの区間として符号化して呼ぶ
+   * - 会議の内容がブラウザーの HTTP キャッシュに残らないよう、キャッシュを使わない
+   * - 画面の型に読み替えて返す
+   */
+  it('should fetch the record of a meeting without using the cache', async () => {
+    const fetchMock = vi.fn().mockResolvedValue(jsonResponse(WIRE_RECORD));
+    vi.stubGlobal('fetch', fetchMock);
+
+    const record = await fetchMeetingRecord('a/b?c');
+
+    expect(fetchMock).toHaveBeenCalledWith('/api/meetings/a%2Fb%3Fc', {
+      method: 'GET',
+      cache: 'no-store',
+    });
+    expect(record.meeting.title).toBe('定例');
+    expect(record.subtitles).toHaveLength(1);
+  });
+
+  /**
+   * 【テスト対象】fetchMeetingRecord（会議が無い）
+   * 【期待結果】MEETING_NOT_FOUND の ApiError になる
+   */
+  it('should throw an ApiError with MEETING_NOT_FOUND when the meeting does not exist', async () => {
+    const body = {
+      category: 'business_error',
+      code: 'MEETING_NOT_FOUND',
+      message: 'm',
+      action: 'a',
+    };
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue(jsonResponse(body, 404)));
+
+    const failure = await fetchMeetingRecord('missing').catch((error: unknown) => error);
+
+    expect(failure).toBeInstanceOf(ApiError);
+    expect((failure as ApiError).body.code).toBe('MEETING_NOT_FOUND');
+  });
+
+  /**
+   * 【テスト対象】fetchMeetingRecord（形が合わない応答）
+   * 【期待結果】想定外のエラー（SYSTEM_UNEXPECTED_ERROR）の ApiError になる
+   */
+  it('should throw an unexpected ApiError for a response of the wrong shape', async () => {
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue(jsonResponse({ meeting: null })));
+
+    const failure = await fetchMeetingRecord('abc123').catch((error: unknown) => error);
+
+    expect(failure).toBeInstanceOf(ApiError);
+    expect((failure as ApiError).body.code).toBe('SYSTEM_UNEXPECTED_ERROR');
+  });
+});
+
+describe('requestSummary', () => {
+  /**
+   * 【テスト対象】requestSummary
+   * 【テスト内容】要約を作る依頼を送る
+   * 【期待結果】POST /api/meetings/{会議番号}/summary を呼び、受け付けたら何も返さず終わる
+   */
+  it('should post the request to the summary route of the meeting', async () => {
+    const fetchMock = vi.fn().mockResolvedValue(jsonResponse({ meeting: {}, job: {} }, 202));
+    vi.stubGlobal('fetch', fetchMock);
+
+    await expect(requestSummary('abc123')).resolves.toBeUndefined();
+
+    expect(fetchMock).toHaveBeenCalledWith('/api/meetings/abc123/summary', { method: 'POST' });
+  });
+
+  /**
+   * 【テスト対象】requestSummary（受け付けられない）
+   * 【テスト内容】字幕が 0 件の会議（SUMMARY_NO_CONTENT、409）
+   * 【期待結果】ApiError になり、エラーコードを持つ
+   */
+  it('should throw an ApiError when the request is refused', async () => {
+    const body = { category: 'business_error', code: 'SUMMARY_NO_CONTENT', message: 'm', action: 'a' };
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue(jsonResponse(body, 409)));
+
+    const failure = await requestSummary('abc123').catch((error: unknown) => error);
+
+    expect(failure).toBeInstanceOf(ApiError);
+    expect((failure as ApiError).body.code).toBe('SUMMARY_NO_CONTENT');
   });
 });
