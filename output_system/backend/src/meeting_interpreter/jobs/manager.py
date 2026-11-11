@@ -204,6 +204,10 @@ class JobManager:
                 self._log_job("job_accepted", record)
             # 受け付けた時点で、何を待つのかを通知する（生成ワーカーの起動を待たない）。
             self._refresh_wait_reasons()
+            # 応答にも、決め直した待機中の理由を入れる（通知と同じ内容を返す）。
+            refreshed = self._registry.find_active(meeting_id, kind)
+            if refreshed is not None and refreshed.job_id == registration.job.job_id:
+                registration = Registration(job=refreshed, created=True)
             self._wake()
         return registration
 

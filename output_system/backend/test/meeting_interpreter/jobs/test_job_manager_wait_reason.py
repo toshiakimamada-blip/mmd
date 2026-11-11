@@ -229,3 +229,29 @@ class TestWaitReasonNotices:
         publisher = asyncio.run(scenario())
 
         assert reasons(publisher, "m1")[0] == ("queued", None)
+
+
+class TestRegistrationWaitReason:
+    """受け付けの応答（Registration）の作成ジョブにも、待機中の理由が入る。"""
+
+    def test_should_return_the_wait_reason_in_the_registration(self):
+        """
+        【テスト対象】JobManager.submit_summary（受け付けの応答）
+        【テスト内容】通訳中の会議がある間に、別の会議の要約を受け付ける
+        【期待結果】受け付けの応答の作成ジョブが、待機中で、理由が「進行中の会議」であること
+                    （通知と同じ理由を、応答でも返す）
+        """
+
+        async def scenario():
+            manager, _publisher, _outcomes = build(InProcessLauncher())
+            manager.start()
+            manager.meeting_started("live")
+            registration = manager.submit_summary("m1", BLOCKS)
+            await manager.shutdown()
+            return registration
+
+        registration = asyncio.run(scenario())
+
+        assert registration.created is True
+        assert str(registration.job.status) in {"queued", "JobStatus.QUEUED"}
+        assert registration.job.wait_reason == "meeting_in_progress"
