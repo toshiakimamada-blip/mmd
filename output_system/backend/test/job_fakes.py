@@ -28,6 +28,7 @@ from meeting_interpreter.generation.protocol import (
 from meeting_interpreter.generation.results import QuestionPair, SummaryText
 from meeting_interpreter.generation.settings import GenerationSettings
 from meeting_interpreter.generation.worker import GenerationWorker
+from meeting_interpreter.records.models import QuestionPhase
 
 # 偽の生成ワーカーに渡す調整値。
 SETTINGS = GenerationSettings(
@@ -197,6 +198,8 @@ class RecordingOutcomes:
     def __init__(self, *, fail_with: Exception | None = None) -> None:
         self.summaries: list[tuple[str, SummaryText]] = []
         self.questions: list[tuple[str, tuple[QuestionPair, ...]]] = []
+        # 質問を受け取ったときの、作成した時点。questions と同じ順。
+        self.question_phases: list[QuestionPhase] = []
         self.failures: list[tuple[str, str]] = []
         # 結果を受け取った順。"summary:<会議番号>"・"questions:<会議番号>"。
         self.order: list[str] = []
@@ -209,10 +212,13 @@ class RecordingOutcomes:
         self.summaries.append((meeting_id, summary))
         self.order.append(f"summary:{meeting_id}")
 
-    async def questions_ready(self, meeting_id: str, pairs: tuple[QuestionPair, ...]) -> None:
+    async def questions_ready(
+        self, meeting_id: str, pairs: tuple[QuestionPair, ...], created_phase: QuestionPhase
+    ) -> None:
         if self.fail_with is not None:
             raise self.fail_with
         self.questions.append((meeting_id, pairs))
+        self.question_phases.append(created_phase)
         self.order.append(f"questions:{meeting_id}")
 
     async def summary_failed(self, meeting_id: str, error_code: str) -> None:

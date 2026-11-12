@@ -106,7 +106,11 @@ generation_cpu_threads_during_meeting = 2
 
 # 生成ワーカーの処理の優先度（nice 値。0 から 19。大きいほど、ほかの処理に CPU を譲る）。
 # 会議をしていないときは、譲らない。会議中は、字幕の処理（通訳ワーカー）に譲る。
-# 会議中の値は通常以上にすること。仮置き（測って決める）。
+# 会議中の値は通常以上にすること。
+# 会議中の質問の作成を 1 回測った（2026-11-12、測定道具は backend/test/measure/
+# measure_question_during_meeting.py）。会議中の割り当て（スレッド 2・nice 10）のままで、
+# 質問の作成中に字幕の遅れが目標（10 秒）を超え、完了のあとも戻りに時間がかかった。
+# 値は仮置きのまま。見直しは確認事項 13 で行う（結果は docs/jobs.md）。
 generation_nice_normal = 0
 generation_nice_during_meeting = 10
 

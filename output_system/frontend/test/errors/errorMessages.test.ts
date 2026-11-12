@@ -364,6 +364,22 @@ describe('ERROR_WORDINGS for summary and question jobs', () => {
   });
 });
 
+describe('ERROR_WORDINGS for a question request without subtitles', () => {
+  /**
+   * 【テスト対象】ERROR_WORDINGS（QUESTION_NO_CONTENT）
+   * 【テスト内容】字幕が 0 件の会議の質問を依頼したときの文言を調べる
+   * 【期待結果】字幕が無いために作れないことを伝え、字幕ができてから作る案内であること
+   *            （字幕が 0 件のときは質問を作るボタンを押せないため、ボタンを押す案内にはしない）
+   */
+  it('should tell the user the questions need at least one subtitle', () => {
+    const wording = ERROR_WORDINGS.QUESTION_NO_CONTENT;
+
+    expect(wording.message).toContain('字幕が 1 件も無い');
+    expect(wording.action).toContain('字幕が 1 件以上できてから');
+    expect(wording.action).not.toContain('ボタン');
+  });
+});
+
 describe('ERROR_WORDINGS for a summary request without subtitles', () => {
   /**
    * 【テスト対象】ERROR_WORDINGS（SUMMARY_NO_CONTENT）

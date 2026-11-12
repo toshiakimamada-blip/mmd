@@ -9,6 +9,7 @@ from datetime import datetime
 from enum import StrEnum
 
 from ..generation.inputs import QuestionInput
+from ..records.models import QuestionPhase
 
 
 class JobKind(StrEnum):
@@ -66,9 +67,12 @@ class SummaryPayload:
 
 @dataclass(frozen=True, slots=True)
 class QuestionPayload:
-    """質問の作成の入力（inputs.build_question_input で組み立てたもの）。"""
+    """質問の作成の入力（inputs.build_question_input で組み立てたもの）と、作成した時点。"""
 
     question_input: QuestionInput
+    # 作成した時点。依頼を受けた時点の会議の状態で決める（通訳中なら会議中、それ以外は会議後）。
+    # 作成が終わるまでに会議の状態が変わっても、依頼のときの値を保存する。
+    created_phase: QuestionPhase = QuestionPhase.AFTER_MEETING
 
 
 @dataclass(frozen=True, slots=True)

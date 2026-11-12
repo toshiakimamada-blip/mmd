@@ -11,6 +11,7 @@ from meeting_interpreter.generation.results import QuestionPair, SummaryText
 from meeting_interpreter.jobs.manager import JobManager, JobPolicy
 from meeting_interpreter.jobs.outcomes import NullOutcomeHandler
 from meeting_interpreter.jobs.workers import ProductionGenerationLauncher
+from meeting_interpreter.records.models import QuestionPhase
 from meeting_interpreter.settings import Settings
 
 
@@ -55,7 +56,9 @@ class TestNullOutcomeHandler:
         async def scenario():
             return (
                 await handler.summary_ready("m1", summary),
-                await handler.questions_ready("m1", (QuestionPair("Q?", "質問？"),)),
+                await handler.questions_ready(
+                    "m1", (QuestionPair("Q?", "質問？"),), QuestionPhase.AFTER_MEETING
+                ),
                 await handler.summary_failed("m1", "SUMMARY_WORKER_STOPPED"),
             )
 

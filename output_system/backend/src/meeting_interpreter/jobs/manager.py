@@ -48,6 +48,7 @@ from ..generation.protocol import (
 )
 from ..logs import log_error, log_processing
 from ..meetings.session import ERROR_OCCURRED, describe_worker_exit, error_payload
+from ..records.models import QuestionPhase
 from ..tuning import Tuning
 from ..worker_client import WorkerExited
 from .errors import COMPONENT, JobFailure, error_code, job_error
@@ -61,7 +62,7 @@ from .models import (
     SummaryPayload,
 )
 from .notices import JobNotifier, JobPublisher
-from .outcomes import JobOutcomeHandler, NullOutcomeHandler
+from .outcomes import JobOutcomeHandler, NullOutcomeHandler, OutcomeRejected
 from .policy import (
     JobView,
     Situation,
@@ -185,14 +186,23 @@ class JobManager:
         """
         return self._submit(meeting_id, JobKind.SUMMARY, SummaryPayload(tuple(blocks)))
 
-    def submit_questions(self, meeting_id: str, question_input: QuestionInput) -> Registration:
+    def submit_questions(
+        self,
+        meeting_id: str,
+        question_input: QuestionInput,
+        created_phase: QuestionPhase = QuestionPhase.AFTER_MEETING,
+    ) -> Registration:
         """質問の作成を受け付ける。同じ会議の質問が待機中か作成中なら、新しく作らず、それを返す。
 
         Args:
             meeting_id: 会議番号。
             question_input: inputs.build_question_input で組み立てた入力。
+            created_phase: 作成した時点。依頼を受けた時点の会議の状態で決めた値
+                （通訳中なら会議中）。質問のまとまりに、この値が保存される。
         """
-        return self._submit(meeting_id, JobKind.QUESTIONS, QuestionPayload(question_input))
+        return self._submit(
+            meeting_id, JobKind.QUESTIONS, QuestionPayload(question_input, created_phase)
+        )
 
     def _submit(
         self, meeting_id: str, kind: JobKind, payload: SummaryPayload | QuestionPayload
@@ -583,12 +593,22 @@ class JobManager:
         try:
             if isinstance(message, Summary) and record.kind is JobKind.SUMMARY:
                 await self._outcomes.summary_ready(record.meeting_id, message.text)
-            elif isinstance(message, Questions) and record.kind is JobKind.QUESTIONS:
-                await self._outcomes.questions_ready(record.meeting_id, message.pairs)
+            elif (
+                isinstance(message, Questions)
+                and record.kind is JobKind.QUESTIONS
+                and isinstance(record.payload, QuestionPayload)
+            ):
+                await self._outcomes.questions_ready(
+                    record.meeting_id, message.pairs, record.payload.created_phase
+                )
             else:
                 # 頼んだ種類と違う結果。起きないはずの食い違い。
                 await self._fail_job(record, JobFailure.GENERATION_FAILED)
                 return
+        except OutcomeRejected as rejected:
+            # 結果が決めた形に合わず、受け取り先が断った（何も保存していない）。保存の失敗ではない。
+            await self._fail_job(record, rejected.failure)
+            return
         except Exception as error:  # noqa: BLE001 (保存の失敗は、種類と発生場所だけを残して失敗にする)
             _, location = describe_origin(error)
             log_error(
