@@ -10,12 +10,16 @@
 
 使い方（開発用のコンテナから。標準ライブラリだけで動くため、コンテナの Python へ標準入力で渡せる）:
 
-    docker exec -i <コンテナ名> python -I - sample --interval 0.5 \\
+    docker exec -i <コンテナ名> python -I - sample --interval 0.5 --seconds 600 \\
         < test/measure/sample_process_cpu.py > /tmp/cpu.jsonl &
     uv run python test/measure/measure_question_during_meeting.py ... --json-out /tmp/r.json
-    kill %1   # 記録を止める（標準出力が閉じると、コンテナの中の記録も終わる）
     uv run python test/measure/sample_process_cpu.py summarize --cpu /tmp/cpu.jsonl \\
         --result /tmp/r.json
+
+--seconds には、測定の長さより長い秒数を渡す（記録は、その秒数で自分から終わる）。
+開発用のコンテナ側の `docker exec` を kill しても、コンテナの中の記録は止まらず、
+残り続けた（確認した事実。理由は未確認）。途中で止めるときは、コンテナの中で
+`python -I - sample` のプロセスを探して終わらせる。
 
 記録の時刻は、壁時計（wall）と単調増加時計（mono）の両方を持つ。開発用のコンテナと出荷する
 コンテナは同じカーネルの上で動くため、単調増加時計は同じ値で、測定道具の記録と突き合わせられる。
