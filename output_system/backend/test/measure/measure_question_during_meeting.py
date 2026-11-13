@@ -5,8 +5,10 @@
 質問の作成ジョブの通知（job.status_changed）の届いた時刻から、次を求める。
 
 - 字幕の遅れ: 字幕の通知を受け取った時刻 - その字幕の先頭の音声がアプリサーバーへ届いた時刻
-  （spoken_at）。2 つの時計は同じ PC のもの。測定の前後で、壁時計と単調増加時計のずれを調べ、
-  壁時計が飛んだ測定は、値を信用しない旨を出す
+  （spoken_at）。2 つの時計は同じ PC のもの。壁時計は、WSL2 などで、単調増加時計と違う進み方を
+  する（毎分約 2 秒ずれる環境があった）。そこで、測定の間 0.5 秒ごとに「壁時計と単調増加時計の組」
+  を控え、spoken_at を単調増加時計の時刻へ換算してから、遅れを求める。
+  壁時計の差のままの値も、参考に並べる
 - 質問の作成時間: 依頼から、作成ジョブの完了の通知まで（生成ワーカーの起動を含む）
 - 作成中の字幕の遅れ: 依頼から完了までの間に届いた字幕の、最大と平均
 - 戻るまでの時間: 質問の完了から、遅れが目標（10 秒）以内の字幕が初めて届くまで
@@ -23,12 +25,16 @@
     --no-question: 質問を依頼しない（字幕の遅れの基準値を測る）
     --seconds N: 音声を送る秒数（既定 420）
     --host・--port: アプリの宛先（既定はコンテナ名と 3001）。--origin は宛先から作る
+    --json-out FILE: 通知の時刻と遅れを JSON で書く（sample_process_cpu.py summarize が読む）
+
+生成ワーカーなどのプロセスごとの CPU は、sample_process_cpu.py をコンテナの中で動かして記録する。
 
 測定の間は、ほかの重い処理を動かさない（CPU を使い切る測定のため）。測り終えたら、会議は中断にする
 （終了にすると、要約が自動で始まり、次の測定の邪魔になる）。会議の内容（字幕・質問の本文）は表示しない。
 """
 
 import argparse
+import bisect
 import http.client
 import json
 import statistics
@@ -62,8 +68,12 @@ class Arrival:
 
     # 単調増加時計での、通知を受け取った時刻。
     received: float
-    # 字幕の遅れ（秒）。
+    # 字幕の遅れ（秒）。壁時計の差のまま。
     delay: float
+    # 先頭の音声がアプリサーバーへ届いた時刻（壁時計。Unix 時刻の秒）。
+    spoken_wall: float
+    # 字幕の遅れ（秒）。spoken_at を単調増加時計へ換算して求めた値。測定の終わりに入れる。
+    delay_mono: float = 0.0
 
 
 @dataclass
@@ -124,7 +134,9 @@ def listen(host: str, port: int, meeting_id: str, observed: Observed, stop: thre
                 with observed.lock:
                     if message["type"] == "subtitle.created":
                         delay = now_wall - parse_utc(message["spoken_at"])
-                        observed.arrivals.append(Arrival(now, delay))
+                        observed.arrivals.append(
+                            Arrival(now, delay, parse_utc(message["spoken_at"]))
+                        )
                     elif message["type"] == "job.status_changed" and (
                         message["job_type"] == "questions"
                     ):
@@ -134,6 +146,28 @@ def listen(host: str, port: int, meeting_id: str, observed: Observed, stop: thre
 
     threading.Thread(target=read, daemon=True).start()
     return connection
+
+
+def sample_clocks(samples: list[tuple[float, float]], stop: threading.Event) -> None:
+    """0.5 秒ごとに「壁時計と単調増加時計の組」を控える（壁時計の進み方が違っても換算できる）。"""
+    while not stop.is_set():
+        samples.append((time.time(), time.monotonic()))
+        stop.wait(0.5)
+
+
+def wall_to_monotonic(samples: list[tuple[float, float]], wall: float) -> float:
+    """壁時計の時刻を、控えた組の間の直線で、単調増加時計の時刻へ換算する。"""
+    walls = [pair[0] for pair in samples]
+    index = bisect.bisect_left(walls, wall)
+    if index <= 0:
+        left, right = samples[0], samples[min(1, len(samples) - 1)]
+    elif index >= len(samples):
+        left, right = samples[max(len(samples) - 2, 0)], samples[-1]
+    else:
+        left, right = samples[index - 1], samples[index]
+    if right[0] == left[0]:
+        return left[1]
+    return left[1] + (wall - left[0]) * (right[1] - left[1]) / (right[0] - left[0])
 
 
 def stream_speech(audio, pcm: bytes, seconds: float, started: float) -> None:
@@ -159,6 +193,23 @@ def summarize(values: list[float]) -> str:
     )
 
 
+def summarize_both(arrivals: list[Arrival]) -> str:
+    """字幕の遅れを、単調増加時計へ換算した値と、壁時計の差のままの値で並べる。"""
+    return (
+        f"{summarize([a.delay_mono for a in arrivals])}"
+        f"（壁時計の差のまま: {summarize([a.delay for a in arrivals])}）"
+    )
+
+
+def recovery_seconds(after: list[Arrival], finished: float, *, converted: bool) -> float | None:
+    """質問の完了から、遅れが目標以内の字幕が初めて届くまで（秒）。無ければ None。"""
+    for arrival in after:
+        delay = arrival.delay_mono if converted else arrival.delay
+        if delay <= DELAY_TARGET_SECONDS:
+            return arrival.received - finished
+    return None
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__.split("\n")[0])
     parser.add_argument("--speech", type=Path, required=True)
@@ -167,12 +218,15 @@ def main() -> None:
     parser.add_argument("--no-question", action="store_true")
     parser.add_argument("--host", default="toshiakimamada-blip-mmd-output-system")
     parser.add_argument("--port", type=int, default=3001)
+    parser.add_argument("--json-out", type=Path, default=None)
     args = parser.parse_args()
 
     # 1 秒の無音をはさんで、繰り返す。声の途切れで、発話の区切りができる。
     pcm = load_speech(str(args.speech)) + silence(1.0)
     observed = Observed()
     stop = threading.Event()
+    clocks: list[tuple[float, float]] = []
+    threading.Thread(target=sample_clocks, args=(clocks, stop), daemon=True).start()
 
     status, meeting = call(
         args.host,
@@ -210,6 +264,7 @@ def main() -> None:
     if not args.no_question:
         threading.Thread(target=ask, daemon=True).start()
     stream_speech(audio, pcm, args.seconds, mono_start)
+    stream_end = time.monotonic()
 
     # 質問の作成が終わるまで待つ（音声は送り終えた。無音は送らず、字幕の通知だけ待つ）。
     if not args.no_question:
@@ -231,50 +286,90 @@ def main() -> None:
     with observed.lock:
         arrivals = list(observed.arrivals)
         statuses = list(observed.question_statuses)
-
+    # 字幕の遅れを、単調増加時計へ換算して求める。
+    for arrival in arrivals:
+        arrival.delay_mono = arrival.received - wall_to_monotonic(clocks, arrival.spoken_wall)
+    elapsed = time.monotonic() - mono_start
     say("")
     say(f"測定の長さ: 音声 {args.seconds:.0f} 秒。字幕 {len(arrivals)} 件")
     flag = (
-        "（壁時計が飛んだ。字幕の遅れは信用できない）"
+        "（壁時計が、単調増加時計と違う進み方をした。字幕の遅れは、単調増加時計へ換算した値を使う）"
         if abs(wall_drift) > CLOCK_JUMP_SECONDS
         else ""
     )
-    say(f"壁時計と単調増加時計のずれ: {wall_drift:+.2f} 秒{flag}")
-
-    if args.no_question or asked_at is None:
-        say(f"字幕の遅れ（質問なし）: {summarize([a.delay for a in arrivals])}")
-        return
+    say(
+        f"壁時計と単調増加時計のずれ: {wall_drift:+.2f} 秒"
+        f"（毎分 {wall_drift / elapsed * 60:+.2f} 秒）{flag}"
+    )
+    if arrivals:
+        gaps = [a.delay - a.delay_mono for a in arrivals]
+        say(
+            f"換算の効果（壁時計の差のまま - 換算した値）: 平均 {statistics.mean(gaps):+.2f} 秒、"
+            f"最大 {max(gaps, key=abs):+.2f} 秒"
+        )
 
     running = next((t for t, s in statuses if s == "running"), None)
     finished = next((t for t, s in statuses if s in ("succeeded", "failed")), None)
+    if args.json_out is not None:
+        args.json_out.write_text(
+            json.dumps(
+                {
+                    "meeting_id": meeting_id,
+                    "mono_start": mono_start,
+                    "wall_start": wall_start,
+                    "wall_minus_mono_first": wall_start - mono_start,
+                    "wall_drift": wall_drift,
+                    "asked_at": asked_at,
+                    "running_at": running,
+                    "finished_at": finished,
+                    "stream_end_at": stream_end,
+                    "question_statuses": statuses,
+                    "arrivals": [
+                        [a.received, a.delay, a.delay_mono, a.spoken_wall] for a in arrivals
+                    ],
+                    "arrival_columns": ["received_mono", "delay_wall", "delay_mono", "spoken_wall"],
+                }
+            )
+        )
+
+    if args.no_question or asked_at is None:
+        say(f"字幕の遅れ（質問なし）: {summarize_both(arrivals)}")
+        return
+
     final = next((s for _, s in statuses if s in ("succeeded", "failed")), "未完了")
     say(f"質問の作成ジョブ: 最終の状況 {final}")
     if running is not None:
         say(f"  依頼から作成中まで: {running - asked_at:.1f} 秒")
     if finished is not None:
         say(f"  依頼から完了まで（起動を含む）: {finished - asked_at:.1f} 秒")
-    before = [a.delay for a in arrivals if a.received < asked_at]
-    say(f"字幕の遅れ（依頼の前）: {summarize(before)}")
+    before = [a for a in arrivals if a.received < asked_at]
+    say(f"字幕の遅れ（依頼の前）: {summarize_both(before)}")
     if finished is not None:
-        during = [a.delay for a in arrivals if asked_at <= a.received <= finished]
+        during = [a for a in arrivals if asked_at <= a.received <= finished]
         after = [a for a in arrivals if a.received > finished]
-        say(f"字幕の遅れ（依頼から完了まで）: {summarize(during)}")
-        say(f"字幕の遅れ（完了のあと）: {summarize([a.delay for a in after])}")
-        recovered = next((a for a in after if a.delay <= DELAY_TARGET_SECONDS), None)
-        over = [a for a in arrivals if a.received >= asked_at and a.delay > DELAY_TARGET_SECONDS]
+        say(f"字幕の遅れ（依頼から完了まで）: {summarize_both(during)}")
+        say(f"字幕の遅れ（完了のあと）: {summarize_both(after)}")
+        over = [
+            a for a in arrivals if a.received >= asked_at and a.delay_mono > DELAY_TARGET_SECONDS
+        ]
+        converted = recovery_seconds(after, finished, converted=True)
+        raw = recovery_seconds(after, finished, converted=False)
         say(
-            f"  遅れが {DELAY_TARGET_SECONDS:.0f} 秒を超えた字幕: {len(over)} 件"
-            + (
-                f"。完了から、10 秒以内の字幕が届くまで {recovered.received - finished:.1f} 秒"
-                if recovered is not None
-                else "。完了のあと、10 秒以内に戻った字幕は無い"
-            )
+            f"  遅れが {DELAY_TARGET_SECONDS:.0f} 秒を超えた字幕: {len(over)} 件。完了から、"
+            "10 秒以内の字幕が届くまで "
+            + ("（換算した値）なし" if converted is None else f"{converted:.1f} 秒（換算した値）")
+            + "、"
+            + ("なし" if raw is None else f"{raw:.1f} 秒")
+            + "（壁時計の差のまま）"
         )
-    say("遅れの推移（依頼の前後 60 秒。5 秒ごとの最大）:")
-    for second in range(-60, 180, 5):
-        window = [a.delay for a in arrivals if second <= a.received - asked_at < second + 5]
+    say("遅れの推移（依頼の前後。5 秒ごとの最大。左が換算した値、右が壁時計の差のまま）:")
+    for second in range(-60, 360, 5):
+        window = [a for a in arrivals if second <= a.received - asked_at < second + 5]
         if window:
-            say(f"  {second:+4d} 秒: {max(window):5.1f} 秒")
+            say(
+                f"  {second:+4d} 秒: {max(a.delay_mono for a in window):5.1f} 秒"
+                f"  {max(a.delay for a in window):5.1f} 秒"
+            )
 
 
 if __name__ == "__main__":
