@@ -30,7 +30,8 @@ cutoff_before_end_seconds = 600
 
 # 通訳ワーカーに割り当てる CPU のスレッド数。会議中は字幕の処理を優先するため、
 # 会議中の生成ワーカー（generation_cpu_threads_during_meeting）より多くする。
-# 動かす PC は 8 スレッド。会議中に質問を作っても、合わせて 8 に収まる。
+# 動かす PC は 8 スレッド（物理 4 コア）。会議中に質問を作ると、合わせて 10 スレッドになり、
+# 8 を超える。超えた分は、生成ワーカーの nice 値（generation_nice_during_meeting）で字幕の処理へ譲る。
 interpreter_cpu_threads = 6
 
 # 声のあと、この秒数だけ無音が続いたら、発話の区切りを確定する（秒）。
@@ -102,15 +103,20 @@ generation_start_timeout_seconds = 300.0
 # 動かす PC は 8 スレッド。会議をしていないときは、全部を使う。
 generation_cpu_threads_normal = 8
 # 会議中は、字幕の処理を優先するため、割り当てを減らす（通常以下にすること）。
-generation_cpu_threads_during_meeting = 2
+# 4 にした理由: 通訳ワーカーと同時に質問を作る測定（2026-11-13、結果は docs/jobs.md）で、
+# 質問の作成が 3 分以内に収まったのは 4 スレッドだけだった（1・2 スレッドは 3 分を超えた）。
+# 字幕の遅れも、PC の状態が良いときは 4 スレッドが最も小さかった。割り当てを減らすと、作成が
+# 長引き、字幕を邪魔する時間も延びる。ただし、PC の状態が悪いときは、4 スレッドでも字幕の遅れが戻らなかった
+# （2026-11-12 の測定）。スレッド数で字幕を守り切れるわけではない。
+generation_cpu_threads_during_meeting = 4
 
 # 生成ワーカーの処理の優先度（nice 値。0 から 19。大きいほど、ほかの処理に CPU を譲る）。
 # 会議をしていないときは、譲らない。会議中は、字幕の処理（通訳ワーカー）に譲る。
 # 会議中の値は通常以上にすること。
-# 会議中の質問の作成を 1 回測った（2026-11-12、測定道具は backend/test/measure/
-# measure_question_during_meeting.py）。会議中の割り当て（スレッド 2・nice 10）のままで、
-# 質問の作成中に字幕の遅れが目標（10 秒）を超え、完了のあとも戻りに時間がかかった。
-# 値は仮置きのまま。見直しは確認事項 13 で行う（結果は docs/jobs.md）。
+# 会議中の質問の作成を、スレッド数を変えて測った（2026-11-13、測定道具は backend/test/measure/
+# measure_question_during_meeting.py）。nice 値は 10 のまま測り、変えていない。
+# 質問の作成中は、字幕の遅れが目標（10 秒）を超える。戻るまでの時間は確認事項 13 で見直す。
+# 値は仮置きのまま（結果は docs/jobs.md）。
 generation_nice_normal = 0
 generation_nice_during_meeting = 10
 
