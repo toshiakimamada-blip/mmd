@@ -77,7 +77,7 @@ llama.cpp は、UNIX ドメイン以外のソケットも 32 ビットの呼び�
 | 調整値（`config/tuning.toml`） | 既定（仮置き） | 意味 |
 |---|---|---|
 | `generation_cpu_threads_normal` | 8 | 通常のスレッド数 |
-| `generation_cpu_threads_during_meeting` | 2 | 会議中のスレッド数（通常以下） |
+| `generation_cpu_threads_during_meeting` | 4 | 会議中のスレッド数（通常以下）。通訳ワーカーと同時に測った結果で決めた（[jobs.md](jobs.md) の「会議中に質問を作ったときの測定」） |
 | `generation_nice_normal` | 0 | 通常の優先度（nice 値） |
 | `generation_nice_during_meeting` | 10 | 会議中の優先度（通常以上。大きいほど CPU を譲る） |
 
