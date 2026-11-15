@@ -4,6 +4,7 @@ import { RouterProvider } from 'react-router/dom';
 
 import { createAppRouter } from './router';
 import './styles/frame.css';
+import './styles/list.css';
 import './styles/live.css';
 import './styles/notices.css';
 import './styles/prepare.css';

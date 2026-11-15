@@ -5,8 +5,9 @@
  * 質問を作るボタンを押せるか・削除を押せるかを返す。画面の部品は、この結果を表示するだけにする。
  * 表のすべての行は、test/records/recordView.test.ts が確かめる。
  *
- * 暫定版では、質問を作るボタンと削除のボタンを画面に置かない（質問の作成と記録の削除は後続の作業）。
- * 決める関数は、表のとおりに答える。ボタンを足すときに、出し分けを作り直さないため。
+ * 暫定版では、質問を作るボタンと削除のボタンを「会議の記録」の画面に置かない（質問の作成と記録の削除は
+ * 後続の作業）。決める関数は、表のとおりに答える。ボタンを足すときに、出し分けを作り直さないため。
+ * 「会議の一覧」の削除のボタンも、同じ判定（isDeletable）を使う。
  */
 
 import { type MeetingStatus, type RecordJob } from './recordTypes';
@@ -51,6 +52,20 @@ export interface RecordViewInput {
   readonly jobs: readonly RecordJob[];
 }
 
+/**
+ * 記録の削除を押せるかを決める（F-11 の事前条件）。「会議の一覧」と「会議の記録」が同じ判定を使う。
+ *
+ * - 通訳中と要約作成中は押せない
+ * - そのほかの状態（中断・完了・要約失敗）でも、待機中か作成中の作成ジョブが残っている間は押せない
+ *   （質問の作成中は、会議の状態が変わらないため、状態だけでは決められない）
+ *
+ * @param status 会議の状態
+ * @param hasActiveJob 待機中か作成中の作成ジョブがあるか
+ */
+export function isDeletable(status: MeetingStatus, hasActiveJob: boolean): boolean {
+  return status !== 'interpreting' && status !== 'summarizing' && !hasActiveJob;
+}
+
 /** 待機中か作成中か（まだ終わっていない作成ジョブか）。 */
 export function isActiveJob(job: RecordJob): boolean {
   return job.status === 'queued' || job.status === 'running';
@@ -71,7 +86,7 @@ export function decideRecordView(input: RecordViewInput): RecordView {
   const active = jobs.filter(isActiveJob);
   const questionCreatable =
     subtitleCount >= 1 && !active.some((job) => job.jobType === 'questions');
-  const deletable = status !== 'interpreting' && status !== 'summarizing' && active.length === 0;
+  const deletable = isDeletable(status, active.length > 0);
 
   switch (status) {
     case 'interpreting':

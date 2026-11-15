@@ -76,6 +76,10 @@ function stubApi(options: ApiOptions = {}) {
     if (path === '/api/meetings/abc123/subtitles') {
       return Promise.resolve(jsonResponse({ subtitles: [] }));
     }
+    // 「取りやめる」などで「会議の一覧」へ移ると、一覧の取得が走る（会議が 0 件の応答を返す）
+    if (path === '/api/meetings' && method === 'GET') {
+      return Promise.resolve(jsonResponse({ meetings: [] }));
+    }
     return Promise.reject(new Error(`想定していない呼び出し: ${method} ${path}`));
   });
   vi.stubGlobal('fetch', fetchMock);
