@@ -2,6 +2,9 @@
 
 - POST /api/meetings
     会議を開始する（201）。会議を作り、通訳ワーカーの起動を始める
+- GET /api/meetings
+    会議の一覧を返す（200）。すべての会議を、開始日時の新しい順に 1 回の応答で返す。行の項目は、
+    会議番号・タイトル・開始日時・終了日時・状態・作成ジョブの有無。字幕の件数と本文は含めない
 - POST /api/meetings/{会議番号}/end
     会議を終了する（200）。届いている音声を字幕にしてから閉じる
 - GET /api/meetings/{会議番号}
@@ -124,6 +127,55 @@ async def start_meeting(body: StartMeetingRequest, request: Request) -> MeetingR
         title=body.title, audio_source=body.audio_source
     )
     return to_response(meeting)
+
+
+class MeetingListItemResponse(BaseModel):
+    """会議の一覧の 1 行。日時は、UTC のミリ秒までの文字列。会議の長さは保存しないため含めない。"""
+
+    meeting_id: str
+    title: str
+    started_at: str
+    # 終了日時。通訳中は null。
+    ended_at: str | None
+    status: Literal["interpreting", "interrupted", "summarizing", "completed", "summary_failed"]
+    # その会議に、待機中か作成中の作成ジョブ（要約か質問）があるか。画面は、この値を表示せず、
+    # 削除のボタンを押せなくする判定に使う（F-10・F-11）。
+    has_active_job: bool
+
+
+class MeetingListResponse(BaseModel):
+    """会議の一覧。開始日時の新しい順。件数に上限は無い。"""
+
+    meetings: list[MeetingListItemResponse]
+
+
+@router.get("/meetings", response_model=MeetingListResponse)
+async def list_meetings(request: Request) -> MeetingListResponse:
+    """会議の一覧を返す。通訳中の会議も含める。会議が 1 件も無ければ、空の一覧を返す。
+
+    すべての会議を、1 回の応答で返す（件数に上限を置かない。1 行は小さく、字幕と要約は含めない）。
+    作成ジョブの有無は、作成ジョブ管理部がメモリの上で持つ、待機中か作成中のジョブから求める。
+
+    保存した会議を先に読み、そのあとで作成ジョブを読む。会議の記録の取得（get_meeting_record）とは
+    逆の順にしている。一覧が先の読み取りと食い違ったとき、作成ジョブがあるのに「無し」と答えると、
+    削除を押せてしまう（質問の作成は会議の状態を変えない）。この順なら、食い違いは「会議の状態が
+    少し古い」だけで済み、状態の変更の通知（meeting.state_changed）で読み直して直る。
+    """
+    meetings = await _manager(request).list_meetings()
+    busy = {job.meeting_id for job in _job_manager(request).active_jobs()}
+    return MeetingListResponse(
+        meetings=[
+            MeetingListItemResponse(
+                meeting_id=meeting.meeting_id,
+                title=meeting.title,
+                started_at=format_timestamp(meeting.started_at),
+                ended_at=None if meeting.ended_at is None else format_timestamp(meeting.ended_at),
+                status=meeting.status.value,
+                has_active_job=meeting.meeting_id in busy,
+            )
+            for meeting in meetings
+        ]
+    )
 
 
 @router.post("/meetings/{meeting_id}/end", response_model=MeetingResponse)
