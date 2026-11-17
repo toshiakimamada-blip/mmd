@@ -42,18 +42,28 @@ class QuestionRequest:
 class QuestionRequests:
     """質問の作成の依頼を受け付ける。イベントループの上で使う。"""
 
-    def __init__(self, *, store: RecordStore, jobs: JobManager, max_chars: int) -> None:
+    def __init__(
+        self,
+        *,
+        store: RecordStore,
+        jobs: JobManager,
+        max_chars: int,
+        request_lock: asyncio.Lock | None = None,
+    ) -> None:
         """
         Args:
             store: 記録保存部。
             jobs: 作成ジョブ管理部。
             max_chars: 文章生成モデルへ一度に渡す量の上限（調整値 generation_input_max_chars）。
+            request_lock: 依頼を 1 つずつ処理する鍵。本番は、要約の依頼と記録の削除と同じ鍵を
+                渡す（会議を読んでからジョブを登録するまでの間に、削除が割り込まないため）。
+                省略すると、この部だけの鍵を作る。
         """
         self._store = store
         self._jobs = jobs
         self._max_chars = max_chars
         # 依頼を 1 つずつ処理する。同時に届いた依頼が、重複の確認から登録の間に割り込まないため。
-        self._lock = asyncio.Lock()
+        self._lock = request_lock if request_lock is not None else asyncio.Lock()
 
     async def request(self, meeting_id: str) -> QuestionRequest:
         """質問を作る依頼を受け付ける。

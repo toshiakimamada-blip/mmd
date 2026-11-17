@@ -72,6 +72,7 @@ class MeetingManager:
         on_meeting_started: Callable[[str], None] | None = None,
         on_interpreter_stopped: Callable[[str], None] | None = None,
         has_active_job: Callable[[str], bool] | None = None,
+        request_lock: asyncio.Lock | None = None,
         shutdown_wait_seconds: float = SHUTDOWN_WAIT_SECONDS,
     ) -> None:
         """
@@ -93,6 +94,9 @@ class MeetingManager:
             has_active_job: 会議番号を渡し、その会議に待機中か作成中の作成ジョブがあるかを返す。
                 記録の削除の条件に使う。本番は、作成ジョブ管理部の active_jobs につなぐ。
                 省略すると、作成ジョブは無いものとして扱う（テスト用）。
+            request_lock: 作成の依頼（要約・質問）を 1 つずつ処理する鍵。記録の削除は、この鍵の
+                中で条件を確かめて削除する。本番は、SummaryRequests と QuestionRequests と同じ鍵を
+                渡す。省略すると、この部だけの鍵を作る（テスト用）。
             shutdown_wait_seconds: アプリの停止のとき、進行中の会議を閉じるのを待つ秒数。
         """
         self._store = store
@@ -105,6 +109,8 @@ class MeetingManager:
         self._on_meeting_started = on_meeting_started
         self._on_interpreter_stopped = on_interpreter_stopped
         self._has_active_job = has_active_job or _no_active_job
+        # 記録の削除と作成の依頼を、1 つずつにする鍵（作成の依頼の部と共有する）。
+        self._request_lock = request_lock if request_lock is not None else asyncio.Lock()
         self._shutdown_wait_seconds = shutdown_wait_seconds
         # 進行中の枠。会議を作る前から埋めて、同時に届いた 2 件目の開始を断る。
         self._occupied = False
@@ -334,8 +340,15 @@ class MeetingManager:
         3. 作成ジョブ管理部に問い合わせ、その会議の作成ジョブが残っていないこと
            （待機中か作成中のジョブがあれば断る）
 
-        作成ジョブの有無は、状態のあとに確かめる。要約の依頼が状態を変えてからジョブを登録するまでの
-        間（同じ手順の中で、待ちは挟まない）に、見落とさないため。
+        状態の読み取りから削除の確定までを、作成の依頼（要約・質問）と共有する鍵の中で行う。
+        依頼も、会議を読んでから作成ジョブを登録するまでを、同じ鍵の中で行う。そのため、同じ会議への
+        依頼と削除は割り込み合わず、先に鍵を取ったほうが終わってから、もう一方が動く。
+        - 依頼が先: 削除は、登録された作成ジョブを見て断る（MEETING_HAS_ACTIVE_JOB）。要約の依頼の
+          あとは、状態が要約作成中になっているため、状態の条件で断る（MEETING_DELETE_NOT_ALLOWED）
+        - 削除が先: 依頼は、会議が無いため断られる（MEETING_NOT_FOUND）
+
+        要約の結果の保存（状態を完了にする）は、この鍵を取らない。保存してから作成ジョブ管理部が
+        ジョブを終えるまでの間は、状態が完了でも作成ジョブが残るため、3 で断る。
 
         Args:
             meeting_id: 削除する会議。
@@ -348,16 +361,18 @@ class MeetingManager:
                 作成ジョブが残っている（MEETING_HAS_ACTIVE_JOB）。
             RecordError: 記録を削除できなかったとき（RECORD_DELETE_FAILED）。
         """
-        meeting = await self._store.get_meeting(meeting_id)
-        if meeting is None:
-            return None
-        if not allows(meeting.status, Trigger.DELETE):
-            raise meeting_delete_not_allowed(meeting_id)
-        if self._has_active_job(meeting_id):
-            raise meeting_has_active_job(meeting_id)
-        counts = await self._store.delete_meeting(meeting_id)
+        async with self._request_lock:
+            meeting = await self._store.get_meeting(meeting_id)
+            if meeting is None:
+                return None
+            if not allows(meeting.status, Trigger.DELETE):
+                raise meeting_delete_not_allowed(meeting_id)
+            if self._has_active_job(meeting_id):
+                raise meeting_has_active_job(meeting_id)
+            counts = await self._store.delete_meeting(meeting_id)
         if counts.meetings == 0:
-            # 同時に届いた 2 回目の削除が、1 回目に先を越された。成功として扱う。
+            # 読んでから削除するまでの間に、会議が消えていた。成功として扱う（削除は鍵の中で
+            # 1 つずつ行うため、同時に届いた 2 回目の削除は、1 で成功になる）。
             return None
         # 会議番号と件数だけを出す（タイトルと字幕などの本文は出さない）。
         log_processing("record_deleted", meeting_id=meeting_id, item_count=counts.total)

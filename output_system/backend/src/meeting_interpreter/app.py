@@ -10,6 +10,7 @@
 - それ以外: 画面のファイル（配信部）
 """
 
+import asyncio
 from collections.abc import AsyncIterator, Awaitable, Callable
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -255,6 +256,10 @@ def create_app(
         policy=job_policy or JobPolicy.from_tuning(settings.tuning),
         outcomes=job_outcomes or JobOutcomes(summary_outcomes, question_outcomes),
     )
+    # 作成の依頼（要約・質問）と記録の削除を、1 つずつ処理する鍵。3 つの部で共有する。
+    # 依頼が会議を読んでから作成ジョブを登録するまでの間に、同じ会議の削除が割り込まないため
+    # （逆に、削除が条件を確かめてから削除を確定するまでの間に、依頼も割り込まない）。
+    request_lock = asyncio.Lock()
     # 要約の作成の依頼。利用者の操作（POST /api/meetings/{会議番号}/summary）と、会議の終了の
     # 直後の自動の作成が使う。
     app.state.summary_requests = SummaryRequests(
@@ -263,12 +268,14 @@ def create_app(
         publisher=notification_hub,
         outcomes=summary_outcomes,
         max_chars=settings.tuning.generation_input_max_chars,
+        request_lock=request_lock,
     )
     # 質問の作成の依頼。利用者の操作（POST /api/meetings/{会議番号}/question-sets）が使う。
     app.state.question_requests = QuestionRequests(
         store=record_store,
         jobs=app.state.job_manager,
         max_chars=settings.tuning.generation_input_max_chars,
+        request_lock=request_lock,
     )
     app.state.meeting_manager = MeetingManager(
         store=record_store,
@@ -283,6 +290,8 @@ def create_app(
         on_interpreter_stopped=app.state.job_manager.interpreter_stopped,
         # 記録の削除の条件。待機中か作成中の作成ジョブが残る会議は、削除しない。
         has_active_job=lambda meeting_id: bool(app.state.job_manager.active_jobs(meeting_id)),
+        # 記録の削除は、作成の依頼と同じ鍵の中で、条件を確かめて削除する。
+        request_lock=request_lock,
     )
 
     register_exception_handlers(app)

@@ -10,19 +10,27 @@ Task 6.2.1 の完了条件
 - 通訳中・要約作成中は MEETING_DELETE_NOT_ALLOWED、作成ジョブが残っていれば MEETING_HAS_ACTIVE_JOB
   （どちらも業務エラー。何も削除しない）
 - 会議がすでに無いときは、遷移規則より先に、成功として扱う（2 回目の要求も同じ）
+- 削除と作成の依頼（要約・質問）は、1 つの鍵で 1 つずつ動く。先に鍵を取ったほうが終わってから、
+  もう一方が動く（依頼が先なら削除を断り、削除が先なら依頼が MEETING_NOT_FOUND になる）
 """
 
+import asyncio
 import json
 import sqlite3
-from collections.abc import Iterator
+import threading
+from collections.abc import Awaitable, Callable, Iterator
+from contextlib import contextmanager
 from datetime import UTC, datetime
 
 import pytest
 from fastapi.testclient import TestClient
 
 from conftest import local_client
-from job_fakes import InProcessLauncher, RecordingOutcomes
+from generation_fakes import ScriptedGenerator
+from job_fakes import InProcessLauncher, RecordingOutcomes, wait_until
 from meeting_interpreter.app import create_app
+from meeting_interpreter.errors import BusinessAppError
+from meeting_interpreter.jobs.models import JobKind, JobSnapshot, JobStatus
 from meeting_interpreter.logs import configure_logging
 from meeting_interpreter.records.models import AudioSource, MeetingStatus
 from meeting_interpreter.records.store import RecordStore
@@ -46,7 +54,23 @@ class SpyManager:
         return None
 
 
-def _build(settings: Settings, launcher: InProcessLauncher) -> Iterator[TestClient]:
+class HeldGeneration:
+    """偽の文章生成の応答。文章を作り始めたら、release が立つまで、そこで待つ。
+
+    作成ジョブを、作成中（running）のまま残すために使う。
+    """
+
+    def __init__(self) -> None:
+        self.release = threading.Event()
+
+    def __call__(self, request, nth: int) -> str:
+        self.release.wait(timeout=10)
+        return ScriptedGenerator._default(request, nth)
+
+
+@contextmanager
+def _started(settings: Settings, launcher: InProcessLauncher) -> Iterator[TestClient]:
+    """アプリを組み立てて起動する。抜けるときに止める。"""
     app = create_app(
         settings,
         model_manager=SpyManager(),  # type: ignore[arg-type]
@@ -60,13 +84,27 @@ def _build(settings: Settings, launcher: InProcessLauncher) -> Iterator[TestClie
 @pytest.fixture
 def api(settings: Settings) -> Iterator[TestClient]:
     """起動したアプリ。作成ジョブは、起動に時間がかかる偽の生成ワーカーで、終わらないまま残る。"""
-    yield from _build(settings, InProcessLauncher(start_delay=2.0))
+    with _started(settings, InProcessLauncher(start_delay=2.0)) as test_client:
+        yield test_client
 
 
 @pytest.fixture
 def quick_api(settings: Settings) -> Iterator[TestClient]:
     """起動したアプリ。作成ジョブは、すぐ終わる。"""
-    yield from _build(settings, InProcessLauncher())
+    with _started(settings, InProcessLauncher()) as test_client:
+        yield test_client
+
+
+@pytest.fixture
+def held_api(settings: Settings) -> Iterator[TestClient]:
+    """起動したアプリ。作成ジョブは、生成ワーカーが文章を作り始めたところで止まり、作成中のまま残る。"""
+    held = HeldGeneration()
+    with _started(settings, InProcessLauncher(held)) as test_client:
+        try:
+            yield test_client
+        finally:
+            # 止めた文章の生成を放してから、アプリを止める（生成ワーカーの停止を待たせないため）。
+            held.release.set()
 
 
 def _make_meeting(
@@ -109,6 +147,31 @@ def _failure_reason(status: MeetingStatus) -> str | None:
 def _exists(api: TestClient, meeting_id: str) -> bool:
     """会議が、記録データベースに残っているか。"""
     return api.get(f"/api/meetings/{meeting_id}").status_code == 200
+
+
+def _set_status(
+    api: TestClient, meeting_id: str, status: MeetingStatus, failure_reason: str | None = None
+) -> None:
+    """会議の状態だけを、記録データベースへ直接書く（作成ジョブには触れない）。"""
+    store = RecordStore(api.app.state.record_database)  # type: ignore[attr-defined]
+
+    async def update() -> None:
+        await store.update_meeting(meeting_id, status=status, summary_failure_reason=failure_reason)
+
+    api.portal.call(update)  # type: ignore[union-attr]
+
+
+def _wait_for_running_job(api: TestClient, meeting_id: str) -> None:
+    """会議の作成ジョブが、作成中になるまで待つ。"""
+    job_manager = api.app.state.job_manager  # type: ignore[attr-defined]
+
+    def running() -> bool:
+        return [job.status for job in job_manager.active_jobs(meeting_id)] == [JobStatus.RUNNING]
+
+    async def wait() -> None:
+        await wait_until(running, description="作成ジョブの開始")
+
+    api.portal.call(wait)  # type: ignore[union-attr]
 
 
 class TestDeleteAllowed:
@@ -212,6 +275,54 @@ class TestDeleteRejected:
         assert len(record["subtitles"]) == 2
         assert [job["job_type"] for job in record["jobs"]] == ["questions"]
 
+    def test_should_reject_a_meeting_whose_job_is_running(self, held_api):
+        """
+        【テスト対象】DELETE /api/meetings/{会議番号}（作成ジョブの条件。作成中）
+        【テスト内容】完了の会議で質問の作成を頼み、生成ワーカーが質問を作っている途中（作成中）で
+                    止めたまま削除する
+        【期待結果】業務エラー MEETING_HAS_ACTIVE_JOB（409）。会議と字幕は残り、作成ジョブは作成中の
+                    まま残る
+        """
+        api = held_api
+        meeting_id = _make_meeting(api, MeetingStatus.COMPLETED)
+        assert api.post(f"/api/meetings/{meeting_id}/question-sets").status_code == 202
+        _wait_for_running_job(api, meeting_id)
+
+        response = api.delete(f"/api/meetings/{meeting_id}")
+
+        assert response.status_code == 409
+        assert response.json()["code"] == "MEETING_HAS_ACTIVE_JOB"
+        record = api.get(f"/api/meetings/{meeting_id}").json()
+        assert len(record["subtitles"]) == 2
+        assert [(job["job_type"], job["status"]) for job in record["jobs"]] == [
+            ("questions", "running")
+        ]
+
+    @pytest.mark.parametrize("status", [MeetingStatus.COMPLETED, MeetingStatus.SUMMARY_FAILED])
+    def test_should_reject_a_meeting_that_still_has_a_summary_job(self, held_api, status):
+        """
+        【テスト対象】DELETE /api/meetings/{会議番号}（作成ジョブの条件。要約）
+        【テスト内容】中断の会議で要約の作成を頼み、作成中のまま、会議の状態だけを完了・要約失敗に
+                    書き換えて削除する（要約の結果を保存して状態が変わってから、作成ジョブ管理部が
+                    ジョブを終えるまでの間を真似る）
+        【期待結果】業務エラー MEETING_HAS_ACTIVE_JOB（409）。会議と字幕は残り、要約の作成ジョブも
+                    残る
+        """
+        api = held_api
+        meeting_id = _make_meeting(api, MeetingStatus.INTERRUPTED)
+        assert api.post(f"/api/meetings/{meeting_id}/summary").status_code == 202
+        _wait_for_running_job(api, meeting_id)
+        _set_status(api, meeting_id, status, _failure_reason(status))
+
+        response = api.delete(f"/api/meetings/{meeting_id}")
+
+        assert response.status_code == 409
+        assert response.json()["code"] == "MEETING_HAS_ACTIVE_JOB"
+        record = api.get(f"/api/meetings/{meeting_id}").json()
+        assert record["meeting"]["status"] == status.value
+        assert len(record["subtitles"]) == 2
+        assert [job["job_type"] for job in record["jobs"]] == ["summary"]
+
     def test_should_not_ask_the_record_store_when_a_condition_is_not_met(self, api, monkeypatch):
         """
         【テスト対象】DELETE /api/meetings/{会議番号}（条件を確かめるのは会議管理部）
@@ -260,6 +371,155 @@ class TestDeleteRejected:
         response = api.delete("/api/meetings/not.a.valid.id")
 
         assert response.status_code == 422
+
+
+def _pause_once(monkeypatch: pytest.MonkeyPatch, name: str) -> tuple[asyncio.Event, asyncio.Event]:
+    """記録保存部の関数 name を、最初の 1 回だけ、本物を呼ぶ前で止める。
+
+    Returns:
+        止まったら立つ印と、立てると本物を呼んで先へ進む印。
+    """
+    reached = asyncio.Event()
+    release = asyncio.Event()
+    original = getattr(RecordStore, name)
+
+    async def paused(self, *args, **kwargs):
+        if not reached.is_set():
+            reached.set()
+            await release.wait()
+        return await original(self, *args, **kwargs)
+
+    monkeypatch.setattr(RecordStore, name, paused)
+    return reached, release
+
+
+def _record_reads(monkeypatch: pytest.MonkeyPatch) -> list[str]:
+    """記録保存部の会議の読み出し（get_meeting）を、呼ばれた順に残す。呼ばれた時点で残す。"""
+    reads: list[str] = []
+    original = RecordStore.get_meeting
+
+    async def recording(self, meeting_id):
+        reads.append(meeting_id)
+        return await original(self, meeting_id)
+
+    monkeypatch.setattr(RecordStore, "get_meeting", recording)
+    return reads
+
+
+async def _request_job(api: TestClient, kind: JobKind, meeting_id: str) -> JobSnapshot:
+    """作成の依頼（要約か質問）を、依頼の部へ直接出し、受け付けた作成ジョブを返す。"""
+    state = api.app.state  # type: ignore[attr-defined]
+    if kind is JobKind.SUMMARY:
+        return (await state.summary_requests.request(meeting_id)).job
+    return (await state.question_requests.request(meeting_id)).job
+
+
+async def _start_and_wait_for_first_step[T](work: Callable[[], Awaitable[T]]) -> asyncio.Task[T]:
+    """work をタスクとして始め、最初に待つ所（鍵か、記録データベース）まで進んでから返す。
+
+    タスクが印を立てると、この関数の再開が予約される。再開は、タスクが最初に待つ所で止まってから
+    になる（イベントループは、予約した順に動かす）。
+    """
+    started = asyncio.Event()
+
+    async def run() -> T:
+        started.set()
+        return await work()
+
+    task = asyncio.create_task(run())
+    await started.wait()
+    return task
+
+
+class TestDeleteAndRequestRace:
+    """削除と作成の依頼の競合。1 つの鍵で、先に鍵を取ったほうが終わってから、もう一方が動く。
+
+    順序は、記録保存部の関数を途中で止める印で決める（時間の待ちに頼らない）。
+    """
+
+    @pytest.mark.parametrize(
+        ("kind", "code"),
+        [
+            (JobKind.QUESTIONS, "MEETING_HAS_ACTIVE_JOB"),
+            (JobKind.SUMMARY, "MEETING_DELETE_NOT_ALLOWED"),
+        ],
+    )
+    def test_should_run_the_delete_after_the_request_that_holds_the_lock(
+        self, held_api, monkeypatch, kind, code
+    ):
+        """
+        【テスト対象】MeetingManager.delete_meeting と、作成の依頼（共有の鍵。依頼が先）
+        【テスト内容】完了の会議で、作成の依頼（質問・要約）が鍵を取って字幕を読んでいる途中で止める。
+                    その間に、同じ会議の削除を始め、削除が最初に待つ所まで進んでから、依頼を進める
+        【期待結果】依頼が鍵を放すまで、削除は会議を読まない。依頼は作成ジョブを登録する。削除は
+                    そのあとで断られる（質問は作成ジョブが残るため MEETING_HAS_ACTIVE_JOB、要約は
+                    状態が要約作成中のため MEETING_DELETE_NOT_ALLOWED）。会議は残る
+        """
+        api = held_api
+        meeting_id = _make_meeting(api, MeetingStatus.COMPLETED)
+        manager = api.app.state.meeting_manager  # type: ignore[attr-defined]
+        reading, resume = _pause_once(monkeypatch, "list_subtitles")
+        reads = _record_reads(monkeypatch)
+
+        async def scenario():
+            request = asyncio.create_task(_request_job(api, kind, meeting_id))
+            await reading.wait()
+            reads_before = len(reads)
+            deletion = await _start_and_wait_for_first_step(
+                lambda: manager.delete_meeting(meeting_id)
+            )
+            reads_while_held = reads[reads_before:]
+            resume.set()
+            job = await request
+            with pytest.raises(BusinessAppError) as caught:
+                await deletion
+            return reads_while_held, job, caught.value
+
+        reads_while_held, job, error = api.portal.call(scenario)  # type: ignore[union-attr]
+
+        assert reads_while_held == []
+        assert job.kind is kind
+        assert error.body.code == code
+        assert _exists(api, meeting_id)
+
+    @pytest.mark.parametrize("kind", [JobKind.QUESTIONS, JobKind.SUMMARY])
+    def test_should_answer_not_found_to_the_request_that_waited_for_the_delete(
+        self, held_api, monkeypatch, kind
+    ):
+        """
+        【テスト対象】MeetingManager.delete_meeting と、作成の依頼（共有の鍵。削除が先）
+        【テスト内容】完了の会議の削除が鍵を取り、記録保存部へ削除を頼む所で止める。その間に、同じ
+                    会議の作成の依頼（質問・要約）を始め、依頼が最初に待つ所まで進んでから、削除を進める
+        【期待結果】削除が鍵を放すまで、依頼は会議を読まない。削除は成功し、依頼は業務エラー
+                    MEETING_NOT_FOUND になる。作成ジョブは登録されない
+        """
+        api = held_api
+        meeting_id = _make_meeting(api, MeetingStatus.COMPLETED)
+        state = api.app.state  # type: ignore[attr-defined]
+        deleting, resume = _pause_once(monkeypatch, "delete_meeting")
+        reads = _record_reads(monkeypatch)
+
+        async def scenario():
+            deletion = asyncio.create_task(state.meeting_manager.delete_meeting(meeting_id))
+            await deleting.wait()
+            reads_before = len(reads)
+            request = await _start_and_wait_for_first_step(
+                lambda: _request_job(api, kind, meeting_id)
+            )
+            reads_while_held = reads[reads_before:]
+            resume.set()
+            counts = await deletion
+            with pytest.raises(BusinessAppError) as caught:
+                await request
+            return reads_while_held, counts, caught.value, state.job_manager.active_jobs()
+
+        reads_while_held, counts, error, jobs = api.portal.call(scenario)  # type: ignore[union-attr]
+
+        assert reads_while_held == []
+        assert counts is not None and counts.meetings == 1
+        assert error.body.code == "MEETING_NOT_FOUND"
+        assert jobs == []
+        assert not _exists(api, meeting_id)
 
 
 class TestDeleteIsIdempotent:
