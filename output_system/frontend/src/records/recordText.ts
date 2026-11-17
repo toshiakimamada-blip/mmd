@@ -33,6 +33,21 @@ export const NOT_APPLICABLE_TEXT = '該当なし';
 /** 日本語訳が無い字幕・質問に書く言葉。 */
 export const NO_TRANSLATION_TEXT = '（訳なし）';
 
+/** 質問を作成した時点の表示名（データモデル設計書の区分コード）。画面の質問のまとまりと同じ。 */
+export const QUESTION_PHASE_LABELS: Readonly<Record<RecordQuestionSet['createdPhase'], string>> = {
+  during_meeting: '会議中',
+  after_meeting: '会議後',
+};
+
+/** 要約が無いときの文（画面の要約の領域と同じ言葉。Markdown の取り出しも使う）。 */
+export const NO_SUMMARY_TEXT = '要約はまだありません。';
+
+/** 質問のまとまりが無いときの文（画面の質問の領域と同じ言葉。Markdown の取り出しも使う）。 */
+export const NO_QUESTIONS_TEXT = '質問はまだありません。';
+
+/** 字幕が無いときの文（画面の字幕の領域と同じ言葉。Markdown の取り出しも使う）。 */
+export const NO_SUBTITLES_TEXT = '字幕はありません。';
+
 /** 箇条書きの先頭に付ける印。 */
 const BULLET = '・';
 

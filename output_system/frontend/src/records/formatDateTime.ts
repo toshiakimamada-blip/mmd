@@ -6,6 +6,7 @@
  */
 
 import { formatElapsed } from '../meetings/formatElapsed';
+import { type RecordMeeting } from './recordTypes';
 
 // 「年/月/日 時:分」（24 時間表記）。hourCycle: 'h23' は、0 時を「24:00」ではなく「00:00」にする。
 const OPTIONS: Intl.DateTimeFormatOptions = {
@@ -41,4 +42,19 @@ export function formatDateTimeToMinute(date: Date, timeZone?: string): string {
  */
 export function formatDuration(startedAt: Date, endedAt: Date): string {
   return formatElapsed(endedAt.getTime() - startedAt.getTime());
+}
+
+/**
+ * 「会議の記録」が表示する会議の長さ。画面の見出しの領域と、Markdown の取り出しが、同じ条件で使う。
+ *
+ * 通訳中の会議と、終了日時が無い会議では、表示しない（会議の長さは、終了日時から求める）。
+ *
+ * @param meeting 会議
+ * @returns 例: 「1:30:15」。表示しないときは null
+ */
+export function formatMeetingDuration(meeting: RecordMeeting): string | null {
+  if (meeting.status === 'interpreting' || meeting.endedAt === null) {
+    return null;
+  }
+  return formatDuration(meeting.startedAt, meeting.endedAt);
 }

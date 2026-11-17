@@ -2,6 +2,7 @@ import { useId } from 'react';
 
 import { QuestionSetList } from '../../components/questions/QuestionSetList';
 import { jobStatusLabel, WAITING_NOTE } from '../../records/jobTexts';
+import { NO_QUESTIONS_TEXT } from '../../records/recordText';
 import { type MeetingRecord } from '../../records/recordTypes';
 import { isActiveJob } from '../../records/recordView';
 
@@ -32,7 +33,7 @@ export function QuestionRegion({ record }: { readonly record: MeetingRecord }) {
       )}
       {record.questionSets.length === 0 ? (
         job === undefined ? (
-          <p>質問はまだありません。</p>
+          <p>{NO_QUESTIONS_TEXT}</p>
         ) : null
       ) : (
         <QuestionSetList sets={record.questionSets} showPhase copyable />

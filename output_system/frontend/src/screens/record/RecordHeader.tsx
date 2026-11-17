@@ -1,7 +1,7 @@
 import { useId } from 'react';
 import { Link } from 'react-router';
 
-import { formatDateTimeToMinute, formatDuration } from '../../records/formatDateTime';
+import { formatDateTimeToMinute, formatMeetingDuration } from '../../records/formatDateTime';
 import { MEETING_STATUS_LABELS, type RecordMeeting } from '../../records/recordTypes';
 import { screenPaths } from '../../routes';
 
@@ -32,6 +32,7 @@ export function RecordHeader({
   readonly onDelete: () => void;
 }) {
   const factsId = useId();
+  const duration = formatMeetingDuration(meeting);
   return (
     <div className="record__header">
       <div className="record__headline">
@@ -63,12 +64,12 @@ export function RecordHeader({
               </time>
             </dd>
           </div>
-          {meeting.status !== 'interpreting' && meeting.endedAt !== null ? (
+          {duration === null ? null : (
             <div className="record__fact">
               <dt>会議の長さ</dt>
-              <dd>{formatDuration(meeting.startedAt, meeting.endedAt)}</dd>
+              <dd>{duration}</dd>
             </div>
-          ) : null}
+          )}
           <div className="record__fact">
             <dt>状態</dt>
             <dd>{MEETING_STATUS_LABELS[meeting.status]}</dd>
