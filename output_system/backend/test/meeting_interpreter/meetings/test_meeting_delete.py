@@ -13,6 +13,7 @@ Task 6.2.1 の完了条件
 """
 
 import json
+import sqlite3
 from collections.abc import Iterator
 from datetime import UTC, datetime
 
@@ -336,3 +337,52 @@ class TestDeleteLog:
         assert "極秘の買収計画" not in output
         assert "Line 1." not in output
         assert "1 行目。" not in output
+
+
+class TestDeleteFailure:
+    """削除に失敗したとき。何も削除せず、エラーを返す（受入条件 5）。"""
+
+    def test_should_return_a_system_error_and_keep_the_record_when_the_delete_fails(
+        self, api, capsys
+    ):
+        """
+        【テスト対象】DELETE /api/meetings/{会議番号}（記録の削除の失敗）
+        【テスト内容】記録データベースの会議の行の削除を断る仕掛けを入れて、完了の会議を削除する。
+                    続けて、仕掛けを外して、もう一度削除する
+        【期待結果】1 回目は、システムエラー RECORD_DELETE_FAILED（500）。会議と字幕は消えず、
+                    記録の削除の処理ログは出ない。エラーログは 1 件で、会議の内容は出ない。
+                    2 回目は成功する（利用者はやり直せる）
+        """
+        configure_logging("info")
+        meeting_id = _make_meeting(api, MeetingStatus.COMPLETED, title="極秘の買収計画")
+        database_path = api.app.state.record_database.path  # type: ignore[attr-defined]
+        blocker = sqlite3.connect(database_path)
+        blocker.execute(
+            "CREATE TRIGGER block_delete BEFORE DELETE ON meetings "
+            "BEGIN SELECT RAISE(ABORT, 'blocked for the test'); END"
+        )
+        blocker.commit()
+        capsys.readouterr()
+
+        response = api.delete(f"/api/meetings/{meeting_id}")
+
+        assert response.status_code == 500
+        assert response.json()["code"] == "RECORD_DELETE_FAILED"
+        assert response.json()["category"] == "system_error"
+        record = api.get(f"/api/meetings/{meeting_id}").json()
+        assert record["meeting"]["title"] == "極秘の買収計画"
+        assert len(record["subtitles"]) == 2
+        output = capsys.readouterr().out
+        lines = [json.loads(line) for line in output.splitlines() if line.startswith("{")]
+        assert _deletion_logs(output) == []
+        assert [line["error_code"] for line in lines if line["log_type"] == "error"] == [
+            "RECORD_DELETE_FAILED"
+        ]
+        assert "極秘の買収計画" not in output + response.text
+        assert "blocked for the test" not in output + response.text
+
+        blocker.execute("DROP TRIGGER block_delete")
+        blocker.commit()
+        blocker.close()
+        assert api.delete(f"/api/meetings/{meeting_id}").status_code == 204
+        assert not _exists(api, meeting_id)

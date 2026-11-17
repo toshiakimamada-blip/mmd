@@ -20,6 +20,9 @@
   `-wal` と `-shm` の取りこぼしを気にせずに作れる。控えは、SQLite のオンラインバックアップ
   （`Connection.backup`）で作る想定で、これはジャーナルの方式によらず一貫した複製になる。
   WAL の利点（読み取りと書き込みの並行）は、接続が 1 つのこのアプリでは使わない。
+- 削除の上書き（`secure_delete`）: 有効。行を削除したとき、その領域を 0 で上書きする。無効だと、
+  削除した字幕・要約・質問の本文が、ファイルの空き領域に残る。記録の削除（F-11）は、会議の内容を
+  PC に残さないための操作のため、環境の既定に任せず、接続ごとに有効にする。
 - 同期: `FULL`。確定のたびにディスクへ書き出す。字幕は、確定してから画面へ送る設計のため、
   画面に出た字幕が電源断のあとも残るようにする。件数は 2 時間の会議で最大約 1,500 件のため、
   遅さは問題にならない。
@@ -55,11 +58,12 @@ _THREAD_NAME_PREFIX: Final = "record-database"
 
 
 def _configure(connection: sqlite3.Connection) -> None:
-    """接続の設定を行う（外部キー・待ち時間・ジャーナル・同期）。
+    """接続の設定を行う（外部キー・待ち時間・ジャーナル・削除の上書き・同期）。
 
     Raises:
         RuntimeError: 設定が効かなかったとき。外部キーが無効のままだと、
-            親の無い子の行を黙って書ける。
+            親の無い子の行を黙って書ける。削除の上書きが無効のままだと、削除した会議の本文が
+            ファイルに残る。
     """
     connection.execute(f"PRAGMA busy_timeout = {int(BUSY_TIMEOUT_MS)}")
     connection.execute("PRAGMA foreign_keys = ON")
@@ -68,6 +72,9 @@ def _configure(connection: sqlite3.Connection) -> None:
     journal_mode = connection.execute("PRAGMA journal_mode = DELETE").fetchone()[0]
     if str(journal_mode).lower() != "delete":
         raise RuntimeError("SQLite のジャーナルを削除の方式にできませんでした")
+    connection.execute("PRAGMA secure_delete = ON")
+    if connection.execute("PRAGMA secure_delete").fetchone()[0] != 1:
+        raise RuntimeError("SQLite の削除の上書きを有効にできませんでした")
     connection.execute("PRAGMA synchronous = FULL")
 
 

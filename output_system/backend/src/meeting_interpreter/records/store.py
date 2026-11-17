@@ -29,7 +29,7 @@
   確定を取り消す（database.py の `run`）。そして、原因によらず `RecordSaveError` にする。
   エラーコードは RECORD_SAVE_FAILED。保存しようとした内容は、例外にも画面へ返す 4 項目にも
   含めない。
-- 書き込みの関数（作成・追加・更新）が `RecordError` で終わるときは、エラーログを 1 件出す。
+- 書き込みの関数（作成・追加・更新・削除）が `RecordError` で終わるときは、エラーログを 1 件出す。
   出す項目は、エラーコード・コンポーネント・会議番号・例外の種類・発生場所だけ。例外の文面と
   会議の内容は出さない。
 - 読み出しの関数（get_meeting・list_subtitles・get_summary・get_record）は、データベースの例外を
@@ -48,8 +48,9 @@ from typing import Final
 
 from ..errors import describe_origin
 from ..logs import log_error
+from .backup import UpdateBackup
 from .database import RecordDatabase
-from .errors import COMPONENT, RecordError, RecordSaveError, RecordValueError
+from .errors import COMPONENT, RecordDeleteError, RecordError, RecordSaveError, RecordValueError
 from .models import (
     AudioSource,
     DeletedCounts,
@@ -267,6 +268,7 @@ class RecordStore:
         *,
         clock: Callable[[], datetime] = utc_now,
         new_meeting_id: Callable[[], str] = _new_meeting_id,
+        update_backup: UpdateBackup | None = None,
     ) -> None:
         """
         Args:
@@ -274,10 +276,13 @@ class RecordStore:
             clock: アプリサーバーの時計。会議の開始日時に使う。
                 テストが、決まった時刻を渡すために使う。
             new_meeting_id: 会議番号の作り方。テストが、決まった番号を渡すために使う。
+            update_backup: 更新前の控え。記録の削除で、記録データベースより先に、控えから会議を
+                消す相手。省略すると、控えは無いものとして、控えの段を飛ばす。
         """
         self._database = database
         self._clock = clock
         self._new_meeting_id = new_meeting_id
+        self._update_backup = update_backup
 
     async def _write[T](
         self, work: Callable[[sqlite3.Connection], T], *, meeting_id: str | None = None
@@ -660,22 +665,43 @@ class RecordStore:
             ),
         )
 
+    @_log_record_errors
     async def delete_meeting(self, meeting_id: str) -> DeletedCounts:
-        """会議の記録を削除する。その会議の質問・質問のまとまり・要約・字幕・会議を、1 回で消す。
+        """会議の記録を削除する。2 回に分けて確定する（横断設計規約「保存の単位と順序」）。
+
+        1 回目: 更新前の控えがある場合だけ、控えから、その会議と、その字幕・要約・質問のまとまり・
+                質問を消す。
+        2 回目: 記録データベースから、その会議の質問・質問のまとまり・要約・字幕・会議を、
+                1 回の確定で消す。
+
+        控えから消せなかったときは、記録データベースを動かさずに失敗にする（消した会議が控えに
+        残らないよう、控えから先に消す）。控えから消せたあとで記録データベースの削除に失敗したときは、
+        記録データベースから 1 件も消さずに失敗にする。控えから消した会議は戻さない。
+        削除は、利用者がやり直せる。
 
         削除してよい条件（会議の状態・作成ジョブの有無）は確かめない。会議管理部が確かめて、
         条件を満たすときだけ呼ぶ。会議が無いときは、何も消さず、すべて 0 件を返す。
+        削除した記録は、元に戻せない。復元の機能は設けない。
 
         Args:
             meeting_id: 削除する会議。
 
         Returns:
-            消した行の数。
+            記録データベースから消した行の数。
+
+        Raises:
+            RecordDeleteError: 控えから消せなかったとき。記録データベースの削除が失敗したとき
+                （原因は `__cause__`）。記録データベースの行は 1 件も消えない。
         """
+        if self._update_backup is not None:
+            try:
+                await self._update_backup.erase_meeting(meeting_id)
+            except Exception as cause:  # noqa: BLE001 (控えの失敗は、種類を問わず削除の失敗にする)
+                raise RecordDeleteError(meeting_id=meeting_id) from cause
 
         def work(connection: sqlite3.Connection) -> DeletedCounts:
             # 子から先に消す。外部キーの連鎖（ON DELETE CASCADE）に任せず、件数を数えるために
-            # 1 つずつ消す。
+            # 1 つずつ消す。どれかが失敗したら、確定が取り消され、消した分も戻る。
             questions = connection.execute(
                 "DELETE FROM questions WHERE meeting_id = ?", (meeting_id,)
             ).rowcount
@@ -699,7 +725,10 @@ class RecordStore:
                 questions=questions,
             )
 
-        return await self._database.run(work, write=True)
+        try:
+            return await self._database.run(work, write=True)
+        except sqlite3.Error as cause:
+            raise RecordDeleteError(meeting_id=meeting_id) from cause
 
     async def get_summary(self, meeting_id: str) -> Summary | None:
         """会議の要約を読み出す。要約がまだ無い、または会議が無いときは None。"""

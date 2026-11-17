@@ -267,6 +267,7 @@ class TestConnectionSettings:
         【テスト対象】RecordDatabase が開く接続
         【テスト内容】接続の PRAGMA を読む
         【期待結果】外部キーが有効（1）、待ち時間が BUSY_TIMEOUT_MS、ジャーナルが削除の方式、
+                    削除した領域を 0 で上書きする設定（secure_delete = 1）、
                     確定のたびにディスクへ書き出す設定（synchronous = FULL = 2）であること
         """
         database = RecordDatabase(tmp_path / "records", migrations=_PARENT_AND_CHILD)
@@ -276,6 +277,7 @@ class TestConnectionSettings:
                 "foreign_keys": connection.execute("PRAGMA foreign_keys").fetchone()[0],
                 "busy_timeout": connection.execute("PRAGMA busy_timeout").fetchone()[0],
                 "journal_mode": connection.execute("PRAGMA journal_mode").fetchone()[0],
+                "secure_delete": connection.execute("PRAGMA secure_delete").fetchone()[0],
                 "synchronous": connection.execute("PRAGMA synchronous").fetchone()[0],
             }
 
@@ -292,6 +294,7 @@ class TestConnectionSettings:
             "foreign_keys": 1,
             "busy_timeout": BUSY_TIMEOUT_MS,
             "journal_mode": "delete",
+            "secure_delete": 1,
             "synchronous": 2,
         }
 
