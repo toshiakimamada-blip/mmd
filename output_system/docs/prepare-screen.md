@@ -13,7 +13,9 @@
 | AI モデルの準備状況 | 準備状況（確認中・入手中・変換中・準備完了・入手失敗）、入手の進み具合、入手失敗の原因と次の操作、「入手をやり直す」 | `screens/prepare/ModelStatusPanel.tsx`、取得と更新は `models/useModelStatus.ts` |
 | 操作 | 「会議を開始する」（準備完了まで押せない見た目で残す）、「取りやめる」 | `PrepareForm.tsx` |
 
-組み立ては `screens/MeetingPrepareScreen.tsx` です。「会議の一覧」（S-01）には、いまは「新しい会議を始める」だけを置いています。
+組み立ては `screens/MeetingPrepareScreen.tsx` です。「会議の一覧」（S-01）の作りは [list-screen.md](list-screen.md) にあります。
+
+画面を開いた時点で、記録の置き場の空きが少ないかをアプリサーバーに聞き、少ないときは、お知らせ帯に警告を出します（`system/useDiskSpaceWarning.ts`。「会議の一覧」と同じ部品。詳しくは [list-screen.md](list-screen.md) の「ディスクの空きの警告」）。警告のみで、開始のボタンの押せる条件は変わりません。
 
 ## 入力の検査
 
