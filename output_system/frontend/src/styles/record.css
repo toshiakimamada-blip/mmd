@@ -85,7 +85,11 @@
   background: rgb(23 50 77 / 0.1);
 }
 
-/* 「記録を削除する」: 「一覧へ戻る」と同じ作り。押せないときも、表示したまま残す（操作の場所を見失わないため） */
+/*
+ * 「取り出す」「記録を削除する」: 「一覧へ戻る」と同じ作り。押せないときも、表示したまま残す（操作の場所を見失わないため）。
+ * 「取り出す」はどの状態でも押せる。「記録を削除する」だけ、状態によって押せなくなる。
+ */
+.record__export,
 .record__delete {
   min-width: 9rem;
   min-height: 2.75rem;
@@ -99,6 +103,7 @@
   cursor: pointer;
 }
 
+.record__export:hover,
 .record__delete:hover:not(:disabled) {
   background: rgb(23 50 77 / 0.1);
 }
@@ -341,4 +346,14 @@
 /* 英語の質問は、そのまま話し手へ尋ねる文。日本語より少し強く見せる */
 .question__english {
   font-weight: 700;
+}
+
+/* 取り出しの案内の領域（F-14）。画面の最後に、落ち着いた色で置く。領域の上の線で、記録の内容と区切る */
+.record__guide {
+  padding-top: 1rem;
+  border-top: 1px solid rgb(23 50 77 / 0.25);
+}
+
+.record__guide > p {
+  color: var(--color-ink-muted);
 }

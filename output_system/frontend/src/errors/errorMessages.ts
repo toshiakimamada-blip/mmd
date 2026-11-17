@@ -91,6 +91,11 @@ export const ERROR_WORDINGS: Readonly<Record<string, ErrorWording>> = Object.fre
     message: 'コピーできませんでした。ブラウザーが、クリップボードへの書き込みを断りました。',
     action: 'ボタンの下に出した欄の文面を選んで、Ctrl+C（Mac は Command+C）を押してコピーしてください。',
   },
+  // --- 記録の取り出しの失敗（画面が、ブラウザーのダウンロードの準備の結果から決める。サーバーは返さない） ---
+  RECORD_EXPORT_FAILED: {
+    message: 'ファイルを取り出せませんでした。ブラウザーが、ファイルのダウンロードを始められませんでした。',
+    action: `もう一度「取り出す」を押してください。${REPORT_IF_NOT_FIXED}`,
+  },
   // --- 音声の取り込みの失敗（画面が、ブラウザーの共有・マイクの利用の結果から決める。サーバーは返さない） ---
   AUDIO_NO_AUDIO_SHARED: {
     message: '共有に音声が含まれていないため、音声を取り込めませんでした。',

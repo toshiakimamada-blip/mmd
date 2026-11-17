@@ -81,18 +81,17 @@ describe('MeetingRecordScreen: header', () => {
   /**
    * 【テスト対象】まだ置かない操作
    * 【テスト内容】会議の記録を開く
-   * 【期待結果】取り出すボタンと、質問を作るボタンは置かない（後続の作業で足す。押せない見た目で残す規則は、
-   *            足すときに適用する）。
+   * 【期待結果】質問を作るボタンは置かない（後続の作業で足す。押せない見た目で残す規則は、足すときに適用する）。
    *            記録の削除は置く（記録の削除の作業で足した。確かめるのは MeetingRecordDelete.test.tsx）。
+   *            取り出すボタンは置く（記録の取り出しの作業で足した。確かめるのは MeetingRecordExport.test.tsx）。
    *            要約と字幕のコピーのボタンは置く（記録のコピーの作業で足した。確かめるのは MeetingRecordCopy.test.tsx）
    */
-  it('should not offer exporting or creating questions yet', async () => {
+  it('should not offer creating questions yet', async () => {
     openRecord();
     await screen.findByRole('heading', { name: '週次の定例' });
 
-    for (const name of [/取り出/, /質問を作る/]) {
-      expect(screen.queryByRole('button', { name })).not.toBeInTheDocument();
-    }
+    expect(screen.queryByRole('button', { name: /質問を作る/ })).not.toBeInTheDocument();
+    expect(screen.getByRole('button', { name: '取り出す' })).toBeInTheDocument();
     expect(screen.getByRole('button', { name: '記録を削除する' })).toBeInTheDocument();
     expect(screen.getByRole('button', { name: '字幕をコピーする' })).toBeInTheDocument();
   });
@@ -197,8 +196,8 @@ describe('MeetingRecordScreen: keyboard', () => {
 
   /**
    * 【テスト対象】キーボードだけでの要約のボタンへの移動
-   * 【テスト内容】中断した会議で、Tab を 3 回押す
-   * 【期待結果】「一覧へ戻る」→「記録を削除する」の次に、フォーカスが「要約を作る」に届く
+   * 【テスト内容】中断した会議で、Tab を 4 回押す
+   * 【期待結果】「一覧へ戻る」→「取り出す」→「記録を削除する」の次に、フォーカスが「要約を作る」に届く
    *            （押す操作は、要約の表示のテストで確かめる）
    */
   it('should reach the summary button with the keyboard only', async () => {
@@ -209,6 +208,7 @@ describe('MeetingRecordScreen: keyboard', () => {
     await screen.findByRole('button', { name: '要約を作る' });
 
     await user.tab(); // 一覧へ戻る
+    await user.tab(); // 取り出す
     await user.tab(); // 記録を削除する
     await user.tab();
 
