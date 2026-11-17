@@ -211,4 +211,26 @@ describe('useClipboardCopy', () => {
 
     expect(vi.getTimerCount()).toBe(0);
   });
+
+  /**
+   * 【テスト対象】useClipboardCopy（画面から消えたあとに、書き込みを断られた結果が届く）
+   * 【テスト内容】書き込みの応答を待つ間に、この部品が画面から消える。そのあと、書き込みが断られる
+   * 【期待結果】お知らせ帯にエラーを出さない（消えた画面のエラーが、次の画面に残らない）。例外にならない
+   */
+  it('should not post an error when a refusal arrives after unmounting', async () => {
+    let reject: (reason: unknown) => void = () => undefined;
+    stubClipboard(() => new Promise<void>((_resolve, rejectWrite) => (reject = rejectWrite)));
+    let copy: (text: string) => Promise<void> = () => Promise.resolve();
+    const view = render(<HookProbe onReady={(next) => (copy = next)} />, { wrapper });
+    let pending: Promise<void> = Promise.resolve();
+    act(() => {
+      pending = copy('文面');
+    });
+
+    view.rerender(<div />);
+    reject(new DOMException('denied', 'NotAllowedError'));
+    await act(() => pending);
+
+    expect(screen.queryByRole('alert')).not.toBeInTheDocument();
+  });
 });
