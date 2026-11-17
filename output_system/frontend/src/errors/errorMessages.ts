@@ -86,6 +86,11 @@ export const ERROR_WORDINGS: Readonly<Record<string, ErrorWording>> = Object.fre
     message: '会議の記録を削除できませんでした。',
     action: `もう一度、削除してください。${REPORT_IF_NOT_FIXED}`,
   },
+  // --- 記録のコピーの失敗（画面が、ブラウザーの書き込みの結果から決める。サーバーは返さない） ---
+  RECORD_COPY_FAILED: {
+    message: 'コピーできませんでした。ブラウザーが、クリップボードへの書き込みを断りました。',
+    action: 'ボタンの下に出した欄の文面を選んで、Ctrl+C（Mac は Command+C）を押してコピーしてください。',
+  },
   // --- 音声の取り込みの失敗（画面が、ブラウザーの共有・マイクの利用の結果から決める。サーバーは返さない） ---
   AUDIO_NO_AUDIO_SHARED: {
     message: '共有に音声が含まれていないため、音声を取り込めませんでした。',

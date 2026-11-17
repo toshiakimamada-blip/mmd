@@ -1,7 +1,9 @@
 import { useId } from 'react';
 
 import { RegionError } from '../../components/notices';
+import { CopyButton } from '../../components/records/CopyButton';
 import { toDisplayErrorFromCode } from '../../errors/errorMessages';
+import { buildSummaryText } from '../../records/recordText';
 import { type MeetingRecord, type RecordJob } from '../../records/recordTypes';
 import { isActiveJob, type RecordView } from '../../records/recordView';
 import { SummaryContent } from './SummaryContent';
@@ -18,6 +20,9 @@ import { SummaryProgress } from './SummaryProgress';
  * - 字幕が 0 件: 内容がありません
  *
  * 要約のボタンは、応答が返るまで押せない（requesting）。押せない間も、ボタンは残す。
+ * 「要約をコピーする」は、要約がある間（作り直しの途中や失敗のあとに表示している、前の要約を含む）だけ押せる。
+ * 要約が無いときも、押せない見た目で残す（操作の場所を見失わないため）。コピーする文面は、要約の 4 項目
+ * （records/recordText.ts）。
  *
  * @param record 会議の記録
  * @param view 状態別の表示と操作
@@ -43,13 +48,18 @@ export function SummaryRegion({
         要約
       </h3>
       <SummaryArea record={record} view={view} summaryJob={summaryJob} />
-      {view.summaryButton === null ? null : (
-        <p className="record__actions">
+      <div className="record__actions record__actions--copy">
+        {view.summaryButton === null ? null : (
           <button type="button" className="record__button" disabled={requesting} onClick={onRequest}>
             {view.summaryButton === 'recreate' ? '要約を作り直す' : '要約を作る'}
           </button>
-        </p>
-      )}
+        )}
+        <CopyButton
+          label="要約をコピーする"
+          disabled={record.summary === null}
+          getText={() => (record.summary === null ? '' : buildSummaryText(record.summary))}
+        />
+      </div>
     </section>
   );
 }

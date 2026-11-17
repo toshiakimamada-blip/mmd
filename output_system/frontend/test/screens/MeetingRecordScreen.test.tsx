@@ -60,7 +60,9 @@ describe('MeetingRecordScreen: header', () => {
     expect(within(facts).getByText('通訳中')).toBeInTheDocument();
     const summary = screen.getByRole('region', { name: '要約' });
     expect(within(summary).getByText(/会議中/)).toBeInTheDocument();
-    expect(within(summary).queryByRole('button')).not.toBeInTheDocument();
+    // 要約のボタンは出さない。要約のコピーのボタンは、押せない見た目で残す
+    expect(within(summary).queryByRole('button', { name: /要約を作/ })).not.toBeInTheDocument();
+    expect(within(summary).getByRole('button', { name: '要約をコピーする' })).toBeDisabled();
   });
 
   /**
@@ -79,18 +81,20 @@ describe('MeetingRecordScreen: header', () => {
   /**
    * 【テスト対象】まだ置かない操作
    * 【テスト内容】会議の記録を開く
-   * 【期待結果】取り出す・コピーのボタンと、質問を作るボタンは置かない
-   *            （後続の作業で足す。押せない見た目で残す規則は、足すときに適用する）。
-   *            記録の削除は置く（記録の削除の作業で足した。確かめるのは MeetingRecordDelete.test.tsx）
+   * 【期待結果】取り出すボタンと、質問を作るボタンは置かない（後続の作業で足す。押せない見た目で残す規則は、
+   *            足すときに適用する）。
+   *            記録の削除は置く（記録の削除の作業で足した。確かめるのは MeetingRecordDelete.test.tsx）。
+   *            要約と字幕のコピーのボタンは置く（記録のコピーの作業で足した。確かめるのは MeetingRecordCopy.test.tsx）
    */
-  it('should not offer exporting, copying or creating questions yet', async () => {
+  it('should not offer exporting or creating questions yet', async () => {
     openRecord();
     await screen.findByRole('heading', { name: '週次の定例' });
 
-    for (const name of [/取り出/, /コピー/, /質問を作る/]) {
+    for (const name of [/取り出/, /質問を作る/]) {
       expect(screen.queryByRole('button', { name })).not.toBeInTheDocument();
     }
     expect(screen.getByRole('button', { name: '記録を削除する' })).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: '字幕をコピーする' })).toBeInTheDocument();
   });
 });
 
@@ -105,7 +109,8 @@ describe('MeetingRecordScreen: state display', () => {
 
     const summary = await screen.findByRole('region', { name: '要約' });
     expect(within(summary).getByText('内容がありません。')).toBeInTheDocument();
-    expect(within(summary).queryByRole('button')).not.toBeInTheDocument();
+    expect(within(summary).queryByRole('button', { name: /要約を作/ })).not.toBeInTheDocument();
+    expect(within(summary).getByRole('button', { name: '要約をコピーする' })).toBeDisabled();
   });
 
   /**

@@ -1,9 +1,12 @@
 import { render, screen, within } from '@testing-library/react';
+import userEvent from '@testing-library/user-event';
 import { describe, expect, it } from 'vitest';
 
+import { NoticeProvider } from '../../../src/components/notices';
 import { QuestionSetList } from '../../../src/components/questions/QuestionSetList';
 import { formatDateTimeToMinute } from '../../../src/records/formatDateTime';
 import { type RecordQuestionSet } from '../../../src/records/recordTypes';
+import { stubClipboard } from '../../records/clipboardKit';
 
 /** 質問のまとまり 1 つ。質問は 5 問。 */
 function questionSet(
@@ -97,5 +100,53 @@ describe('QuestionSetList', () => {
     expect(screen.getByText('<b>Why</b> & <script>x()</script>?')).toBeInTheDocument();
     expect(screen.getByText('<i>なぜ</i>？')).toBeInTheDocument();
     expect(container.querySelector('b, i, script')).toBeNull();
+  });
+
+  /**
+   * 【テスト対象】QuestionSetList（コピーのボタン）
+   * 【テスト内容】copyable を指定しない（「会議中」の質問の領域は、まだ置かない）／指定する（「会議の記録」）
+   * 【期待結果】指定しなければ、コピーのボタンは無い。指定すると、まとまりごとに 1 つずつ、質問の下に置く。
+   *            ボタンの名前で、どのまとまりかが分かる
+   */
+  it('should place one copy button per set only when copyable', () => {
+    const sets = [questionSet(2), questionSet(1)];
+    const { rerender } = render(<QuestionSetList sets={sets} />);
+    expect(screen.queryByRole('button')).not.toBeInTheDocument();
+
+    rerender(
+      <NoticeProvider>
+        <QuestionSetList sets={sets} copyable />
+      </NoticeProvider>,
+    );
+
+    const buttons = screen.getAllByRole('button');
+    expect(buttons.map((button) => button.getAttribute('aria-label'))).toEqual([
+      '質問のまとまり 2 の質問をコピーする',
+      '質問のまとまり 1 の質問をコピーする',
+    ]);
+    const second = screen.getByRole('listitem', { name: '質問のまとまり 2' });
+    expect(within(second).getByRole('button')).toHaveTextContent('質問をコピーする');
+  });
+
+  /**
+   * 【テスト対象】QuestionSetList（コピーする文面）
+   * 【テスト内容】まとまり 1 のボタンを押す
+   * 【期待結果】そのまとまりの 5 問（番号・英語の質問・日本語の質問）だけを、クリップボードへ入れる
+   */
+  it('should copy the five questions of the chosen set', async () => {
+    const user = userEvent.setup();
+    const clipboard = stubClipboard();
+    render(
+      <NoticeProvider>
+        <QuestionSetList sets={[questionSet(2), questionSet(1)]} copyable />
+      </NoticeProvider>,
+    );
+
+    await user.click(screen.getByRole('button', { name: '質問のまとまり 1 の質問をコピーする' }));
+
+    expect(clipboard.writeText).toHaveBeenCalledTimes(1);
+    expect(clipboard.writeText).toHaveBeenCalledWith(
+      [1, 2, 3, 4, 5].map((n) => `${n}. Question 1-${n}?\n   質問 1-${n}`).join('\n\n'),
+    );
   });
 });

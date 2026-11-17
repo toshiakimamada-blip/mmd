@@ -9,6 +9,7 @@ import { isActiveJob } from '../../records/recordView';
  * 質問の領域。質問の作成状況（待機中・作成中）と、質問のまとまりを、新しい順に表示する。
  *
  * 質問を作るボタンは、暫定版では置かない（質問の作成の作業で足す）。まとまりが無いときは、無いことを表示する。
+ * 質問のまとまりごとに、コピーのボタンを置く（QuestionSetList）。
  * 質問のジョブには、ブロックの数がない。進み具合は、状況（待機中・作成中）で示す。
  *
  * @param record 会議の記録
@@ -34,7 +35,7 @@ export function QuestionRegion({ record }: { readonly record: MeetingRecord }) {
           <p>質問はまだありません。</p>
         ) : null
       ) : (
-        <QuestionSetList sets={record.questionSets} showPhase />
+        <QuestionSetList sets={record.questionSets} showPhase copyable />
       )}
     </section>
   );

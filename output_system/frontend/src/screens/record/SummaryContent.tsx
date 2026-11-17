@@ -1,6 +1,7 @@
 import { useId } from 'react';
 
 import { formatDateTimeToMinute } from '../../records/formatDateTime';
+import { NOT_APPLICABLE_TEXT, SUMMARY_TITLES } from '../../records/recordText';
 import { type RecordSummary } from '../../records/recordTypes';
 import { splitSummaryLines } from '../../records/summaryLines';
 
@@ -24,16 +25,16 @@ export function SummaryContent({ summary }: { readonly summary: RecordSummary })
         <OverviewHeading />
         <p className="summary__overview">{summary.overview}</p>
       </section>
-      <BulletItem title="話題ごとの要点" text={summary.keyPoints} />
-      <BulletItem title="決定事項" text={summary.decisions} />
-      <BulletItem title="宿題" text={summary.actionItems} />
+      <BulletItem title={SUMMARY_TITLES.keyPoints} text={summary.keyPoints} />
+      <BulletItem title={SUMMARY_TITLES.decisions} text={summary.decisions} />
+      <BulletItem title={SUMMARY_TITLES.actionItems} text={summary.actionItems} />
     </div>
   );
 }
 
 /** 全体の概要の見出し。 */
 function OverviewHeading() {
-  return <h4 className="summary__heading">全体の概要</h4>;
+  return <h4 className="summary__heading">{SUMMARY_TITLES.overview}</h4>;
 }
 
 /** 箇条書きの項目 1 つ。見出しを、箇条書きの名前にする（読み上げソフトが、何の一覧かを伝えられる）。 */
@@ -47,7 +48,7 @@ function BulletItem({ title, text }: { readonly title: string; readonly text: st
         {title}
       </h4>
       <ul className="summary__list" aria-labelledby={headingId}>
-        {(lines.length === 0 ? ['該当なし'] : lines).map((line, index) => (
+        {(lines.length === 0 ? [NOT_APPLICABLE_TEXT] : lines).map((line, index) => (
           // 同じ文の項目がありうるため、番号も鍵に含める。並びは変わらない（読み込みごとに作り直す）。
           <li key={`${index}:${line}`}>{line}</li>
         ))}
