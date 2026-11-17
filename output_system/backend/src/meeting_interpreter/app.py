@@ -289,7 +289,7 @@ def create_app(
         on_meeting_started=app.state.job_manager.meeting_started,
         on_interpreter_stopped=app.state.job_manager.interpreter_stopped,
         # 記録の削除の条件。待機中か作成中の作成ジョブが残る会議は、削除しない。
-        has_active_job=lambda meeting_id: bool(app.state.job_manager.active_jobs(meeting_id)),
+        has_active_job=app.state.job_manager.has_active_job,
         # 記録の削除は、作成の依頼と同じ鍵の中で、条件を確かめて削除する。
         request_lock=request_lock,
     )
