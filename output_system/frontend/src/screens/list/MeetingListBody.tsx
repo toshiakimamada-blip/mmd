@@ -15,13 +15,19 @@ import { MeetingRow } from './MeetingRow';
  *
  * @param load 読み込みの状態
  * @param onReload 「もう一度読み込む」を押したときの処理
+ * @param onDelete 会議の行の「削除」を押したときの処理（削除の確認を出す）
+ * @param deleting 削除を依頼して、応答を待っているか（待つ間は、どの行の「削除」も押せない）
  */
 export function MeetingListBody({
   load,
   onReload,
+  onDelete,
+  deleting,
 }: {
   readonly load: ListLoad;
   readonly onReload: () => void;
+  readonly onDelete: (meeting: MeetingListItem) => void;
+  readonly deleting: boolean;
 }) {
   switch (load.phase) {
     case 'loading':
@@ -40,7 +46,11 @@ export function MeetingListBody({
         </div>
       );
     case 'ready':
-      return load.meetings.length === 0 ? <EmptyList /> : <Rows meetings={load.meetings} />;
+      return load.meetings.length === 0 ? (
+        <EmptyList />
+      ) : (
+        <Rows meetings={load.meetings} onDelete={onDelete} deleting={deleting} />
+      );
   }
 }
 
@@ -60,7 +70,15 @@ function EmptyList() {
 }
 
 /** 会議の行の並び。 */
-function Rows({ meetings }: { readonly meetings: readonly MeetingListItem[] }) {
+function Rows({
+  meetings,
+  onDelete,
+  deleting,
+}: {
+  readonly meetings: readonly MeetingListItem[];
+  readonly onDelete: (meeting: MeetingListItem) => void;
+  readonly deleting: boolean;
+}) {
   const headingId = useId();
   return (
     <section className="meeting-list__rows" aria-labelledby={headingId}>
@@ -70,7 +88,12 @@ function Rows({ meetings }: { readonly meetings: readonly MeetingListItem[] }) {
       </h3>
       <ul className="meeting-list__list" aria-labelledby={headingId}>
         {meetings.map((meeting) => (
-          <MeetingRow key={meeting.meetingId} meeting={meeting} />
+          <MeetingRow
+            key={meeting.meetingId}
+            meeting={meeting}
+            onDelete={onDelete}
+            deleting={deleting}
+          />
         ))}
       </ul>
     </section>

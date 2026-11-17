@@ -12,11 +12,16 @@ export interface MeetingRowProps {
   /** 表示する会議。 */
   readonly meeting: MeetingListItem;
   /**
-   * 「削除」を押したときの処理。省略すると、削除のボタンは、どの状態でも押せない。
-   * 削除の動作は、記録の削除を作る作業が渡す。動作の無いボタンを、押せるように見せないため、
-   * 動作を渡さない間は、押せる条件を満たす会議でも押せない見た目で残す。
+   * 「削除」を押したときの処理（削除の確認を出す）。省略すると、削除のボタンは、どの状態でも押せない。
+   * 動作の無いボタンを、押せるように見せないため、動作を渡さないときは、押せる条件を満たす会議でも
+   * 押せない見た目で残す。
    */
   readonly onDelete?: (meeting: MeetingListItem) => void;
+  /**
+   * 削除を依頼して、応答を待っている間は true。この間は、どの行の「削除」も押せない
+   * （二度押しで、二重に依頼しない。応答が返るまで、一覧の状態が変わるため）。
+   */
+  readonly deleting?: boolean;
 }
 
 /**
@@ -27,15 +32,16 @@ export interface MeetingRowProps {
  * - 状態は、区分の表示名を文字で出す。通訳中の行だけ、左に黄色の棒を付ける（「会議中」の字幕の印と同じ作り。
  *   いま進めている会議を探しやすくする。状態は文字でも伝えるため、色だけに頼らない）
  * - 「開く」は、どの状態でも押せる。画面の移動のため、リンクにする。「削除」は、押せる条件
- *   （isDeletable）を満たし、動作が渡されたときだけ押せる。押せない間も、表示したまま残す
- *   （操作の場所を見失わないため）
+ *   （isDeletable）を満たし、動作が渡され、削除の応答を待っていないときだけ押せる。押せない間も、
+ *   表示したまま残す（操作の場所を見失わないため）
  * - 「開く」と「削除」は、タイトルを説明として結びつける。読み上げソフトが、どの会議の操作かを伝えられる
  * - タイトルは会議の内容。文字として表示する（ADR-15）
  */
-export function MeetingRow({ meeting, onDelete }: MeetingRowProps) {
+export function MeetingRow({ meeting, onDelete, deleting = false }: MeetingRowProps) {
   const titleId = useId();
   const showLength = meeting.status !== 'interpreting' && meeting.endedAt !== null;
-  const canDelete = onDelete !== undefined && isDeletable(meeting.status, meeting.hasActiveJob);
+  const canDelete =
+    onDelete !== undefined && !deleting && isDeletable(meeting.status, meeting.hasActiveJob);
 
   return (
     <li className="meeting-row" data-status={meeting.status}>

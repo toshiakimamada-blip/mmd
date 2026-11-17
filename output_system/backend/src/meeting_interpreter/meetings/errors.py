@@ -78,6 +78,28 @@ def meeting_not_running(meeting_id: str | None = None) -> BusinessAppError:
     )
 
 
+def meeting_delete_not_allowed(meeting_id: str | None = None) -> BusinessAppError:
+    """通訳中または要約作成中の会議を、削除しようとした。"""
+    return BusinessAppError(
+        "MEETING_DELETE_NOT_ALLOWED",
+        "通訳中または要約作成中の会議は、削除できません。",
+        "会議の終了か、要約の作成が終わってから、削除してください。",
+        component=COMPONENT,
+        meeting_id=meeting_id,
+    )
+
+
+def meeting_has_active_job(meeting_id: str | None = None) -> BusinessAppError:
+    """要約か質問の作成ジョブが待機中か作成中の会議を、削除しようとした。"""
+    return BusinessAppError(
+        "MEETING_HAS_ACTIVE_JOB",
+        "この会議の要約か質問を作っている途中のため、削除できません。",
+        "作成が終わってから、削除してください。",
+        component=COMPONENT,
+        meeting_id=meeting_id,
+    )
+
+
 def audio_already_connected(meeting_id: str | None = None) -> BusinessAppError:
     """この会議には、すでに音声の接続がある。"""
     return BusinessAppError(

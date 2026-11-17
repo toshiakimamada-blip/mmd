@@ -2,7 +2,7 @@
  * 「会議の一覧」の画面のテストが共通で使う道具。
  *
  * - wireListItem: アプリサーバーが返す会議の一覧の 1 行（GET /api/meetings）を作る
- * - setUpListTest: 通知の WebSocket と fetch を、テストが操れる偽物に替える
+ * - setUpListTest: 通知の WebSocket と fetch を、テストが操れる偽物に替える（記録の削除 DELETE を含む）
  * - openList: 「会議の一覧」を開く
  */
 
@@ -40,10 +40,16 @@ export const answers: {
   listRequests: number;
   /** 一覧の取得で渡された fetch の指定（キャッシュを使わないことの確認に使う）。 */
   lastListInit: RequestInit | undefined;
+  /** 記録の削除（DELETE /api/meetings/{会議番号}）に答える関数。既定は、削除できた（204）。 */
+  deleteMeeting: (meetingId: string) => Promise<Response>;
+  /** 記録の削除を求められた会議番号。求められた順。 */
+  deleteRequests: string[];
 } = {
   list: () => Promise.resolve(jsonResponse({ meetings: [] })),
   listRequests: 0,
   lastListInit: undefined,
+  deleteMeeting: () => Promise.resolve(new Response(null, { status: 204 })),
+  deleteRequests: [],
 };
 
 /** 各テストの前に呼ぶ。通知の接続と fetch を、テストが操れる偽物に替える。 */
@@ -53,6 +59,8 @@ export function setUpListTest(): void {
   answers.list = () => Promise.resolve(jsonResponse({ meetings: [] }));
   answers.listRequests = 0;
   answers.lastListInit = undefined;
+  answers.deleteMeeting = () => Promise.resolve(new Response(null, { status: 204 }));
+  answers.deleteRequests = [];
   vi.stubGlobal(
     'fetch',
     vi.fn((path: string, init?: RequestInit) => {
@@ -60,6 +68,12 @@ export function setUpListTest(): void {
         answers.listRequests += 1;
         answers.lastListInit = init;
         return answers.list();
+      }
+      // 記録の削除。会議番号は、URL の最後の区間
+      if (path.startsWith('/api/meetings/') && init?.method === 'DELETE') {
+        const meetingId = decodeURIComponent(path.slice('/api/meetings/'.length));
+        answers.deleteRequests.push(meetingId);
+        return answers.deleteMeeting(meetingId);
       }
       // 画面を開いた時点のディスクの空きの確認（F-15）。ここでは、警告なしを返す
       if (path === '/api/system/alerts' && (init?.method ?? 'GET') === 'GET') {

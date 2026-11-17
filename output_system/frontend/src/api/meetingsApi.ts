@@ -136,3 +136,15 @@ export async function requestSummary(meetingId: string): Promise<void> {
 export async function fetchMeetingList(): Promise<readonly MeetingListItem[]> {
   return requestJson('/api/meetings', { method: 'GET', cache: 'no-store' }, parseMeetingList);
 }
+
+/**
+ * 会議の記録を削除する（DELETE /api/meetings/{会議番号}）。字幕・要約・質問のまとまり・質問が、すべて消える。
+ * 削除した記録は、元に戻せない。会議がすでに無いときも、成功として返る（削除の要求が 2 回届いたときの 2 回目を含む）。
+ *
+ * @param meetingId 会議番号。URL の 1 つの区間として符号化する
+ * @throws ApiError 通訳中・要約作成中の会議（MEETING_DELETE_NOT_ALLOWED）・作成ジョブが残っている
+ *   （MEETING_HAS_ACTIVE_JOB）・削除できなかった（RECORD_DELETE_FAILED）・アプリサーバーに届かなかったとき
+ */
+export async function deleteMeeting(meetingId: string): Promise<void> {
+  await requestJson(`/api/meetings/${encodeURIComponent(meetingId)}`, { method: 'DELETE' });
+}

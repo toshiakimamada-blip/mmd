@@ -189,6 +189,39 @@ describe('ERROR_WORDINGS for record storage', () => {
   });
 });
 
+describe('ERROR_WORDINGS for deleting a record', () => {
+  /**
+   * 【テスト対象】ERROR_WORDINGS（記録の削除の失敗）
+   * 【テスト内容】記録保存部が返す RECORD_DELETE_FAILED の文言を調べる
+   * 【期待結果】削除できなかったことと、もう一度削除することが書かれ、直らないときは、開発を担う AI へ
+   *            エラーコードを伝えることが書かれていること。ほかの保存の失敗の文言と取り違えない
+   */
+  it('should register a wording for a failed delete', () => {
+    const wording = ERROR_WORDINGS.RECORD_DELETE_FAILED;
+
+    expect(wording.message).toContain('削除できませんでした');
+    expect(wording.action).toContain('もう一度');
+    expect(wording.action).toContain('開発を担う AI');
+    expect(wording.message).not.toBe(ERROR_WORDINGS.RECORD_SAVE_FAILED.message);
+  });
+
+  /**
+   * 【テスト対象】ERROR_WORDINGS（削除を断られた）
+   * 【テスト内容】通訳中・要約作成中の会議と、作成ジョブが残る会議の文言を調べる
+   * 【期待結果】何が起きたか（削除できない）と、次に行う操作（終了・作成が終わってから削除する）が、
+   *            それぞれ書かれていること
+   */
+  it('should tell the user what to do when the delete is refused', () => {
+    const state = ERROR_WORDINGS.MEETING_DELETE_NOT_ALLOWED;
+    const job = ERROR_WORDINGS.MEETING_HAS_ACTIVE_JOB;
+
+    expect(state.message).toContain('削除できません');
+    expect(state.action).toContain('終了');
+    expect(job.message).toContain('削除できません');
+    expect(job.action).toContain('作成が終わってから');
+  });
+});
+
 describe('GENERIC_WORDINGS', () => {
   /**
    * 【テスト対象】GENERIC_WORDINGS
@@ -290,12 +323,14 @@ describe('ERROR_WORDINGS for meetings', () => {
     'MEETING_NOT_RUNNING',
     'MEETING_AUDIO_ALREADY_CONNECTED',
     'MEETING_INVALID_TRANSITION',
+    'MEETING_DELETE_NOT_ALLOWED',
+    'MEETING_HAS_ACTIVE_JOB',
     'SYSTEM_INTERPRETER_UNAVAILABLE',
   ];
 
   /**
-   * 【テスト対象】ERROR_WORDINGS（会議の開始と終了のコード）
-   * 【テスト内容】会議管理部が返す 9 つのコードが、一覧にあるかを調べる
+   * 【テスト対象】ERROR_WORDINGS（会議の開始と終了・削除のコード）
+   * 【テスト内容】会議管理部が返す 11 件のコードが、一覧にあるかを調べる
    * 【期待結果】どれも一覧にあり、文言がコードごとに異なること（取り違えて案内しない）
    */
   it('should register a distinct wording for every code the meeting manager returns', () => {

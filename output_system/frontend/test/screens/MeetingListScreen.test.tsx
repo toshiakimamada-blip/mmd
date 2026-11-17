@@ -295,8 +295,8 @@ describe('MeetingListScreen: the open and delete buttons', () => {
    * 【ユーザーストーリー】
    * 利用者が、キーボードだけで、新しい会議の入口と、各会議の「開く」を順に選べる
    *
-   * 【期待結果】Tab の順に、「新しい会議を始める」→ 1 件目の「開く」→ 2 件目の「開く」。
-   *            押せない削除のボタンには、フォーカスが止まらない。Enter で開ける
+   * 【期待結果】Tab の順に、「新しい会議を始める」→ 1 件目の「開く」→ 1 件目の「削除」→ 2 件目の「開く」。
+   *            Enter で開ける。押せない削除のボタン（通訳中の会議）には、フォーカスが止まらない
    */
   it('should be operable with the keyboard only', async () => {
     const user = userEvent.setup();
@@ -315,6 +315,8 @@ describe('MeetingListScreen: the open and delete buttons', () => {
     const opens = screen.getAllByRole('link', { name: '開く' });
     expect(opens[0]).toHaveFocus();
     await user.tab();
+    expect(screen.getAllByRole('button', { name: '削除' })[0]).toHaveFocus();
+    await user.tab();
     expect(opens[1]).toHaveFocus();
 
     await user.keyboard('{Enter}');
@@ -322,12 +324,40 @@ describe('MeetingListScreen: the open and delete buttons', () => {
   });
 
   /**
-   * 【テスト対象】削除のボタン（この作業では、削除の動作を持たない）
-   * 【テスト内容】5 つの状態と、作成ジョブのある会議
-   * 【期待結果】どの行にも「削除」のボタンが出ているが、押せない（disabled）。
-   *            押せる条件の判定は isDeletable（recordView）が持ち、その表は別のテストで確かめている
+   * 【テスト対象】押せない削除のボタンとキーボード
+   * 【テスト内容】通訳中の会議（削除できない）と、完了の会議が並ぶ一覧を、Tab で順にたどる
+   * 【期待結果】通訳中の会議の「削除」には、フォーカスが止まらない（押せないため）
    */
-  it('should keep a delete button that cannot be pressed on every row', async () => {
+  it('should skip a delete button that cannot be pressed when tabbing', async () => {
+    const user = userEvent.setup();
+    answers.list = () =>
+      Promise.resolve(
+        jsonResponse({
+          meetings: [
+            wireListItem({ meeting_id: 'live', title: '通訳中', status: 'interpreting', ended_at: null }),
+            wireListItem({ meeting_id: 'done', title: '完了' }),
+          ],
+        }),
+      );
+    openList();
+    await findRows();
+
+    await user.tab(); // 新しい会議を始める
+    await user.tab(); // 通訳中の「開く」
+    await user.tab();
+    // 次は、通訳中の「削除」ではなく、完了の「開く」
+    expect(screen.getAllByRole('link', { name: '開く' })[1]).toHaveFocus();
+  });
+
+  /**
+   * 【テスト対象】削除のボタン（押せる条件、状態別の表示と操作）
+   * 【テスト内容】5 つの状態と、作成ジョブのある会議
+   * 【期待結果】どの行にも「削除」のボタンが出ている。中断・完了・要約失敗で、作成ジョブが無い行だけ押せる。
+   *            通訳中・要約作成中と、作成ジョブのある行は、押せない見た目のまま残る
+   *            （判定は isDeletable（recordView）が持ち、その表は別のテストで確かめている。
+   *            削除の動作は MeetingListDelete.test.tsx が確かめる）
+   */
+  it('should keep a delete button on every row and enable it only where the record can be deleted', async () => {
     answers.list = () =>
       Promise.resolve(
         jsonResponse({
@@ -346,8 +376,9 @@ describe('MeetingListScreen: the open and delete buttons', () => {
     const rows = await findRows();
 
     expect(rows).toHaveLength(6);
-    for (const row of rows) {
-      expect(within(row).getByRole('button', { name: '削除' })).toBeDisabled();
-    }
+    const enabled = rows.map(
+      (row) => !(within(row).getByRole('button', { name: '削除' }) as HTMLButtonElement).disabled,
+    );
+    expect(enabled).toEqual([false, true, false, true, true, false]);
   });
 });

@@ -88,3 +88,30 @@ class RecordSaveError(RecordError):
             component=COMPONENT,
             meeting_id=meeting_id,
         )
+
+
+class RecordDeleteError(RecordError):
+    """会議の記録を削除できなかったときの例外。
+
+    更新前の控えから消せなかったとき、または記録データベースの削除が失敗したとき（ディスクの
+    ロック・書き込みの失敗・破損など）に、原因の種類によらず、この 1 つの形にそろえる。
+    記録データベースの削除は、1 回の確定のため、失敗したら 1 件も消えない。控えから先に消せていた
+    場合も、控えから消した会議は戻さない（利用者は、削除をやり直せる）。
+
+    例外の文面と、画面へ返す 4 項目には、会議の内容を含めない。原因の例外は `__cause__` として持ち、
+    文面はどこにも出さない（エラーログには種類と発生場所だけを出す）。
+    """
+
+    def __init__(self, *, meeting_id: str | None = None) -> None:
+        """
+        Args:
+            meeting_id: 削除しようとした会議の番号。
+        """
+        super().__init__(
+            "RECORD_DELETE_FAILED",
+            "会議の記録を削除できませんでした。",
+            "もう一度、削除してください。"
+            "直らない場合は、このエラーコードを開発を担う AI へ伝えてください。",
+            component=COMPONENT,
+            meeting_id=meeting_id,
+        )

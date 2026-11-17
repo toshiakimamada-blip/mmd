@@ -179,6 +179,19 @@ TRANSITIONS: Final[tuple[Transition, ...]] = (
 _SUBTITLE_CONDITIONS: Final = frozenset({Condition.HAS_SUBTITLES, Condition.NO_SUBTITLES})
 
 
+def allows(source: MeetingStatus | None, trigger: Trigger) -> bool:
+    """遷移元と契機の組が、表に 1 行でもあるかを返す。業務エラーは起こさない。
+
+    操作を受け付けてよい状態かだけを知りたいとき（たとえば、削除できる状態か）に使う。
+    字幕の件数や作成ジョブの有無のような、表の「満たすべき条件」は確かめない。
+
+    Args:
+        source: 遷移元の状態。記録なしは None。
+        trigger: 契機。
+    """
+    return any(row.source == source and row.trigger == trigger for row in TRANSITIONS)
+
+
 def resolve_transition(
     source: MeetingStatus | None,
     trigger: Trigger,
@@ -228,5 +241,6 @@ __all__ = [
     "Condition",
     "Transition",
     "Trigger",
+    "allows",
     "resolve_transition",
 ]

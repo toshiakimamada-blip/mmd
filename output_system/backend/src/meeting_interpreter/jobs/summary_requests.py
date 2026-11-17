@@ -62,6 +62,7 @@ class SummaryRequests:
         publisher: Publisher,
         outcomes: SummaryOutcomes,
         max_chars: int,
+        request_lock: asyncio.Lock | None = None,
     ) -> None:
         """
         Args:
@@ -70,6 +71,9 @@ class SummaryRequests:
             publisher: 通知の送り先（通知部）。
             outcomes: 要約の結果の保存。ジョブを登録できなかったときに、要約失敗を保存する。
             max_chars: 字幕のブロックの文字数の上限（調整値 generation_input_max_chars）。
+            request_lock: 依頼を 1 つずつ処理する鍵。本番は、質問の依頼と記録の削除と同じ鍵を
+                渡す（状態を要約作成中に確定してからジョブを登録するまでの間に、削除が割り込まない
+                ため）。省略すると、この部だけの鍵を作る。
         """
         self._store = store
         self._jobs = jobs
@@ -77,7 +81,8 @@ class SummaryRequests:
         self._outcomes = outcomes
         self._max_chars = max_chars
         # 依頼を 1 つずつ処理する。同時に届いた依頼が、状態の確認から登録の間に割り込まないため。
-        self._lock = asyncio.Lock()
+        # 鍵を持ったまま、同じ鍵を取るほかの処理を待たない（要約失敗の保存は、鍵を取らない）。
+        self._lock = request_lock if request_lock is not None else asyncio.Lock()
 
     async def request(self, meeting_id: str) -> SummaryRequest:
         """要約を作る・作り直す依頼を受け付ける。

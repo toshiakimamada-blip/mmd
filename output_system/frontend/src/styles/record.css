@@ -19,6 +19,17 @@
   color: var(--color-ink-muted);
 }
 
+/* 削除を依頼している間の知らせ。空のときは高さを持たない（画面の間隔が広がらない） */
+.record__status {
+  margin: 0;
+  color: var(--color-ink-muted);
+  font-size: 0.9375rem;
+}
+
+.record__status:empty {
+  display: none;
+}
+
 /* 見出しの領域: タイトル・開始日時・会議の長さ・状態・一覧へ戻る */
 .record__header {
   display: flex;
@@ -47,6 +58,13 @@
   overflow-wrap: anywhere;
 }
 
+/* 一覧へ戻る・記録を削除する。幅が足りないときは、折り返す */
+.record__actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.75rem;
+}
+
 /* ボタンの見た目のリンク。画面の移動は、リンクの意味のほうが合う */
 .record__back {
   display: inline-flex;
@@ -65,6 +83,30 @@
 
 .record__back:hover {
   background: rgb(23 50 77 / 0.1);
+}
+
+/* 「記録を削除する」: 「一覧へ戻る」と同じ作り。押せないときも、表示したまま残す（操作の場所を見失わないため） */
+.record__delete {
+  min-width: 9rem;
+  min-height: 2.75rem;
+  padding: 0 1.25rem;
+  border: 2px solid var(--color-band);
+  border-radius: 0.25rem;
+  background: #fff;
+  color: var(--color-band);
+  font: inherit;
+  font-weight: 700;
+  cursor: pointer;
+}
+
+.record__delete:hover:not(:disabled) {
+  background: rgb(23 50 77 / 0.1);
+}
+
+.record__delete:disabled {
+  border-color: #8794a1;
+  color: #5b6875;
+  cursor: not-allowed;
 }
 
 .record__facts-list {

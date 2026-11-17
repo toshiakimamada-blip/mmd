@@ -10,6 +10,9 @@
 - GET /api/meetings/{会議番号}
     会議の記録（会議・字幕・要約・質問のまとまり・待機中か作成中の作成ジョブ）を返す（200）。
     会議の記録の画面が、開いた時点と、通知を受けた時点で読む。通訳中の会議も取得できる
+- DELETE /api/meetings/{会議番号}
+    会議の記録（字幕・要約・質問のまとまり・質問を含む）を削除する（204）。会議がすでに無いときも、
+    成功として扱う（204）。通訳中・要約作成中の会議と、作成ジョブが残る会議は、業務エラーにする
 - GET /api/meetings/{会議番号}/subtitles
     会議の字幕を、順番の昇順で返す（200）。画面が、再接続のあとに読み直す
 - POST /api/meetings/{会議番号}/question-sets
@@ -26,7 +29,7 @@
 import re
 from typing import Annotated, Literal
 
-from fastapi import APIRouter, Path, Request
+from fastapi import APIRouter, Path, Request, Response
 from pydantic import BaseModel, ConfigDict
 
 from ..jobs.manager import JobManager
@@ -189,6 +192,23 @@ async def end_meeting(meeting_id: MeetingId, request: Request) -> MeetingRespons
         RecordError: 終了日時と状態を保存できなかったとき（500）。
     """
     return to_response(await _manager(request).end_meeting(meeting_id))
+
+
+@router.delete("/meetings/{meeting_id}", status_code=204)
+async def delete_meeting(meeting_id: MeetingId, request: Request) -> Response:
+    """会議の記録を削除する。削除した記録は元に戻せない。
+
+    削除してよいのは、状態が中断・完了・要約失敗で、作成ジョブ（要約・質問）が待機中でも作成中でも
+    ない会議だけ。会議がすでに無いとき（削除の要求が 2 回届いたときの 2 回目を含む）は、何もせず、
+    成功を返す。
+
+    Raises:
+        BusinessAppError: 通訳中または要約作成中（MEETING_DELETE_NOT_ALLOWED、409）。
+            作成ジョブが残っている（MEETING_HAS_ACTIVE_JOB、409）。
+        RecordError: 記録を削除できなかったとき（RECORD_DELETE_FAILED、500）。
+    """
+    await _manager(request).delete_meeting(meeting_id)
+    return Response(status_code=204)
 
 
 @router.get("/meetings/{meeting_id}/subtitles", response_model=SubtitleListResponse)

@@ -11,19 +11,44 @@ import { screenPaths } from '../../routes';
  * - 開始日時は分まで、会議の長さは秒まで。会議の長さは、開始日時と終了日時から求める
  *   （保存していない）。通訳中の会議では表示しない
  * - 一覧へ戻るは、どの状態でも行える。画面の移動のため、リンクにする
+ * - 「記録を削除する」は、状態別の表示と操作（deletable）に従って押せる。押せない間も、表示したまま残す
+ *   （操作の場所を見失わないため）。削除の応答を待つ間も押せない（二度押しで、二重に依頼しない）
  * - タイトルは会議の内容。文字として表示する（ADR-15）
  *
  * @param meeting 表示する会議
+ * @param deletable 記録を削除できる状態か（records/recordView.ts の deletable）
+ * @param deleting 削除を依頼して、応答を待っているか
+ * @param onDelete 「記録を削除する」を押したときの処理（削除の確認を出す）
  */
-export function RecordHeader({ meeting }: { readonly meeting: RecordMeeting }) {
+export function RecordHeader({
+  meeting,
+  deletable,
+  deleting,
+  onDelete,
+}: {
+  readonly meeting: RecordMeeting;
+  readonly deletable: boolean;
+  readonly deleting: boolean;
+  readonly onDelete: () => void;
+}) {
   const factsId = useId();
   return (
     <div className="record__header">
       <div className="record__headline">
         <h3 className="record__title">{meeting.title}</h3>
-        <Link className="record__back" to={screenPaths.meetingList()}>
-          一覧へ戻る
-        </Link>
+        <div className="record__actions">
+          <Link className="record__back" to={screenPaths.meetingList()}>
+            一覧へ戻る
+          </Link>
+          <button
+            type="button"
+            className="record__delete"
+            disabled={!deletable || deleting}
+            onClick={onDelete}
+          >
+            記録を削除する
+          </button>
+        </div>
       </div>
       <section className="record__facts" aria-labelledby={factsId}>
         <h4 className="visually-hidden" id={factsId}>

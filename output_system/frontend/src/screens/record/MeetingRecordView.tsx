@@ -1,10 +1,13 @@
 import { useId } from 'react';
+import { useNavigate } from 'react-router';
 
+import { DeleteMeetingDialog } from '../../components/records/DeleteMeetingDialog';
 import { type MeetingRecord } from '../../records/recordTypes';
 import { decideRecordView } from '../../records/recordView';
+import { useMeetingDelete } from '../../records/useMeetingDelete';
 import { useMeetingRecord } from '../../records/useMeetingRecord';
 import { useSummaryRequest } from '../../records/useSummaryRequest';
-import { SCREENS } from '../../routes';
+import { SCREENS, screenPaths } from '../../routes';
 import { RecordHeader } from './RecordHeader';
 import { SubtitleRegion } from './SubtitleRegion';
 import { SummaryRegion } from './SummaryRegion';
@@ -17,8 +20,13 @@ import { QuestionRegion } from './QuestionRegion';
  * 質問の領域・字幕の領域を置く。要約の領域と、質問を作るボタンなどの出し分けは、状態別の表示と操作
  * （records/recordView.ts）が決める。
  *
- * 暫定版で置かない操作: 記録の削除・取り出す・コピー（会議の一覧・削除・取り出しの作業で足す）、
- * 質問を作るボタン（質問の作成の作業で足す）。取り出しの案内も、取り出すボタンを置くときに足す。
+ * 「記録を削除する」は、確認の表示を出し、「削除する」で記録を削除して、「会議の一覧」へ移る（F-11。
+ * records/useMeetingDelete.ts）。断られたときは、お知らせ帯にエラーを出し、記録を読み直して、
+ * 「記録を削除する」へフォーカスを戻す。
+ * 削除の応答を待つ間は、状態の領域（role=status）で読み上げソフトへ伝え、ボタンを押せなくする。
+ *
+ * 暫定版で置かない操作: 取り出す・コピー（取り出しの作業で足す）、質問を作るボタン（質問の作成の作業で
+ * 足す）。取り出しの案内も、取り出すボタンを置くときに足す。
  * 会議の内容（タイトル・要約・質問・字幕）は、常に文字として表示する（ADR-15）。
  *
  * @param meetingId 表示する会議の番号
@@ -26,6 +34,16 @@ import { QuestionRegion } from './QuestionRegion';
 export function MeetingRecordView({ meetingId }: { readonly meetingId: string }) {
   const { load, reload } = useMeetingRecord(meetingId);
   const { requesting, request } = useSummaryRequest(meetingId, reload);
+  const navigate = useNavigate();
+  const remove = useMeetingDelete(async (outcome) => {
+    if (outcome === 'deleted') {
+      // 履歴は置き換える。戻るボタンで、削除した記録の画面へ戻らないため
+      void navigate(screenPaths.meetingList(), { replace: true });
+      return;
+    }
+    // 断られたときは、記録を読み直す（画面の状態を、アプリサーバーの状態に合わせる）
+    await reload();
+  });
   const statusId = useId();
 
   return (
@@ -39,9 +57,26 @@ export function MeetingRecordView({ meetingId }: { readonly meetingId: string })
       {load.phase === 'failed' ? (
         <p className="record__loading">記録を読み込めませんでした。</p>
       ) : null}
+      {/* 領域は先に文書へ置き、削除の間だけ文を入れる（読み上げソフトへ伝わるように） */}
+      <p className="record__status" role="status">
+        {remove.deleting ? '会議の記録を削除しています。' : null}
+      </p>
       {load.phase === 'ready' ? (
-        <RecordBody record={load.record} requesting={requesting} onRequestSummary={() => void request()} />
+        <RecordBody
+          record={load.record}
+          requesting={requesting}
+          onRequestSummary={() => void request()}
+          deleting={remove.deleting}
+          onDelete={() =>
+            remove.ask({ meetingId: load.record.meeting.meetingId, title: load.record.meeting.title })
+          }
+        />
       ) : null}
+      <DeleteMeetingDialog
+        target={remove.target}
+        onConfirm={() => void remove.confirm()}
+        onCancel={remove.cancel}
+      />
     </section>
   );
 }
@@ -51,10 +86,14 @@ function RecordBody({
   record,
   requesting,
   onRequestSummary,
+  deleting,
+  onDelete,
 }: {
   readonly record: MeetingRecord;
   readonly requesting: boolean;
   readonly onRequestSummary: () => void;
+  readonly deleting: boolean;
+  readonly onDelete: () => void;
 }) {
   const view = decideRecordView({
     status: record.meeting.status,
@@ -64,7 +103,12 @@ function RecordBody({
   });
   return (
     <>
-      <RecordHeader meeting={record.meeting} />
+      <RecordHeader
+        meeting={record.meeting}
+        deletable={view.deletable}
+        deleting={deleting}
+        onDelete={onDelete}
+      />
       <SummaryRegion record={record} view={view} requesting={requesting} onRequest={onRequestSummary} />
       <QuestionRegion record={record} />
       <SubtitleRegion subtitles={record.subtitles} />
