@@ -12,7 +12,8 @@ import { useClipboardCopy } from '../../records/useClipboardCopy';
  *   押す前から文書に置く（あとから入った文を、読み上げソフトが、いまの読み上げを妨げずに伝える）
  * - ブラウザーが書き込みを断ったら、お知らせ帯にエラーを出し（useClipboardCopy）、ボタンの下に、文面を入れた
  *   読み取り専用の欄を出す。欄は、文面をすべて選んだ状態で、フォーカスを受ける。利用者は、そのまま
- *   Ctrl+C でコピーできる。欄は「閉じる」で閉じる（フォーカスはコピーのボタンへ戻る）
+ *   Ctrl+C でコピーできる。欄を開いたまま、もう一度断られたときも、選び直してフォーカスを移す。
+ *   欄は「閉じる」で閉じる（フォーカスはコピーのボタンへ戻り、お知らせ帯のエラーも消える）
  * - コピーする内容が無いとき（disabled）は、押せない見た目で、ボタンを残す（操作の場所を見失わないため）
  * - 会議の内容は文字として扱う。欄は textarea の値に入れるため、HTML として解釈されない
  *
@@ -36,20 +37,20 @@ export function CopyButton({
   readonly disabled: boolean;
   readonly getText: () => string;
 }) {
-  const { copied, manualText, copy, closeManual } = useClipboardCopy();
+  const { copied, manualText, failureCount, copy, closeManual } = useClipboardCopy();
   const labelId = useId();
   const hintId = useId();
   const buttonRef = useRef<HTMLButtonElement>(null);
   const areaRef = useRef<HTMLTextAreaElement>(null);
 
-  // 文面の欄が出たら、文面をすべて選んで、フォーカスを移す（そのまま Ctrl+C でコピーできる）。
-  const showingManual = manualText !== null;
+  // 書き込みを断られるたびに、文面の欄の文面をすべて選んで、フォーカスを移す（そのまま Ctrl+C でコピーできる）。
+  // 欄を開いたまま、もう一度断られたときも選び直すため、欄の有無ではなく、断られた回数で動かす。
   useEffect(() => {
-    if (showingManual) {
+    if (failureCount > 0) {
       areaRef.current?.focus();
       areaRef.current?.select();
     }
-  }, [showingManual]);
+  }, [failureCount]);
 
   /** 欄を閉じ、フォーカスをコピーのボタンへ戻す（閉じた欄の中にあったフォーカスが、失われないように）。 */
   const handleClose = () => {

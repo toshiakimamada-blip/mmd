@@ -150,7 +150,7 @@ describe('CopyButton', () => {
    * 【テスト対象】文面の欄を閉じる
    * 【テスト内容】失敗のあと、欄の「閉じる」を押す
    * 【期待結果】欄が消え、フォーカスはコピーのボタンへ戻る（操作の場所を見失わない）。
-   *            お知らせ帯のエラーは残る（利用者が閉じるまで）
+   *            欄を指すお知らせ帯のエラーも消える
    */
   it('should close the text box and return the focus to the button', async () => {
     const user = userEvent.setup();
@@ -164,7 +164,41 @@ describe('CopyButton', () => {
 
     expect(screen.queryByRole('textbox')).not.toBeInTheDocument();
     expect(button).toHaveFocus();
-    expect(screen.getByRole('alert')).toBeInTheDocument();
+    expect(screen.queryByRole('alert')).not.toBeInTheDocument();
+  });
+
+  /**
+   * 【テスト対象】欄を開いたまま、もう一度断られる
+   * 【テスト内容】失敗して欄が出たあと、欄を閉じずにボタンを押し直し、また断られる。
+   *              1 回目は同じ文面、2 回目は記録を読み直したあとの別の文面で試す
+   * 【期待結果】断られるたびに、欄の文面がすべて選ばれ、フォーカスが欄へ移る（そのまま Ctrl+C でコピーできる）。
+   *            文面が変わったときは、欄も新しい文面になる
+   */
+  it('should select the text box again on every refusal while it is open', async () => {
+    const user = userEvent.setup();
+    stubClipboard(refusal);
+    let text = 'コピーする文面';
+    renderButton({ getText: () => text });
+    const button = screen.getByRole('button', { name: '要約をコピーする' });
+    const expectSelected = (box: HTMLTextAreaElement, value: string) => {
+      expect(box).toHaveFocus();
+      expect(box).toHaveValue(value);
+      expect(box.selectionStart).toBe(0);
+      expect(box.selectionEnd).toBe(value.length);
+    };
+
+    await user.click(button);
+    const box = (await screen.findByRole('textbox')) as HTMLTextAreaElement;
+    expectSelected(box, 'コピーする文面');
+
+    await user.click(button);
+    expect(button).not.toHaveFocus();
+    expectSelected(box, 'コピーする文面');
+
+    text = '読み直したあとの文面';
+    await user.click(button);
+    await waitFor(() => expectSelected(box, '読み直したあとの文面'));
+    expect(screen.getAllByRole('alert')).toHaveLength(1);
   });
 
   /**

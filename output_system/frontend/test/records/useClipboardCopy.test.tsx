@@ -168,9 +168,9 @@ describe('useClipboardCopy', () => {
   /**
    * 【テスト対象】useClipboardCopy（手でコピーする欄を閉じる）
    * 【テスト内容】失敗のあと、closeManual を呼ぶ
-   * 【期待結果】手でコピーするための文字だけが消える。お知らせ帯のエラーは、利用者が閉じるまで残る
+   * 【期待結果】手でコピーするための文字が消える。その欄を指すお知らせ帯のエラーも消える
    */
-  it('should hide the manual text on closeManual and leave the notice to the user', async () => {
+  it('should hide the manual text and its notice on closeManual', async () => {
     stubClipboard(refusal);
     const { result } = renderHook(() => useClipboardCopy(), { wrapper });
     await act(() => result.current.copy('文面'));
@@ -178,7 +178,27 @@ describe('useClipboardCopy', () => {
     act(() => result.current.closeManual());
 
     expect(result.current.manualText).toBeNull();
-    expect(screen.getByRole('alert')).toBeInTheDocument();
+    expect(screen.queryByRole('alert')).not.toBeInTheDocument();
+  });
+
+  /**
+   * 【テスト対象】useClipboardCopy（断られた回数）
+   * 【テスト内容】同じ文面で 2 回続けて断られる。そのあと成功する
+   * 【期待結果】断られるたびに failureCount が増える（同じ文面でも、欄を選び直せる）。成功では増えない
+   */
+  it('should count every refusal even when the text is the same', async () => {
+    let refuse = true;
+    stubClipboard(() => (refuse ? refusal() : Promise.resolve()));
+    const { result } = renderHook(() => useClipboardCopy(), { wrapper });
+    expect(result.current.failureCount).toBe(0);
+
+    await act(() => result.current.copy('文面'));
+    await act(() => result.current.copy('文面'));
+    expect(result.current.failureCount).toBe(2);
+
+    refuse = false;
+    await act(() => result.current.copy('文面'));
+    expect(result.current.failureCount).toBe(2);
   });
 
   /**

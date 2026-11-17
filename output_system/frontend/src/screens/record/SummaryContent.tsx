@@ -1,7 +1,7 @@
 import { useId } from 'react';
 
 import { formatDateTimeToMinute } from '../../records/formatDateTime';
-import { SUMMARY_TITLES } from '../../records/recordText';
+import { NOT_APPLICABLE_TEXT, SUMMARY_TITLES } from '../../records/recordText';
 import { type RecordSummary } from '../../records/recordTypes';
 import { splitSummaryLines } from '../../records/summaryLines';
 
@@ -48,7 +48,7 @@ function BulletItem({ title, text }: { readonly title: string; readonly text: st
         {title}
       </h4>
       <ul className="summary__list" aria-labelledby={headingId}>
-        {(lines.length === 0 ? ['該当なし'] : lines).map((line, index) => (
+        {(lines.length === 0 ? [NOT_APPLICABLE_TEXT] : lines).map((line, index) => (
           // 同じ文の項目がありうるため、番号も鍵に含める。並びは変わらない（読み込みごとに作り直す）。
           <li key={`${index}:${line}`}>{line}</li>
         ))}

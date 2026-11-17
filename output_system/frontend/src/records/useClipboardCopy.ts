@@ -18,9 +18,14 @@ export interface UseClipboardCopy {
    * 会議の内容を含む。画面の欄にだけ出し、ログやコンソールには出さない。
    */
   readonly manualText: string | null;
+  /**
+   * 書き込みを断られた回数。失敗のたびに増える。欄を開いたまま、もう一度断られたときも、
+   * 欄の文面を選び直すために使う（manualText は、同じ文面だと変わらない）。
+   */
+  readonly failureCount: number;
   /** 文字をクリップボードへ書き込む。結果は copied と manualText とお知らせ帯で伝える。例外は投げない。 */
   readonly copy: (text: string) => Promise<void>;
-  /** 手でコピーするための文字の欄を閉じる。お知らせ帯のエラーは、利用者が閉じるまで残す。 */
+  /** 手でコピーするための文字の欄を閉じる。欄を指すお知らせ帯のエラーも、あわせて消す。 */
   readonly closeManual: () => void;
 }
 
@@ -57,6 +62,7 @@ export function useClipboardCopy(): UseClipboardCopy {
   const { post, clear } = useNoticeActions();
   const [copied, setCopied] = useState(false);
   const [manualText, setManualText] = useState<string | null>(null);
+  const [failureCount, setFailureCount] = useState(0);
   // 「コピーしました」を消す時計。
   const timer = useRef<ReturnType<typeof setTimeout> | null>(null);
   // 画面に出ているか。書き込みの応答を待つ間に消えたとき、あとから状態を更新しないために持つ。
@@ -91,6 +97,7 @@ export function useClipboardCopy(): UseClipboardCopy {
         stopTimer();
         setCopied(false);
         setManualText(text);
+        setFailureCount((count) => count + 1);
         post({
           kind: 'error',
           id: COPY_FAILED_NOTICE_ID,
@@ -115,7 +122,9 @@ export function useClipboardCopy(): UseClipboardCopy {
 
   const closeManual = useCallback((): void => {
     setManualText(null);
-  }, []);
+    // お知らせの案内は「ボタンの下に出した欄の文面を選んで」。欄を閉じたら、指す先が無くなる。
+    clear(COPY_FAILED_NOTICE_ID);
+  }, [clear]);
 
-  return { copied, manualText, copy, closeManual };
+  return { copied, manualText, failureCount, copy, closeManual };
 }
