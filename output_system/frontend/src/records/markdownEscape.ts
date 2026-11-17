@@ -28,7 +28,7 @@
  */
 
 /** 長さ 0 の空白（U+200B）。URL とメールアドレスの自動リンクを止めるために差し込む。 */
-export const ZERO_WIDTH_SPACE = '​';
+export const ZERO_WIDTH_SPACE = '\u200B';
 
 /** 改行として扱う文字（CRLF・CR・VT・FF・NEL・行区切り・段落区切り）。LF にそろえる。 */
 const LINE_BREAKS = /\r\n|[\r\v\f\u0085\u2028\u2029]/g;
