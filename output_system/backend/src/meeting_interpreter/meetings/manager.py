@@ -287,6 +287,16 @@ class MeetingManager:
             raise meeting_not_found(meeting_id)
         return await self._store.list_subtitles(meeting_id)
 
+    # --- 会議の一覧の読み出し ------------------------------------------------------------
+
+    async def list_meetings(self) -> list[Meeting]:
+        """すべての会議を、開始日時の新しい順に返す。会議が無ければ空のリスト。
+
+        通訳中の会議も含める。会議の長さと作成ジョブの有無は、返さない（長さは画面が求め、
+        作成ジョブの有無は、経路が作成ジョブ管理部に問い合わせる）。
+        """
+        return await self._store.list_meetings()
+
     # --- 会議の記録の読み出し ------------------------------------------------------------
 
     async def get_record(self, meeting_id: str) -> MeetingRecord:

@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 
 import { type JobStatus, type JobType, type MeetingStatus, type RecordJob } from '../../src/records/recordTypes';
-import { decideRecordView, type RecordViewInput } from '../../src/records/recordView';
+import { decideRecordView, isDeletable, type RecordViewInput } from '../../src/records/recordView';
 
 /** 作成ジョブ 1 件。 */
 function job(jobType: JobType, status: JobStatus = 'running'): RecordJob {
@@ -197,5 +197,46 @@ describe('decideRecordView: common rules', () => {
     expect(
       decideRecordView(input('summarizing', { jobs: [job('summary')] })).questionCreatable,
     ).toBe(true);
+  });
+});
+
+/**
+ * 【モジュール】src/records/recordView（削除を押せるかの判定）
+ * 「会議の一覧」は、字幕の件数と要約を持たない。状態と作成ジョブの有無だけで、削除を押せるかを決める。
+ */
+describe('isDeletable: the delete button of the meeting list', () => {
+  /**
+   * 【テスト対象】isDeletable（状態 × 作成ジョブの有無）
+   * 【テスト内容】5 つの状態を、作成ジョブが無い場合と、ある場合で試す
+   * 【期待結果】中断・完了・要約失敗で、作成ジョブが無いときだけ押せる。通訳中と要約作成中は、
+   *            作成ジョブが無くても押せない。作成ジョブがあれば、どの状態でも押せない
+   */
+  it.each([
+    ['interpreting', false, false],
+    ['interrupted', false, true],
+    ['summarizing', false, false],
+    ['completed', false, true],
+    ['summary_failed', false, true],
+    ['interpreting', true, false],
+    ['interrupted', true, false],
+    ['summarizing', true, false],
+    ['completed', true, false],
+    ['summary_failed', true, false],
+  ] as const)('should answer for %s with active job %s: %s', (status, hasActiveJob, expected) => {
+    expect(isDeletable(status, hasActiveJob)).toBe(expected);
+  });
+
+  /**
+   * 【テスト対象】isDeletable と decideRecordView の一致
+   * 【テスト内容】同じ状態・同じ作成ジョブの有無で、「会議の記録」の削除の判定と比べる
+   * 【期待結果】どの組み合わせでも同じ答えになる（一覧と記録で、削除の条件がずれない）
+   */
+  it('should agree with the delete decision of the record screen', () => {
+    for (const status of ['interpreting', 'interrupted', 'summarizing', 'completed', 'summary_failed'] as const) {
+      for (const active of [false, true]) {
+        const jobs = active ? [job('questions', 'queued')] : [];
+        expect(isDeletable(status, active)).toBe(decideRecordView(input(status, { jobs })).deletable);
+      }
+    }
   });
 });

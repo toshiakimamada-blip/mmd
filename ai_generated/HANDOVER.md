@@ -39,7 +39,7 @@ output_system/
 │   │   │   └── conversion/   # 翻訳モデルの変換。アプリサーバー側: service.py（管理部への口）・process.py（起動と見届け）・receipt.py（控えと判定）・layout.py・protocol.py。変換プロセス側: worker.py・network_guard.py・sandbox.py・safe_torch.py
 │   │   ├── meetings/         # 会議管理部。transitions.py（遷移規則の表）、manager.py（開始・終了の窓口、進行中は 1 件）、session.py（会議 1 件の音声・字幕・終了・中断・ワーカーの起動し直し）、inputs.py、errors.py、workers.py（ワーカーの起動の入口。テストは偽のエンジンを渡す）。使い方は docs/meetings.md
 │   │   ├── notify/hub.py     # 通知部（/ws/events）
-│   │   └── api/{health,models,meetings,ws}.py  # /api/health、/api/models/*、POST /api/meetings と /end と /summary、GET /api/meetings/{会議番号}/subtitles、/ws/audio/{会議番号} と /ws/events
+│   │   └── api/{health,models,meetings,system,ws}.py  # GET /api/system/alerts（ディスクの空きの警告。records/disk_space.py の DiskSpaceMonitor が判定）、/api/health、/api/models/*、POST /api/meetings と /end と /summary、GET /api/meetings/{会議番号}/subtitles、/ws/audio/{会議番号} と /ws/events
 │   └── test/                 # src と同じ構造。test/container/ は起動したコンテナを相手にする（MMD_CONTAINER_URL のときだけ動く）。test/browser/ はブラウザーで手動で確かめる確認用のサーバー（pytest は集めない）。test/distribution_server.py（擬似の配布元、HTTPS）と test/model_fakes.py（小さな定義・偽の入手の部品）と test/interpreter_audio.py（合成音声・音声ファイルの読み込み）は共通の道具。test/measure/measure_interpreter.py は、本物のモデルで字幕の遅れとメモリを測る道具、test/measure/measure_generation.py は、生成ワーカーの作成時間とメモリを測る道具（どちらも pytest は集めない）。test/meeting_fakes.py は会議管理部のテストの道具（偽のエンジンの入口、本物の uvicorn を起動する running_app、記録の読み取り）。test/generation_fakes.py（偽の文章生成）と test/meeting_subtitles.py（英語の会議の字幕の見本。測定と動作確認用）も共通の道具。test/meeting_fakes.py の `make_app` は、会議の終了で要約を始める呼び出し（`on_meeting_ended`）を、既定では何もしないものにする（本番の組み立てで確かめるテストは `on_meeting_ended=None` と `generation_launcher=InProcessLauncher()` を渡す）。test/job_fakes.py は作成ジョブ管理部のテストの道具（同じプロセスで動かす偽の生成ワーカー `InProcessLauncher`、別のプロセスで動かす `ProcessLauncher`、ブロックの区切りで止める位置を決める `BlockGate`）
 ├── frontend/
 │   ├── src/{routes.ts,router.tsx,components/AppFrame.tsx,screens/*,styles/{frame,notices,live}.css}
@@ -48,6 +48,7 @@ output_system/
 │   ├── src/screens/prepare/ + src/meetings/ + src/models/ # 「会議の準備」: PrepareForm（入力・二度押しの防止）・PrepareGuidance・ModelStatusPanel。meetings/: meetingInput.ts（検査）・startMeeting.ts（開始の流れ）・MeetingCaptureProvider.tsx（取り込みの預け先）・guidanceTexts.ts（案内の文言を集めた 1 か所）。models/: modelStatus.ts・useModelStatus.ts。docs/prepare-screen.md
 │   ├── src/screens/live/ + src/components/subtitles/ # 「会議中」の中身と字幕の行・一覧・追いかける領域（SubtitleRow は「会議の記録」でも使い回す）。docs/live-screen.md
 │   ├── src/screens/record/ + src/records/ + src/components/questions/ # 「会議の記録」: MeetingRecordView（領域の組み立て）・RecordHeader・SummaryRegion/SummaryContent/SummaryProgress・QuestionRegion・SubtitleRegion。records/: recordTypes.ts（`GET /api/meetings/{会議番号}` の応答の検査と読み替え）・recordView.ts（状態別の表示と操作の表。純粋な関数）・useMeetingRecord.ts（読み込みと通知での更新）・useSummaryRequest.ts（要約の依頼）・summaryLines.ts・jobTexts.ts・formatDateTime.ts。QuestionSetList は「会議中」でも使い回す。docs/record-screen.md
+│   ├── src/screens/list/ + src/records/useMeetingList.ts + src/system/ # 「会議の一覧」: MeetingListBody（読み込み中・失敗・0 件・行の並び）・MeetingRow（行の項目と「開く」「削除」）・UsageFlow（使い方の流れ）。useMeetingList は読み込みと通知での更新。system/: useDiskSpaceWarning（開いた時点でディスクの空きを聞き、お知らせ帯に警告。一覧と準備が使う）・systemAlerts.ts（応答の読み替え）。api/systemApi.ts。docs/list-screen.md
 │   ├── scripts/              # ビルドした dist/ に外部の URL への参照が無いかの検査（npm run build の最後に走る）
 │   ├── src/errors/           # エラーの型と、エラーコードごとの文言の一覧（errorMessages.ts）
 │   ├── src/audio/            # ブラウザーの音声の取り込み。audioInput.ts（画面共有・マイク）、audioErrors.ts（理由の種類）、pcmConversion.ts（16kHz・モノラル・16 ビットへの変換）、pcmCaptureWorklet.ts（AudioWorklet の処理部）、audioPipeline.ts、audioSender.ts（順序つきの送信）、audioCaptureSession.ts（会議 1 回ぶん。停止の検知・やり直し）、browserEnvironment.ts（実ブラウザーの部品の作り方）。使い方・確かめた結果は docs/audio-capture.md
@@ -55,7 +56,7 @@ output_system/
 │   └── test/                 # src と同じ構造。test/browser/capture-check/ は実ブラウザーで音声の取り込みを確かめる確認用のページ（ビルドの対象外。出荷しない）。test/audio/fakes.ts は偽のトラック・ストリーム・WebSocket・AudioContext・処理部
 ├── tools/with-pinned-node.sh # Dockerfile と同じ版の Node.js で、渡されたコマンド（npm install など）を実行する
 ├── config/                   # tuning.toml（調整値の仮置き）、models.toml（3 つの AI モデルの定義）、translation_alternatives.md（翻訳モデルの代わりの候補）
-├── docs/                     # errors.md（エラーの扱い・コード一覧）、notices.md（画面の部品の使い方）、models.md（入手・変換）、interpreter.md（通訳ワーカー・測定値）、generation.md（生成ワーカー・測定値）、meetings.md（会議の開始と終了・通知・実機での確認）、events.md（通知の受信と再接続）、record-screen.md（「会議の記録」の画面と確認）、live-screen.md（「会議中」の画面と確認）、prepare-screen.md（「会議の準備」の画面と確認）、jobs.md（作成ジョブ管理部）
+├── docs/                     # errors.md（エラーの扱い・コード一覧）、notices.md（画面の部品の使い方）、models.md（入手・変換）、interpreter.md（通訳ワーカー・測定値）、generation.md（生成ワーカー・測定値）、meetings.md（会議の開始と終了・通知・実機での確認）、events.md（通知の受信と再接続）、record-screen.md（「会議の記録」の画面と確認）、live-screen.md（「会議中」の画面と確認）、prepare-screen.md（「会議の準備」の画面と確認）、list-screen.md（「会議の一覧」の画面・ディスクの空きの警告と確認）、jobs.md（作成ジョブ管理部）
 ```
 
 ## ビルド・起動方法
@@ -153,7 +154,11 @@ output_system/
 - 字幕の領域は、最下部から 24px 以内かで追いかけているかを決める。字幕の取得は `cache: 'no-store'`（会議の内容を HTTP キャッシュに残さない）。失敗は `ApiError` にそろえ、画面は `toDisplayError` で文言を引く。経過時間は、秒の切り替わりで更新し（`setInterval` だと秒がとぶ）、タブが見えたときに直す
 - 「会議の記録」の取得は `GET /api/meetings/{会議番号}` の 1 回（会議・字幕・要約・質問のまとまり・作成ジョブ）。字幕の別取得は、再接続の抜けを埋める「会議中」の用。状態ごとの表示と操作は `records/recordView.ts` の純粋な関数 1 つ（表の全行を `test/records/recordView.test.ts` が検査）。質問を作るボタンと削除は、暫定版では画面に置かないが、関数は表のとおりに答える（ボタンを足すときに出し分けを作り直さない）。「質問を作る」ボタンを今作らないのは、PBI #108 のコメント（質問の作成を暫定版のあとに回した）による
 - 「会議の記録」の更新は、通知で記録を読み直す（`meeting.state_changed`・`job.status_changed`）。`job.progress_changed` は読み直さず、処理したブロックの数だけ差し替える（ブロックごとに届くため）。読み込みは最後に送った 1 件の結果だけを使い、画面を離れたあとの応答は捨てる。要約の依頼は、読み直しを終えてからボタンを押せる状態へ戻す（先に戻すと、押せる状態が一瞬見える）
-- 質問の作成（PBI #104）: `POST /api/meetings/{会議番号}/question-sets`（202）は会議の状態を変えず、字幕が 1 件以上あれば受け付ける。保存は質問のまとまり 1 件と質問 5 件を 1 回の確定で行い、5 組に満たない出力は 1 問も保存しない（`QuestionRequests`・`QuestionOutcomes`）。通訳中の会議があるときは、生成ワーカーを会議中の割り当て（2 スレッド・nice 10）で起動し、会議の開始・終了・中断で `SetCpu` を送って切り替える。作成が終わるとワーカーを止める（会議中の割り当てを残さない）。値は調整値で、仮置きのまま
+- 質問の作成（PBI #104）: `POST /api/meetings/{会議番号}/question-sets`（202）は会議の状態を変えず、字幕が 1 件以上あれば受け付ける。保存は質問のまとまり 1 件と質問 5 件を 1 回の確定で行い、5 組に満たない出力は 1 問も保存しない（`QuestionRequests`・`QuestionOutcomes`）。通訳中の会議があるときは、生成ワーカーを会議中の割り当て（調整値 `generation_cpu_threads_during_meeting`。いまは 4 スレッド・nice 10）で起動し、会議の開始・終了・中断で `SetCpu` を送って切り替える。作成が終わるとワーカーを止める（会議中の割り当てを残さない）。値は調整値で、仮置きのまま
+- 「会議の一覧」（PBI #119）は、アプリサーバーが返した順（開始日時の新しい順）のまま並べ、画面では並べ替えない。更新は `meeting.state_changed`・`job.status_changed`・接続のつなぎ直しで読み直す（進み具合と字幕は読み直さない）。読み込みを重ねたら、最後に送った結果だけを使う
+- 一覧の「削除」は、`MeetingRow` に `onDelete` が渡されるまで、どの行でも押せない（条件 `isDeletable`（`records/recordView.ts`）を満たす行でも）。削除の PBI（#123）が `onDelete` を渡す。動作の無いボタンを押せる見た目にしないため
+- ディスクの空きの警告: `DiskSpaceMonitor` が、記録の置き場の `shutil.disk_usage` の free を、調整値（1GB = 1024 の 3 乗バイト）と比べる（ちょうど同じは下回りでない）。結果は覚えず、`GET /api/system/alerts` が呼ばれるたびに聞き直す。応答は警告の種類だけ（置き場のパスと空きの量は返さない。文面は画面が持つ）。読めないとき（`OSError`）は「警告なし」と答えず 500 にし、画面は警告を出さずに主な内容を出す。警告は画面を開いた時点の 1 回だけで、開いたまま空きが戻っても（記録を削除したあとも）、開き直すまで消えない
+- 警告の取得（`useDiskSpaceWarning`）は、一覧や準備の表示を待たせない。`create_app(disk_usage=...)` で、テストが空きを差し替える
 
 ## はまりポイント
 - `.gitignore` の `tools/`（gaido 管理）が `output_system/tools/` にも当たる。`!/output_system/tools/` で打ち消している
@@ -222,6 +227,10 @@ output_system/
 - `test_audio_and_subtitles.py` の 2 つ（`test_should_pass_audio_to_the_worker_in_order_with_the_arrival_time`、`TestNotificationHub::test_should_not_let_a_screen_that_does_not_read_block_the_others`）は、この環境で 5 回に 1 回ほど落ちる（前者は時刻の比較、後者は websockets の `recv` が別のスレッドと重なる）。変更の前の main でも同じ失敗が出た。再実行で通る
 - 要約の作成中（状態が要約作成中）にコンテナを再起動すると、作成ジョブ（メモリだけ）が消え、会議は要約作成中のまま残る（起動時の復旧 PBI 7.1 が暫定版で未実装）。実機の確認では、再起動しない。要約の作成は、この開発環境で約 2 分（字幕 3 件）。確認のスクリプトは、`POST /api/meetings` と `/ws/audio/…` に `Origin: http://<コンテナ名>:3001` を付ける（付けないと 403）。`playwright-cli` は root では `--config` で `channel: chrome`・`chromiumSandbox: false` を指定する
 - 会議中の質問の測定（`test/measure/measure_question_during_meeting.py`）は、字幕の遅れを単調増加時計へ換算して求める（この環境の WSL2 は、壁時計が毎分約 2 秒進む）。2026-11-13 に、会議中の生成ワーカーのスレッド数 1・2・4 で測った（結果は `output_system/docs/jobs.md`）。質問の作成が 3 分以内に収まったのは 4 スレッドだけ（4 回中 3 回）だったため、`generation_cpu_threads_during_meeting` を 2 から 4 へ変えた。ただし、測った 8 回のうち 3 回（1・2・4 スレッドが 1 回ずつ）は、字幕の遅れが 160 秒を超えて戻らなかった。会議のあとだけにするか、遅れている間は生成を止めるかは、利用者の判断が要る（確認事項 13）。測定には英語の音声が要る（`curl -fsSL -o /tmp/jfk.flac https://github.com/openai/whisper/raw/main/tests/jfk.flac`）。コンテナの中のプロセスごとの CPU は `test/measure/sample_process_cpu.py`、生成ワーカーだけの確認は `test/measure/probe_generation_worker.py` で測る（使い方は各ファイルの先頭）
+- 実機で「空きが少ない」状態を作る: 本物のディスクを埋めず、`docker compose -f docker-compose.yml -f <上書きファイル> up -d` で環境変数 `MMD_TUNING_DISK_FREE_WARNING_GIGABYTES=10000`（調整値の上限）を渡す。上書きファイルはリポジトリの外（`/tmp`）に置く。確認のあとは `docker compose up -d` だけで戻す
+- 実機で「記録が 0 件」を見る: 記録のボリュームを消さず、同じイメージで、`MMD_RECORDS_DIR=/tmp/records-empty`・コンテナ名と `MMD_APP_HOSTNAME` を別名・`ports: !reset []`・モデルのボリュームだけを `:ro` でつないだ一時のコンテナを `docker compose -p <別名> ... up -d --no-build` で作る（確認のあと `down`）
+- この環境の `playwright-cli` は、root で動くため、設定ファイル（`--config`）で `"channel": "chrome"` と `"chromiumSandbox": false` を渡さないと起動しない。同梱の chromium は無く、`/opt/google/chrome` を使う。音声を使う画面は、さらに `--use-fake-ui-for-media-stream` と `--use-fake-device-for-media-stream` を足す
+- `test/screens/MeetingRecordQuestionsSubtitles.test.tsx` が、全体のテストを走らせたとき 1 回だけ、見出しを待つ `findByRole` で落ちた（単独では通り、直後のカバレッジつきの全体の実行でも通った）。負荷による揺れとみなしている。続くようなら、その待ちの時間を見直す
 
 ## 実装済み機能
 - PBI #2: コンテナの起動、共通の枠と 4 画面の骨組み、`GET /api/health`、配信部、名前付きボリューム 2 つ、自動再起動
@@ -240,3 +249,4 @@ output_system/
 - PBI #99: 会議の終了から要約へのつなぎ。字幕が 1 件以上の会議は、終了で自動で要約のジョブが登録され、4 項目の日本語の要約が保存されて、状態が完了になる（字幕 0 件は完了のまま、中断は自動では作らない）。`POST /api/meetings/{会議番号}/summary` が、中断・要約失敗・完了の会議の要約を作る・作り直す（202。同じ会議の要約のジョブがあれば、それを返す。字幕 0 件は `SUMMARY_NO_CONTENT`）。失敗では、状態が要約失敗になり、失敗理由（エラーコード）が保存され、作り直しの失敗では前の要約が残る。`job.status_changed` に待機中の理由 `wait_reason`、ブロックごとの `job.progress_changed`。出荷するコンテナで本物のモデルを動かして確かめた（`docs/jobs.md`「要約の確認」）。画面（要約を作るボタン・進み具合の表示）、会議の取得 API、起動時の復旧（PBI 7.1）、質問の保存（PBI 5.3）は含まない
 - PBI #108: 「会議の記録」の画面（`GET /api/meetings/{会議番号}`、S-04）。タイトル・開始日時・会議の長さ・状態、要約の 4 項目（1 行ずつ箇条書き・文字として表示・「該当なし」）、作成状況と進み具合（待機中の添え書き）、失敗の表示（前の要約も併せて）、「要約を作る」「要約を作り直す」、質問のまとまり（新しい順・英日・作成した時点。無いときは「質問はまだありません。」）、字幕、通知での更新、記録が無いときは一覧へ移ってお知らせ帯。出荷するコンテナで確かめた（docs/record-screen.md）。質問を作るボタン・削除・書き出し・コピーは含まない
 - PBI #104: 質問を作れる。質問の作成の依頼と保存（`POST /api/meetings/{会議番号}/question-sets`、5 組を 1 回の確定で保存）、会議中の生成ワーカーの CPU 割り当て（会議の状態で切り替え、作成中の状況は `job.status_changed` で通知）、会議中の質問の測定道具。画面の「字幕が遅れることがあります」の表示は会議中の画面の作業
+- PBI #119: 「会議の一覧」の画面（S-01。`GET /api/meetings`、開始日時の新しい順、タイトル・開始日時・会議の長さ・状態・「開く」・押せない「削除」、0 件の案内、使い方の流れ、通知での更新）と、ディスクの空きの警告（`GET /api/system/alerts`。「会議の一覧」と「会議の準備」を開いた時点で、空きが 1GB を下回ればお知らせ帯に警告。保存は止めない）

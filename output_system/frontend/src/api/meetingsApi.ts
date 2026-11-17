@@ -4,6 +4,7 @@
 
 import { readLiveMeeting } from '../meetings/liveMeeting';
 import { type MeetingStartRequest } from '../meetings/meetingInput';
+import { type MeetingListItem, parseMeetingList } from '../records/meetingListTypes';
 import { type MeetingRecord, parseMeetingRecord } from '../records/recordTypes';
 import { parseSubtitle, type Subtitle } from '../subtitles/subtitleTypes';
 import { requestJson } from './apiClient';
@@ -122,4 +123,16 @@ export async function fetchMeetingRecord(meetingId: string): Promise<MeetingReco
  */
 export async function requestSummary(meetingId: string): Promise<void> {
   await requestJson(`/api/meetings/${encodeURIComponent(meetingId)}/summary`, { method: 'POST' });
+}
+
+/**
+ * 会議の一覧を取得する（GET /api/meetings）。すべての会議を、開始日時の新しい順に、1 回の応答で受け取る
+ * （件数に上限は無い）。会議が 1 件も無ければ、空の配列。
+ *
+ * 会議の内容（タイトル）がブラウザーの HTTP キャッシュ（保存領域）に残らないよう、キャッシュを使わない。
+ *
+ * @throws ApiError 応答が読めない・アプリサーバーに届かなかった・保存した記録を読めなかったとき
+ */
+export async function fetchMeetingList(): Promise<readonly MeetingListItem[]> {
+  return requestJson('/api/meetings', { method: 'GET', cache: 'no-store' }, parseMeetingList);
 }

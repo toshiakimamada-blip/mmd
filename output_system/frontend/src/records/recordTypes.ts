@@ -100,16 +100,17 @@ export interface MeetingRecord {
 }
 
 /** 値が、プロパティを持てる普通のオブジェクト（配列と null を除く）かを返す。 */
-function isRecord(value: unknown): value is Record<string, unknown> {
+export function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value);
 }
 
 /** 読めない値があったときの例外。呼び出し側（requestJson）が、想定外のエラーにする。 */
-function invalid(what: string): never {
+export function invalid(what: string): never {
   throw new Error(`${what}の形ではありません`);
 }
 
-function readString(value: Record<string, unknown>, key: string, what: string): string {
+/** 文字列の項目を読む。文字列でなければ例外。 */
+export function readString(value: Record<string, unknown>, key: string, what: string): string {
   const item = value[key];
   if (typeof item !== 'string') {
     return invalid(what);
@@ -117,7 +118,8 @@ function readString(value: Record<string, unknown>, key: string, what: string): 
   return item;
 }
 
-function readDate(value: Record<string, unknown>, key: string, what: string): Date {
+/** 日時（UTC のミリ秒までの文字列）の項目を読む。日時として読めなければ例外。 */
+export function readDate(value: Record<string, unknown>, key: string, what: string): Date {
   const date = new Date(readString(value, key, what));
   if (Number.isNaN(date.getTime())) {
     return invalid(what);

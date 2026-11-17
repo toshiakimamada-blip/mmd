@@ -5,6 +5,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { AudioCaptureError } from '../../src/audio/audioErrors';
 import { type AudioSource } from '../../src/audio/audioSource';
+import { DISK_SPACE_LOW_WARNING } from '../../src/meetings/guidanceTexts';
 import { routes } from '../../src/router';
 import { createFakeEnvironment, openFakeInput, type FakeTrack } from '../audio/fakes';
 import { FakeEventSocket } from '../events/fakeWebSocket';
@@ -52,6 +53,8 @@ interface ApiOptions {
   model?: () => Promise<Response>;
   start?: (body: { title: string; audio_source: string }) => Promise<Response>;
   end?: () => Promise<Response>;
+  /** ディスクの空きの警告（GET /api/system/alerts）への答え。省略すると、警告なし。 */
+  alerts?: () => Promise<Response>;
 }
 
 function stubApi(options: ApiOptions = {}) {
@@ -75,6 +78,13 @@ function stubApi(options: ApiOptions = {}) {
     }
     if (path === '/api/meetings/abc123/subtitles') {
       return Promise.resolve(jsonResponse({ subtitles: [] }));
+    }
+    if (path === '/api/system/alerts' && method === 'GET') {
+      return options.alerts?.() ?? Promise.resolve(jsonResponse({ alerts: [] }));
+    }
+    // 「取りやめる」などで「会議の一覧」へ移ると、一覧の取得が走る（会議が 0 件の応答を返す）
+    if (path === '/api/meetings' && method === 'GET') {
+      return Promise.resolve(jsonResponse({ meetings: [] }));
     }
     return Promise.reject(new Error(`想定していない呼び出し: ${method} ${path}`));
   });
@@ -514,5 +524,36 @@ describe('MeetingPrepareScreen ending the meeting that it started', () => {
 
     expect(socket.closeCalls).toHaveLength(1);
     expect(env.inputs[0].audio.readyState).toBe('ended');
+  });
+
+  /**
+   * 【テスト対象】MeetingPrepareScreen のディスクの空きの警告（F-15）
+   * 【テスト内容】記録の置き場の空きが少ない状態で、「会議の準備」を開く
+   * 【期待結果】お知らせ帯に警告（エラーではない）が出ること。開始のボタンは、準備が済めば押せる（警告のみ）
+   */
+  it('should show the low disk space warning in the notice band when the screen is opened', async () => {
+    stubApi({ alerts: () => Promise.resolve(jsonResponse({ alerts: ['disk_space_low'] })) });
+    setupEnvironment();
+    openPrepare();
+
+    const warning = await within(noticeBand()).findByText(DISK_SPACE_LOW_WARNING);
+
+    expect(warning.closest('[data-notice-kind="warning"]')).not.toBeNull();
+    expect(within(noticeBand()).queryByRole('alert')).toBeNull();
+    await untilReady();
+  });
+
+  /**
+   * 【テスト対象】MeetingPrepareScreen のディスクの空きの警告
+   * 【テスト内容】空きが十分にある状態で、「会議の準備」を開く
+   * 【期待結果】警告は出ないこと
+   */
+  it('should not show a disk space warning when there is enough free space', async () => {
+    stubApi();
+    setupEnvironment();
+    openPrepare();
+    await untilReady();
+
+    expect(noticeBand().querySelector('[data-notice-kind="warning"]')).toBeNull();
   });
 });

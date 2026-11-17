@@ -342,6 +342,22 @@ class RecordStore:
         row = await self._database.run(work, write=False)
         return None if row is None else _meeting_from_row(row)
 
+    async def list_meetings(self) -> list[Meeting]:
+        """すべての会議を、開始日時の新しい順に読み出す。会議が無ければ空のリスト。
+
+        会議の一覧の画面（GET /api/meetings）が使う。件数に上限を置かず、1 回の読み取りで返す
+        （1 件の会議の行は小さく、字幕と要約は読まない）。開始日時が同じ会議は、あとから保存した
+        ほうを先に返す（rowid の降順。読むたびに並びが変わらない）。
+        """
+
+        def work(connection: sqlite3.Connection) -> list[tuple]:
+            return connection.execute(
+                f"SELECT {_MEETING_COLUMNS} FROM meetings ORDER BY started_at DESC, rowid DESC"
+            ).fetchall()
+
+        rows = await self._database.run(work, write=False)
+        return [_meeting_from_row(row) for row in rows]
+
     @_log_record_errors
     async def add_subtitle(
         self,
