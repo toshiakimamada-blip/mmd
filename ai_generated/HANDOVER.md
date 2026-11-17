@@ -161,6 +161,8 @@ output_system/
 - 警告の取得（`useDiskSpaceWarning`）は、一覧や準備の表示を待たせない。`create_app(disk_usage=...)` で、テストが空きを差し替える
 - 記録の削除（PBI #123）: 会議管理部が「会議が無ければ成功 → 状態（中断・完了・要約失敗）→ 作成ジョブの有無」の順に確かめ、記録保存部は条件を確かめずに 2 回に分けて確定する（1 回目は更新前の控え、2 回目は記録データベース）。`RECORD_DELETE_FAILED` に原因をそろえ、行は 1 件も消さない。削除は通知（`/ws/events`）で知らせない。確認は `DeleteMeetingDialog`（Escape で取りやめ）、実行と二重押しの防止は `useMeetingDelete`。確認の表示は一覧と記録で共通
 - 更新前の控え（PBI 7.2 で作る）: 削除の口 `records/backup.py` の `UpdateBackup`（`erase_meeting`）だけ用意し、`RecordStore(update_backup=...)` が None の間は 1 回目を飛ばす。控えを作るときは、この口に合わせて渡す
+- 記録のコピー（PBI #127）: 文面は画面が読み込み済みの記録から組み立てる（`records/recordText.ts`。要約は【見出し】と「・」、質問は「番号. 英語」と字下げした日本語、字幕は「時刻 英語」と日本語訳）。会議の内容の記号は変換しない（プレーンテキスト）。Markdown の取り出し（PBI 6.4）は、同じ `SUMMARY_TITLES`・`NO_TRANSLATION_TEXT`・`splitSummaryLines`・日時の整形を使い回し、記号の変換だけを足す
+- コピーのボタン `CopyButton` は、ボタン・結果の表示（`aria-live="polite"` の領域は押す前から置く）・失敗したときの文面の欄を、フラグメントで返す。置き場は折り返せる横並び（`.record__actions--copy`）。失敗はお知らせ帯の `RECORD_COPY_FAILED`（画面だけが決めるコード。サーバーは返さない）。お知らせの識別子は 1 つ（`copy-failed`）で、どのボタンの成功でも消える。「会議中」の質問のコピーは、質問の領域（PBI 5.5）が無いため置いていない。`QuestionSetList` に `copyable` を渡すと置ける
 
 ## はまりポイント
 - `.gitignore` の `tools/`（gaido 管理）が `output_system/tools/` にも当たる。`!/output_system/tools/` で打ち消している
@@ -233,6 +235,9 @@ output_system/
 - 実機で「記録が 0 件」を見る: 記録のボリュームを消さず、同じイメージで、`MMD_RECORDS_DIR=/tmp/records-empty`・コンテナ名と `MMD_APP_HOSTNAME` を別名・`ports: !reset []`・モデルのボリュームだけを `:ro` でつないだ一時のコンテナを `docker compose -p <別名> ... up -d --no-build` で作る（確認のあと `down`）
 - この環境の `playwright-cli` は、root で動くため、設定ファイル（`--config`）で `"channel": "chrome"` と `"chromiumSandbox": false` を渡さないと起動しない。同梱の chromium は無く、`/opt/google/chrome` を使う。音声を使う画面は、さらに `--use-fake-ui-for-media-stream` と `--use-fake-device-for-media-stream` を足す
 - `test/screens/MeetingRecordQuestionsSubtitles.test.tsx` が、全体のテストを走らせたとき 1 回だけ、見出しを待つ `findByRole` で落ちた（単独では通り、直後のカバレッジつきの全体の実行でも通った）。負荷による揺れとみなしている。続くようなら、その待ちの時間を見直す
+- `navigator.clipboard` は安全な接続（https と `localhost`）にだけある。コンテナ名で開くと無く、コピーは失敗の表示になる（利用者は `localhost` で開くため困らない）。実ブラウザーで成功を確かめるには、`playwright-cli` の設定ファイルで `launchOptions.args` に `--unsafely-treat-insecure-origin-as-secure=http://<コンテナ名>:3001`、`contextOptions.permissions` に `clipboard-read`・`clipboard-write` を指定する
+- Vitest の `userEvent.setup()` は、自分のクリップボードの偽物を `navigator` へ置く。自前の偽物（`test/records/clipboardKit.ts` の `stubClipboard`）は、`setup()` のあとに置く
+- 時刻を整形する関数は、読み込み時の PC のタイムゾーンで整形器を作る。画面のテストでタイムゾーンを東京に固定するには、import より前に `vi.hoisted(() => vi.stubEnv('TZ', 'Asia/Tokyo'))` を呼ぶ（`test/screens/MeetingRecordCopy.test.tsx`）。UTC のままでは、時刻の整形を忘れた文面も、画面の表示と一致して見える
 
 ## 実装済み機能
 - PBI #2: コンテナの起動、共通の枠と 4 画面の骨組み、`GET /api/health`、配信部、名前付きボリューム 2 つ、自動再起動
@@ -253,3 +258,4 @@ output_system/
 - PBI #104: 質問を作れる。質問の作成の依頼と保存（`POST /api/meetings/{会議番号}/question-sets`、5 組を 1 回の確定で保存）、会議中の生成ワーカーの CPU 割り当て（会議の状態で切り替え、作成中の状況は `job.status_changed` で通知）、会議中の質問の測定道具。画面の「字幕が遅れることがあります」の表示は会議中の画面の作業
 - PBI #119: 「会議の一覧」の画面（S-01。`GET /api/meetings`、開始日時の新しい順、タイトル・開始日時・会議の長さ・状態・「開く」・押せない「削除」、0 件の案内、使い方の流れ、通知での更新）と、ディスクの空きの警告（`GET /api/system/alerts`。「会議の一覧」と「会議の準備」を開いた時点で、空きが 1GB を下回ればお知らせ帯に警告。保存は止めない）
 - PBI #123: 記録を削除できる。`DELETE /api/meetings/{会議番号}`（状態と作成ジョブの確認、2 回に分けた確定、`secure_delete`）、「会議の一覧」と「会議の記録」の削除の確認と操作（取りやめ・お知らせ帯・応答までボタンを押せなくする）
+- PBI #127: 記録をクリップボードへコピーできる。「会議の記録」の要約・質問のまとまりごと・字幕のコピーのボタン、プレーンテキストの文面の組み立て、成功の表示（「コピーしました」）、書き込みを断られたときのお知らせ帯と文面の欄。出荷するコンテナを Chrome で確かめた（`docs/record-screen.md`）。「会議中」の質問のコピーは含まない（質問の領域は PBI 5.5）
