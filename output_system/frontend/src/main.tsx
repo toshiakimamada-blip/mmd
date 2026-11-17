@@ -3,6 +3,7 @@ import { createRoot } from 'react-dom/client';
 import { RouterProvider } from 'react-router/dom';
 
 import { createAppRouter } from './router';
+import './styles/copy.css';
 import './styles/frame.css';
 import './styles/list.css';
 import './styles/live.css';

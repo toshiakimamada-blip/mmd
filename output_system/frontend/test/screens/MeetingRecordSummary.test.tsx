@@ -110,7 +110,7 @@ describe('SummaryRegion: creation status', () => {
     const progress = within(region).getByRole('progressbar', { name: '要約の作成の進み具合' });
     expect(progress).toHaveAttribute('value', '2');
     expect(progress).toHaveAttribute('max', '4');
-    expect(within(region).queryByRole('button')).not.toBeInTheDocument();
+    expect(within(region).queryByRole('button', { name: /要約を作/ })).not.toBeInTheDocument();
     expect(within(region).queryByText(/終わったあとに作ります/)).not.toBeInTheDocument();
   });
 
