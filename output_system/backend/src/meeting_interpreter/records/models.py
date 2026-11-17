@@ -127,3 +127,24 @@ class MeetingRecord:
     summary: Summary | None
     # 質問のまとまり。新しい順（まとまりの順番の降順）。
     question_sets: tuple[QuestionSet, ...]
+
+
+@dataclass(frozen=True, slots=True)
+class DeletedCounts:
+    """記録の削除で消した行の数。会議の内容は含まない。
+
+    会議の記録を削除すると、その会議の質問・質問のまとまり・要約・字幕・会議を消す。
+    すでに会議が無かったときは、すべて 0 件になる（`meetings` が 0 のとき、何も消していない）。
+    """
+
+    # 消した会議の数。1 か 0。
+    meetings: int = 0
+    subtitles: int = 0
+    summaries: int = 0
+    question_sets: int = 0
+    questions: int = 0
+
+    @property
+    def total(self) -> int:
+        """消した行の合計。処理ログの件数に使う。"""
+        return self.meetings + self.subtitles + self.summaries + self.question_sets + self.questions

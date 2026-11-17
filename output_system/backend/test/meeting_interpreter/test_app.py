@@ -161,7 +161,7 @@ class TestRoutePrefixes:
         [
             ("GET", "/api/unknown"),
             ("POST", "/api/unknown"),
-            ("DELETE", "/api/meetings/abc"),
+            ("DELETE", "/api/unknown"),
             ("GET", "/api"),
             ("GET", "/api/"),
             ("GET", "/api/health/extra"),

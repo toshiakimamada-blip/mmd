@@ -52,6 +52,7 @@ from .database import RecordDatabase
 from .errors import COMPONENT, RecordError, RecordSaveError, RecordValueError
 from .models import (
     AudioSource,
+    DeletedCounts,
     Meeting,
     MeetingRecord,
     MeetingStatus,
@@ -658,6 +659,47 @@ class RecordStore:
                 for sequence, (english, japanese) in enumerate(checked, start=1)
             ),
         )
+
+    async def delete_meeting(self, meeting_id: str) -> DeletedCounts:
+        """会議の記録を削除する。その会議の質問・質問のまとまり・要約・字幕・会議を、1 回で消す。
+
+        削除してよい条件（会議の状態・作成ジョブの有無）は確かめない。会議管理部が確かめて、
+        条件を満たすときだけ呼ぶ。会議が無いときは、何も消さず、すべて 0 件を返す。
+
+        Args:
+            meeting_id: 削除する会議。
+
+        Returns:
+            消した行の数。
+        """
+
+        def work(connection: sqlite3.Connection) -> DeletedCounts:
+            # 子から先に消す。外部キーの連鎖（ON DELETE CASCADE）に任せず、件数を数えるために
+            # 1 つずつ消す。
+            questions = connection.execute(
+                "DELETE FROM questions WHERE meeting_id = ?", (meeting_id,)
+            ).rowcount
+            question_sets = connection.execute(
+                "DELETE FROM question_sets WHERE meeting_id = ?", (meeting_id,)
+            ).rowcount
+            summaries = connection.execute(
+                "DELETE FROM summaries WHERE meeting_id = ?", (meeting_id,)
+            ).rowcount
+            subtitles = connection.execute(
+                "DELETE FROM subtitles WHERE meeting_id = ?", (meeting_id,)
+            ).rowcount
+            meetings = connection.execute(
+                "DELETE FROM meetings WHERE meeting_id = ?", (meeting_id,)
+            ).rowcount
+            return DeletedCounts(
+                meetings=meetings,
+                subtitles=subtitles,
+                summaries=summaries,
+                question_sets=question_sets,
+                questions=questions,
+            )
+
+        return await self._database.run(work, write=True)
 
     async def get_summary(self, meeting_id: str) -> Summary | None:
         """会議の要約を読み出す。要約がまだ無い、または会議が無いときは None。"""

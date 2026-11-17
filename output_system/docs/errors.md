@@ -171,6 +171,8 @@ FastAPI が自動で返す応答も、共通の形に変えています。
 | `MEETING_NOT_RUNNING` | 業務エラー（409） | 通訳中でない会議へ、音声を送ろうとした（音声の接続は 403 で断られる） |
 | `MEETING_AUDIO_ALREADY_CONNECTED` | 業務エラー（409） | この会議には、すでに音声の接続がある（2 本目の接続は 403 で断られる） |
 | `MEETING_INVALID_TRANSITION` | 業務エラー（409） | 遷移規則の表に無い遷移を求められた |
+| `MEETING_DELETE_NOT_ALLOWED` | 業務エラー（409） | 通訳中または要約作成中の会議を、削除しようとした（`DELETE /api/meetings/{会議番号}`）。何も削除しない |
+| `MEETING_HAS_ACTIVE_JOB` | 業務エラー（409） | 要約か質問の作成ジョブが、待機中か作成中の会議を、削除しようとした。何も削除しない |
 | `SYSTEM_INTERPRETER_UNAVAILABLE` | システムエラー（通知で届く） | 通訳ワーカーが止まり、起動し直せなかったため、会議を中断にした。`error.occurred` の通知で届く |
 
 - 音声の WebSocket の接続を断る 3 つ（`MEETING_NOT_FOUND`・`MEETING_NOT_RUNNING`・`MEETING_AUDIO_ALREADY_CONNECTED`）は、接続を受け付ける前に起こすため、画面には HTTP の 403 として見えます。エラーコードは、サーバーのエラーログにだけ出ます。

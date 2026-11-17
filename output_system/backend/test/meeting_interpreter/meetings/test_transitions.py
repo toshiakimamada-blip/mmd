@@ -13,6 +13,7 @@ from meeting_interpreter.meetings.transitions import (
     TRANSITIONS,
     Actor,
     Trigger,
+    allows,
     resolve_transition,
 )
 from meeting_interpreter.records.models import MeetingStatus
@@ -174,3 +175,36 @@ class TestResolveTransition:
 
         text = caught.value.body.message + caught.value.body.action
         assert "abc123" not in text
+
+
+class TestAllows:
+    """遷移が表にあるかの判定。業務エラーを起こさずに、行える操作かだけを知る。"""
+
+    def test_should_agree_with_the_table_for_every_source_and_trigger(self):
+        """
+        【テスト対象】allows
+        【テスト内容】遷移元（記録なしと 5 つの状態）と契機のすべての組み合わせで、表にあるかを聞く
+        【期待結果】表に 1 行でもある組み合わせだけ True。表に無い組み合わせは False
+        """
+        in_table = {(row[0], row[2]) for row in EXPECTED_ROWS}
+
+        for source, trigger in itertools.product(ALL_SOURCES, Trigger):
+            assert allows(source, trigger) is ((source, trigger) in in_table)
+
+    @pytest.mark.parametrize("source", [S.INTERRUPTED, S.COMPLETED, S.SUMMARY_FAILED])
+    def test_should_allow_the_delete_from_the_three_settled_states(self, source):
+        """
+        【テスト対象】allows（記録の削除）
+        【テスト内容】中断・完了・要約失敗から、削除の契機を尋ねる
+        【期待結果】True（作成ジョブの有無は、会議管理部が別に確かめる）
+        """
+        assert allows(source, Trigger.DELETE) is True
+
+    @pytest.mark.parametrize("source", [S.INTERPRETING, S.SUMMARIZING])
+    def test_should_not_allow_the_delete_while_interpreting_or_summarizing(self, source):
+        """
+        【テスト対象】allows（記録の削除）
+        【テスト内容】通訳中・要約作成中から、削除の契機を尋ねる
+        【期待結果】False
+        """
+        assert allows(source, Trigger.DELETE) is False

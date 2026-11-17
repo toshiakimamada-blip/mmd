@@ -281,6 +281,8 @@ def create_app(
         # 会議の開始で、ほかの会議の要約を区切りで後回しにし、通訳ワーカーを止めたら、再開する。
         on_meeting_started=app.state.job_manager.meeting_started,
         on_interpreter_stopped=app.state.job_manager.interpreter_stopped,
+        # 記録の削除の条件。待機中か作成中の作成ジョブが残る会議は、削除しない。
+        has_active_job=lambda meeting_id: bool(app.state.job_manager.active_jobs(meeting_id)),
     )
 
     register_exception_handlers(app)

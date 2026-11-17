@@ -28,11 +28,13 @@ from typing import Final
 from ..logs import log_error, log_processing
 from ..logs.events import format_timestamp
 from ..records.errors import RecordError
-from ..records.models import Meeting, MeetingRecord, MeetingStatus, Subtitle
+from ..records.models import DeletedCounts, Meeting, MeetingRecord, MeetingStatus, Subtitle
 from ..records.store import RecordStore
 from .errors import (
     COMPONENT,
     meeting_already_running,
+    meeting_delete_not_allowed,
+    meeting_has_active_job,
     meeting_not_found,
     model_not_ready,
 )
@@ -47,7 +49,7 @@ from .session import (
     SessionPolicy,
     error_payload,
 )
-from .transitions import Trigger, resolve_transition
+from .transitions import Trigger, allows, resolve_transition
 from .workers import InterpreterLauncher
 
 # アプリの停止のとき、進行中の会議を閉じるのを待つ秒数。コンテナの停止の猶予（既定 10 秒）に収める。
@@ -69,6 +71,7 @@ class MeetingManager:
         on_meeting_ended: Callable[[Meeting], Awaitable[None]] | None = None,
         on_meeting_started: Callable[[str], None] | None = None,
         on_interpreter_stopped: Callable[[str], None] | None = None,
+        has_active_job: Callable[[str], bool] | None = None,
         shutdown_wait_seconds: float = SHUTDOWN_WAIT_SECONDS,
     ) -> None:
         """
@@ -87,6 +90,9 @@ class MeetingManager:
             on_interpreter_stopped: 通訳ワーカーを止めたあとに、会議番号を渡して呼ぶ（会議の
                 終了でも中断でも）。作成ジョブ管理部が、後回しにした要約を再開する口。
                 要約を始める呼び出し（on_meeting_ended）より先に呼ぶ。
+            has_active_job: 会議番号を渡し、その会議に待機中か作成中の作成ジョブがあるかを返す。
+                記録の削除の条件に使う。本番は、作成ジョブ管理部の active_jobs につなぐ。
+                省略すると、作成ジョブは無いものとして扱う（テスト用）。
             shutdown_wait_seconds: アプリの停止のとき、進行中の会議を閉じるのを待つ秒数。
         """
         self._store = store
@@ -98,6 +104,7 @@ class MeetingManager:
         self._on_meeting_ended = on_meeting_ended or _do_nothing
         self._on_meeting_started = on_meeting_started
         self._on_interpreter_stopped = on_interpreter_stopped
+        self._has_active_job = has_active_job or _no_active_job
         self._shutdown_wait_seconds = shutdown_wait_seconds
         # 進行中の枠。会議を作る前から埋めて、同時に届いた 2 件目の開始を断る。
         self._occupied = False
@@ -315,6 +322,47 @@ class MeetingManager:
             raise meeting_not_found()
         return record
 
+    # --- 記録の削除 ---------------------------------------------------------------------
+
+    async def delete_meeting(self, meeting_id: str) -> DeletedCounts | None:
+        """会議の記録を削除する。条件を確かめて、満たすときだけ記録保存部へ削除を頼む。
+
+        順序は次のとおり。
+        1. 会議がすでに無ければ、成功として扱う（何も消さない）。重複を防ぐ規約で、遷移規則より先に
+           当てはめる。削除の要求が 2 回届いたときの 2 回目も、ここで成功になる
+        2. 会議の状態が、遷移規則の表で削除できる状態（中断・完了・要約失敗）であること
+        3. 作成ジョブ管理部に問い合わせ、その会議の作成ジョブが残っていないこと
+           （待機中か作成中のジョブがあれば断る）
+
+        作成ジョブの有無は、状態のあとに確かめる。要約の依頼が状態を変えてからジョブを登録するまでの
+        間（同じ手順の中で、待ちは挟まない）に、見落とさないため。
+
+        Args:
+            meeting_id: 削除する会議。
+
+        Returns:
+            消した行の数。会議がすでに無かった（何も消さなかった）ときは None。
+
+        Raises:
+            BusinessAppError: 通訳中または要約作成中（MEETING_DELETE_NOT_ALLOWED）。
+                作成ジョブが残っている（MEETING_HAS_ACTIVE_JOB）。
+            RecordError: 記録を削除できなかったとき（RECORD_DELETE_FAILED）。
+        """
+        meeting = await self._store.get_meeting(meeting_id)
+        if meeting is None:
+            return None
+        if not allows(meeting.status, Trigger.DELETE):
+            raise meeting_delete_not_allowed(meeting_id)
+        if self._has_active_job(meeting_id):
+            raise meeting_has_active_job(meeting_id)
+        counts = await self._store.delete_meeting(meeting_id)
+        if counts.meetings == 0:
+            # 同時に届いた 2 回目の削除が、1 回目に先を越された。成功として扱う。
+            return None
+        # 会議番号と件数だけを出す（タイトルと字幕などの本文は出さない）。
+        log_processing("record_deleted", meeting_id=meeting_id, item_count=counts.total)
+        return counts
+
     # --- 音声の接続 ---------------------------------------------------------------------
 
     def claim_audio(self, meeting_id: str) -> MeetingSession:
@@ -354,3 +402,8 @@ class MeetingManager:
 
 async def _do_nothing(meeting: Meeting) -> None:
     """要約を始める呼び出しの、つなぐまでの既定。"""
+
+
+def _no_active_job(meeting_id: str) -> bool:
+    """作成ジョブ管理部につなぐまでの既定。作成ジョブは無いものとして扱う。"""
+    return False
