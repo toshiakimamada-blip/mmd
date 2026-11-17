@@ -82,6 +82,10 @@ export const ERROR_WORDINGS: Readonly<Record<string, ErrorWording>> = Object.fre
     message: '保存する内容が、決めた長さや値に合っていないため、会議記録に保存できませんでした。',
     action: RETRY_OR_REPORT,
   },
+  RECORD_DELETE_FAILED: {
+    message: '会議の記録を削除できませんでした。',
+    action: `もう一度、削除してください。${REPORT_IF_NOT_FIXED}`,
+  },
   // --- 音声の取り込みの失敗（画面が、ブラウザーの共有・マイクの利用の結果から決める。サーバーは返さない） ---
   AUDIO_NO_AUDIO_SHARED: {
     message: '共有に音声が含まれていないため、音声を取り込めませんでした。',
@@ -131,6 +135,15 @@ export const ERROR_WORDINGS: Readonly<Record<string, ErrorWording>> = Object.fre
   MEETING_INVALID_TRANSITION: {
     message: 'いまの会議の状態では、この操作を受け付けられません。',
     action: `会議の記録を開いて、状態を確かめてください。${REPORT_IF_NOT_FIXED}`,
+  },
+  // --- 記録の削除を断られた（会議管理部が返す。文言はサーバーの meetings/errors.py と同じ内容） ---
+  MEETING_DELETE_NOT_ALLOWED: {
+    message: '通訳中または要約作成中の会議は、削除できません。',
+    action: '会議の終了か、要約の作成が終わってから、削除してください。',
+  },
+  MEETING_HAS_ACTIVE_JOB: {
+    message: 'この会議の要約か質問を作っている途中のため、削除できません。',
+    action: '作成が終わってから、削除してください。',
   },
   SYSTEM_INTERPRETER_UNAVAILABLE: {
     message: '字幕を作る処理が止まり、起動し直せなかったため、会議を中断しました。',

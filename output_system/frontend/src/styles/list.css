@@ -23,6 +23,22 @@
   margin: 0;
 }
 
+/* 削除の経過の知らせ。空のときは高さを持たない（画面の間隔が広がらない） */
+.meeting-list__status {
+  margin: 0;
+  color: var(--color-ink-muted);
+  font-size: 0.9375rem;
+}
+
+.meeting-list__status:empty {
+  display: none;
+}
+
+/* 削除のあとにフォーカスを受ける画面の名前。プログラムが移したときは、枠を出さない（Tab で来た印ではない） */
+.meeting-list > .screen__name:focus:not(:focus-visible) {
+  outline: none;
+}
+
 /* 使い方の流れ（常に表示する）。手順は上から順に行うため、番号つきにする */
 .usage-flow {
   max-width: 48rem;

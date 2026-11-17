@@ -1,7 +1,13 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
 import { ApiError } from '../../src/api/apiClient';
-import { endMeeting, fetchMeetingRecord, fetchSubtitles, requestSummary } from '../../src/api/meetingsApi';
+import {
+  deleteMeeting,
+  endMeeting,
+  fetchMeetingRecord,
+  fetchSubtitles,
+  requestSummary,
+} from '../../src/api/meetingsApi';
 
 /** JSON の応答を作る。 */
 function jsonResponse(body: unknown, status = 200): Response {
@@ -209,5 +215,50 @@ describe('requestSummary', () => {
 
     expect(failure).toBeInstanceOf(ApiError);
     expect((failure as ApiError).body.code).toBe('SUMMARY_NO_CONTENT');
+  });
+});
+
+describe('deleteMeeting', () => {
+  /**
+   * 【テスト対象】deleteMeeting
+   * 【テスト内容】会議の記録の削除を依頼する（応答は 204 で本文なし）
+   * 【期待結果】DELETE /api/meetings/{会議番号} を呼ぶ。会議番号は 1 つの区間として符号化する。
+   *            削除できたら何も返さず終わる（本文を読まない）
+   */
+  it('should send a DELETE request for the meeting and return nothing', async () => {
+    const fetchMock = vi.fn().mockResolvedValue(new Response(null, { status: 204 }));
+    vi.stubGlobal('fetch', fetchMock);
+
+    await expect(deleteMeeting('a/b?c')).resolves.toBeUndefined();
+
+    expect(fetchMock).toHaveBeenCalledWith('/api/meetings/a%2Fb%3Fc', { method: 'DELETE' });
+  });
+
+  /**
+   * 【テスト対象】deleteMeeting（条件を満たさない）
+   * 【テスト内容】作成ジョブが残っている会議（MEETING_HAS_ACTIVE_JOB、409）
+   * 【期待結果】ApiError になり、エラーコードを持つ
+   */
+  it('should throw an ApiError when the server refuses the delete', async () => {
+    const body = { category: 'business_error', code: 'MEETING_HAS_ACTIVE_JOB', message: 'm', action: 'a' };
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue(jsonResponse(body, 409)));
+
+    const failure = await deleteMeeting('abc123').catch((error: unknown) => error);
+
+    expect(failure).toBeInstanceOf(ApiError);
+    expect((failure as ApiError).body.code).toBe('MEETING_HAS_ACTIVE_JOB');
+  });
+
+  /**
+   * 【テスト対象】deleteMeeting（アプリサーバーに届かない）
+   * 【期待結果】ApiError（SYSTEM_REQUEST_FAILED）になる
+   */
+  it('should throw an ApiError when the request does not reach the server', async () => {
+    vi.stubGlobal('fetch', vi.fn().mockRejectedValue(new TypeError('Failed to fetch')));
+
+    const failure = await deleteMeeting('abc123').catch((error: unknown) => error);
+
+    expect(failure).toBeInstanceOf(ApiError);
+    expect((failure as ApiError).body.code).toBe('SYSTEM_REQUEST_FAILED');
   });
 });

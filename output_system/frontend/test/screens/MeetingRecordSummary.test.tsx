@@ -274,7 +274,7 @@ describe('SummaryRegion: requesting a summary', () => {
 
   /**
    * 【テスト対象】キーボードだけでの要約の依頼
-   * 【テスト内容】Tab で「要約を作る」へ移り、Enter で押す
+   * 【テスト内容】Tab で「一覧へ戻る」「記録を削除する」を通って「要約を作る」へ移り、Enter で押す
    * 【期待結果】依頼が送られる
    */
   it('should send the request when the button is pressed with the keyboard', async () => {
@@ -284,8 +284,9 @@ describe('SummaryRegion: requesting a summary', () => {
     openRecord();
     await screen.findByRole('button', { name: '要約を作る' });
 
-    await user.tab();
-    await user.tab();
+    await user.tab(); // 一覧へ戻る
+    await user.tab(); // 記録を削除する
+    await user.tab(); // 要約を作る
     await user.keyboard('{Enter}');
 
     await waitFor(() => expect(answers.summaryRequests).toBe(1));

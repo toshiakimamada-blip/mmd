@@ -3,6 +3,7 @@
  *
  * - wireRecord: アプリサーバーが返す会議の記録（GET /api/meetings/{会議番号}）を作る
  * - openRecord: 通知の WebSocket と fetch を偽物にして、「会議の記録」を開く
+ *   （記録の削除 DELETE と、削除のあとに移る「会議の一覧」の読み込みにも答える）
  */
 
 import { render } from '@testing-library/react';
@@ -87,13 +88,22 @@ export function wireRecord(
 export const answers: {
   record: () => Promise<Response>;
   summaryRequest: () => Promise<Response>;
+  /** 記録の削除（DELETE /api/meetings/abc123）に答える関数。既定は、削除できた（204）。 */
+  deleteMeeting: () => Promise<Response>;
   recordRequests: number;
   summaryRequests: number;
+  /** 記録の削除を求められた回数。 */
+  deleteRequests: number;
+  /** 削除のあとに移る「会議の一覧」が、一覧を読み込んだ回数。 */
+  listRequests: number;
 } = {
   record: () => Promise.resolve(jsonResponse(wireRecord())),
   summaryRequest: () => Promise.resolve(jsonResponse({ meeting: {}, job: {} }, 202)),
+  deleteMeeting: () => Promise.resolve(new Response(null, { status: 204 })),
   recordRequests: 0,
   summaryRequests: 0,
+  deleteRequests: 0,
+  listRequests: 0,
 };
 
 /** 各テストの前に呼ぶ。通知の接続と fetch を、テストが操れる偽物に替える。 */
@@ -102,8 +112,11 @@ export function setUpRecordTest(): void {
   vi.stubGlobal('WebSocket', FakeEventSocket);
   answers.record = () => Promise.resolve(jsonResponse(wireRecord()));
   answers.summaryRequest = () => Promise.resolve(jsonResponse({ meeting: {}, job: {} }, 202));
+  answers.deleteMeeting = () => Promise.resolve(new Response(null, { status: 204 }));
   answers.recordRequests = 0;
   answers.summaryRequests = 0;
+  answers.deleteRequests = 0;
+  answers.listRequests = 0;
   vi.stubGlobal(
     'fetch',
     vi.fn((path: string, init?: RequestInit) => {
@@ -114,6 +127,18 @@ export function setUpRecordTest(): void {
       if (path === '/api/meetings/abc123/summary' && init?.method === 'POST') {
         answers.summaryRequests += 1;
         return answers.summaryRequest();
+      }
+      if (path === '/api/meetings/abc123' && init?.method === 'DELETE') {
+        answers.deleteRequests += 1;
+        return answers.deleteMeeting();
+      }
+      // 削除のあとに移る「会議の一覧」。会議は 0 件
+      if (path === '/api/meetings' && (init?.method ?? 'GET') === 'GET') {
+        answers.listRequests += 1;
+        return Promise.resolve(jsonResponse({ meetings: [] }));
+      }
+      if (path === '/api/system/alerts' && (init?.method ?? 'GET') === 'GET') {
+        return Promise.resolve(jsonResponse({ alerts: [] }));
       }
       return Promise.reject(new Error(`想定していない呼び出し: ${init?.method ?? 'GET'} ${path}`));
     }),
