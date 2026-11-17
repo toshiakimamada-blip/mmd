@@ -12,6 +12,7 @@ import { useMeetingCapture } from '../meetings/MeetingCaptureProvider';
 import { startMeeting } from '../meetings/startMeeting';
 import { useModelStatus } from '../models/useModelStatus';
 import { SCREENS, screenPaths } from '../routes';
+import { useDiskSpaceWarning } from '../system/useDiskSpaceWarning';
 import { ModelStatusPanel } from './prepare/ModelStatusPanel';
 import { PrepareForm, type ServerFieldErrors } from './prepare/PrepareForm';
 import { PrepareGuidance, type CaptureFailure } from './prepare/PrepareGuidance';
@@ -38,6 +39,8 @@ export function MeetingPrepareScreen() {
   const { post, clear } = useNoticeActions();
   const capture = useMeetingCapture();
   const model = useModelStatus();
+  // 記録の置き場の空きが少ないときの警告。開いた時点で調べて、お知らせ帯に出す（F-15）
+  useDiskSpaceWarning();
   // 選んでいる音声の出どころ。案内の切り替えに使う。
   const [source, setSource] = useState<AudioSource | null>(null);
   // 直前の取り込みの失敗。次に開始するまで、案内の領域に残す。

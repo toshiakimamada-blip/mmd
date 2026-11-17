@@ -61,6 +61,10 @@ export function setUpListTest(): void {
         answers.lastListInit = init;
         return answers.list();
       }
+      // 画面を開いた時点のディスクの空きの確認（F-15）。ここでは、警告なしを返す
+      if (path === '/api/system/alerts' && (init?.method ?? 'GET') === 'GET') {
+        return Promise.resolve(jsonResponse({ alerts: [] }));
+      }
       return Promise.reject(new Error(`想定していない呼び出し: ${init?.method ?? 'GET'} ${path}`));
     }),
   );

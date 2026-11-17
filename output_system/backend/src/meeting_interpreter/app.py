@@ -12,6 +12,7 @@
 
 from collections.abc import AsyncIterator, Awaitable, Callable
 from contextlib import asynccontextmanager
+from pathlib import Path
 from typing import Final
 
 from fastapi import FastAPI, Request, WebSocket
@@ -19,7 +20,7 @@ from fastapi.responses import JSONResponse
 
 from . import APP_NAME
 from .access import AccessControlMiddleware
-from .api import health, meetings, models, ws
+from .api import health, meetings, models, system, ws
 from .errors import (
     ROUTE_NOT_FOUND,
     UnhandledErrorMiddleware,
@@ -46,6 +47,7 @@ from .models.manager import ModelManager, ModelStatus, ModelStatusNotifier
 from .models.store import ModelStore
 from .notify.hub import NotificationHub
 from .records.database import RecordDatabase
+from .records.disk_space import DiskSpaceMonitor, DiskUsage
 from .records.errors import RecordSchemaError
 from .records.models import Meeting
 from .records.store import RecordStore
@@ -80,6 +82,7 @@ def _register_api_routes(app: FastAPI) -> None:
     app.include_router(health.router, prefix="/api")
     app.include_router(models.router, prefix="/api")
     app.include_router(meetings.router, prefix="/api")
+    app.include_router(system.router, prefix="/api")
     # 存在しない /api の経路。画面のファイルへ落ちないよう、明示して受ける。
     app.add_api_route("/api", _route_not_found, methods=_ALL_METHODS, include_in_schema=False)
     app.add_api_route(
@@ -189,6 +192,7 @@ def create_app(
     generation_launcher: GenerationLauncher | None = None,
     job_policy: JobPolicy | None = None,
     job_outcomes: JobOutcomeHandler | None = None,
+    disk_usage: Callable[[Path], DiskUsage] | None = None,
 ) -> FastAPI:
     """アプリサーバーを組み立てる。
 
@@ -208,6 +212,8 @@ def create_app(
         job_outcomes: 作成の結果（要約・質問・失敗）の受け取り先。省略すると、要約を保存して会議の
             状態を変える受け取り先と、質問を保存する受け取り先をまとめたもの。テストが、結果を
             記録するだけの受け取り先を渡すために使う。
+        disk_usage: ディスクの使用状況を返す関数。ディスクの空きが少ないことの警告の判定に使う。
+            省略すると、実際のディスクを読む。テストが、空きを決めた偽の関数を渡すために使う。
 
     Returns:
         経路をすべて登録した FastAPI のアプリ。
@@ -231,6 +237,12 @@ def create_app(
     # 記録データベースは、起動のとき（_lifespan）に開く。組み立てるだけでは、ディスクに触れない。
     app.state.record_database = RecordDatabase(settings.records_dir)
     record_store = RecordStore(app.state.record_database)
+    # 記録データベースの置き場の空きの確認（GET /api/system/alerts）。警告のみで、保存は止めない。
+    app.state.disk_space_monitor = DiskSpaceMonitor(
+        settings.records_dir,
+        settings.tuning.disk_free_warning_gigabytes,
+        **({} if disk_usage is None else {"disk_usage": disk_usage}),
+    )
     # 要約の結果の保存。要約の完成と失敗で、要約と会議の状態を保存する（2 回目の確定）。
     summary_outcomes = SummaryOutcomes(record_store, notification_hub)
     # 質問の結果の保存。質問のまとまり 1 件と質問 5 件を、1 回の確定で保存する。

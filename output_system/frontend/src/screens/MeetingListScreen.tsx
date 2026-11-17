@@ -2,6 +2,7 @@ import { Link } from 'react-router';
 
 import { useMeetingList } from '../records/useMeetingList';
 import { SCREENS, screenPaths } from '../routes';
+import { useDiskSpaceWarning } from '../system/useDiskSpaceWarning';
 import { MeetingListBody } from './list/MeetingListBody';
 import { UsageFlow } from './list/UsageFlow';
 
@@ -15,10 +16,13 @@ import { UsageFlow } from './list/UsageFlow';
  *   読み直す（records/useMeetingList.ts）
  * - 会議の削除は、記録の削除を作る作業で足す。この画面は、削除のボタンを置くが、押せない見た目で残す
  *   （MeetingRow）
+ * - 記録の置き場の空きが少ないときは、開いた時点で、お知らせ帯に警告を出す（system/useDiskSpaceWarning.ts）
  * - タイトルは会議の内容。文字として表示する（ADR-15）
  */
 export function MeetingListScreen() {
   const { load, reload } = useMeetingList();
+  // 記録の置き場の空きが少ないときの警告。開いた時点で調べて、お知らせ帯に出す（F-15）
+  useDiskSpaceWarning();
 
   return (
     <section className="screen meeting-list" data-screen={SCREENS.meetingList.code}>
