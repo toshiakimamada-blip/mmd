@@ -147,6 +147,37 @@ describe('MeetingRecordScreen: deleting the record', () => {
   });
 
   /**
+   * 【テスト対象】断られた・失敗したあとのフォーカス
+   * 【テスト内容】「記録を削除する」から確認を開き、「削除する」を選ぶ。サーバーが断る（業務エラー）か、
+   *            削除に失敗する（システムエラー）
+   * 【期待結果】ボタンが押せる状態に戻ったあと、フォーカスは「記録を削除する」へ戻る
+   *            （確認を閉じた時点では、ボタンが押せないため、フォーカスを受けられない）
+   */
+  it.each([
+    ['MEETING_HAS_ACTIVE_JOB', () => refusal('MEETING_HAS_ACTIVE_JOB')],
+    [
+      'RECORD_DELETE_FAILED',
+      () =>
+        jsonResponse(
+          { category: 'system_error', code: 'RECORD_DELETE_FAILED', message: 'm', action: 'a' },
+          500,
+        ),
+    ],
+  ] as const)('should return the focus to the delete button after %s', async (_code, answer) => {
+    answers.deleteMeeting = () => Promise.resolve(answer());
+    const user = userEvent.setup();
+    openRecord();
+    const button = await screen.findByRole('button', { name: '記録を削除する' });
+
+    await user.click(button);
+    await user.click(await screen.findByRole('button', { name: '削除する' }));
+
+    await screen.findByRole('alert');
+    await waitFor(() => expect(button).toHaveFocus());
+    expect(button).toBeEnabled();
+  });
+
+  /**
    * 【テスト対象】削除に失敗したときのお知らせ（RECORD_DELETE_FAILED、システムエラー）
    * 【期待結果】お知らせ帯に、削除できなかったことと、もう一度削除することが出る。記録の画面にとどまる
    */

@@ -231,6 +231,32 @@ describe('MeetingListScreen: deleting a record', () => {
   });
 
   /**
+   * 【テスト対象】断られたあとのフォーカス
+   * 【テスト内容】2 件の会議のうち、2 件目の「削除」から確認を開き、「削除する」を選ぶ。サーバーが断る
+   * 【期待結果】ボタンが押せる状態に戻ったあと、フォーカスは、押した 2 件目の「削除」へ戻る
+   *            （確認を閉じた時点では、ボタンが押せないため、フォーカスを受けられない）
+   */
+  it('should return the focus to the delete button that opened the confirmation after a refusal', async () => {
+    listOf(
+      wireListItem({ meeting_id: 'first', title: '1 件目' }),
+      wireListItem({ meeting_id: 'second', title: '2 件目' }),
+    );
+    answers.deleteMeeting = () => Promise.resolve(refusal('MEETING_HAS_ACTIVE_JOB'));
+    const user = userEvent.setup();
+    openList();
+    await findRow('1 件目');
+    const deleteButton = within(await findRow('2 件目')).getByRole('button', { name: '削除' });
+
+    await user.click(deleteButton);
+    await user.click(await screen.findByRole('button', { name: '削除する' }));
+
+    await screen.findByRole('alert');
+    await waitFor(() => expect(deleteButton).toHaveFocus());
+    expect(deleteButton).toBeEnabled();
+    expect(answers.listRequests).toBe(2);
+  });
+
+  /**
    * 【テスト対象】削除に失敗したときのお知らせ（RECORD_DELETE_FAILED、システムエラー）
    * 【期待結果】お知らせ帯に、削除できなかったことと、もう一度削除することが出る。行は残る
    */

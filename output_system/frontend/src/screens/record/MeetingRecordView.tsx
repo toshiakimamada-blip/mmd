@@ -21,7 +21,8 @@ import { QuestionRegion } from './QuestionRegion';
  * （records/recordView.ts）が決める。
  *
  * 「記録を削除する」は、確認の表示を出し、「削除する」で記録を削除して、「会議の一覧」へ移る（F-11。
- * records/useMeetingDelete.ts）。断られたときは、お知らせ帯にエラーを出し、記録を読み直す。
+ * records/useMeetingDelete.ts）。断られたときは、お知らせ帯にエラーを出し、記録を読み直して、
+ * 「記録を削除する」へフォーカスを戻す。
  * 削除の応答を待つ間は、状態の領域（role=status）で読み上げソフトへ伝え、ボタンを押せなくする。
  *
  * 暫定版で置かない操作: 取り出す・コピー（取り出しの作業で足す）、質問を作るボタン（質問の作成の作業で
