@@ -275,10 +275,10 @@ describe('fetchLiveStatus', () => {
    * 【期待結果】
    * - GET /api/meetings/{会議番号}/live-status を呼ぶ。会議番号は 1 つの区間として符号化する
    * - キャッシュを使わない指定で呼ぶ
-   * - 画面の型（subtitleStatus）に読み替えて返す
+   * - 画面の型（subtitleStatus・meetingLengthWarningSeconds）に読み替えて返す
    */
   it('should fetch the subtitle status without using the cache', async () => {
-    const fetchMock = vi.fn().mockResolvedValue(jsonResponse({ subtitle_status: 'delayed' }));
+    const fetchMock = vi.fn().mockResolvedValue(jsonResponse({ subtitle_status: 'delayed', meeting_length_warning_seconds: 7200 }));
     vi.stubGlobal('fetch', fetchMock);
 
     const live = await fetchLiveStatus('a/b?c');
@@ -287,15 +287,23 @@ describe('fetchLiveStatus', () => {
       method: 'GET',
       cache: 'no-store',
     });
-    expect(live).toEqual({ subtitleStatus: 'delayed' });
+    expect(live).toEqual({ subtitleStatus: 'delayed', meetingLengthWarningSeconds: 7200 });
   });
 
   /**
    * 【テスト対象】fetchLiveStatus（形が合わない応答）
-   * 【テスト内容】知らない状況・状況が無い応答を受け取る
-   * 【期待結果】どちらも ApiError（想定外のエラー）になること
+   * 【テスト内容】知らない状況・状況が無い・経過時間が無い・経過時間が正の整数でない応答を受け取る
+   * 【期待結果】すべて ApiError（想定外のエラー）になること
    */
-  it.each([{ subtitle_status: 'unknown' }, {}])('should reject a malformed response %j', async (body) => {
+  it.each([
+    { subtitle_status: 'unknown', meeting_length_warning_seconds: 7200 },
+    { meeting_length_warning_seconds: 7200 },
+    { subtitle_status: 'on_time' },
+    { subtitle_status: 'on_time', meeting_length_warning_seconds: 0 },
+    { subtitle_status: 'on_time', meeting_length_warning_seconds: -5 },
+    { subtitle_status: 'on_time', meeting_length_warning_seconds: 'x' },
+    { subtitle_status: 'on_time', meeting_length_warning_seconds: 1.5 },
+  ])('should reject a malformed response %j', async (body) => {
     vi.stubGlobal('fetch', vi.fn().mockResolvedValue(jsonResponse(body)));
 
     await expect(fetchLiveStatus('abc123')).rejects.toBeInstanceOf(ApiError);

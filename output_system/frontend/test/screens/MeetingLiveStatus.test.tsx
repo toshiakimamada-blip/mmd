@@ -26,6 +26,14 @@ function jsonResponse(body: unknown, status = 200): Response {
   });
 }
 
+/** 状況の取得（GET live-status）の応答。会議の長さの警告を出す経過時間は、既定の 7,200 秒。 */
+function liveStatus(subtitleStatus: string): Response {
+  return jsonResponse({
+    subtitle_status: subtitleStatus,
+    meeting_length_warning_seconds: 7200,
+  });
+}
+
 /** 字幕の状況の通知の本文。 */
 function statusChanged(status: string, meetingId = 'abc123') {
   return { type: 'subtitle_status.changed', meeting_id: meetingId, status };
@@ -53,7 +61,7 @@ beforeEach(() => {
   FakeEventSocket.reset();
   vi.stubGlobal('WebSocket', FakeEventSocket);
   statusRequests = 0;
-  answerStatus = () => Promise.resolve(jsonResponse({ subtitle_status: 'on_time' }));
+  answerStatus = () => Promise.resolve(liveStatus('on_time'));
   vi.stubGlobal(
     'fetch',
     vi.fn((path: string) => {
@@ -102,7 +110,7 @@ describe('MeetingLiveScreen subtitle status', () => {
    * 【期待結果】状況が「遅れ」で、お知らせ帯に「字幕が目標より遅れています」が出る
    */
   it('should show the delay and its warning when the meeting is already delayed', async () => {
-    answerStatus = () => Promise.resolve(jsonResponse({ subtitle_status: 'delayed' }));
+    answerStatus = () => Promise.resolve(liveStatus('delayed'));
 
     openLive();
 
@@ -172,7 +180,7 @@ describe('MeetingLiveScreen subtitle status', () => {
     await act(async () => FakeEventSocket.last.open());
 
     act(() => FakeEventSocket.last.receive(statusChanged('delayed')));
-    await act(async () => respond(jsonResponse({ subtitle_status: 'on_time' })));
+    await act(async () => respond(liveStatus('on_time')));
 
     expect(statusText()).toContain('遅れ');
   });

@@ -41,7 +41,8 @@ class TestGetLiveStatus:
         """
         【テスト対象】GET /api/meetings/{会議番号}/live-status
         【テスト内容】会議を開始し、通訳ワーカーの準備が完了したあとで、状況を読む
-        【期待結果】200 で、字幕の状況 on_time を返すこと。通知 subtitle_status.changed の値と同じ
+        【期待結果】200 で、字幕の状況 on_time と、会議の長さの警告を出す経過時間（調整値
+                    meeting_length_warning_seconds）を返すこと。状況は、通知の status と同じ値
         """
         events = app_handle.events()
         meeting_id = start_meeting(app_handle)
@@ -50,7 +51,12 @@ class TestGetLiveStatus:
         status, body = app_handle.get(f"/api/meetings/{meeting_id}/live-status")
 
         assert status == 200
-        assert body == {"subtitle_status": "on_time"}
+        assert body == {
+            "subtitle_status": "on_time",
+            "meeting_length_warning_seconds": (
+                app_handle.app.state.settings.tuning.meeting_length_warning_seconds
+            ),
+        }
         assert notified[0]["status"] == body["subtitle_status"]
 
     def test_should_reflect_a_change_of_the_status(self, app_handle):
@@ -81,7 +87,7 @@ class TestGetLiveStatus:
         status, body = app_handle.get(f"/api/meetings/{meeting_id}/live-status")
 
         assert status == 200
-        assert body == {"subtitle_status": "delayed"}
+        assert body["subtitle_status"] == "delayed"
 
     def test_should_refuse_a_meeting_that_is_not_running(self, app_handle):
         """

@@ -109,3 +109,25 @@ export const DISK_SPACE_LOW_WARNING =
  */
 export const SUBTITLE_DELAYED_WARNING =
   '字幕が目標より遅れています。字幕が追いつくと、この表示は消えます。';
+
+/**
+ * 会議の長さの警告で書く、経過時間の言い方。秒を、「時間」と「分」で書く（1 分に満たない端数は書かない）。
+ * 例: 7200 → 「2 時間」、5400 → 「1 時間 30 分」。
+ */
+function describeLength(seconds: number): string {
+  const hours = Math.floor(seconds / 3600);
+  const minutes = Math.floor((seconds % 3600) / 60);
+  const parts = [hours > 0 ? `${hours} 時間` : null, minutes > 0 ? `${minutes} 分` : null];
+  return parts.filter((part) => part !== null).join(' ') || `${seconds} 秒`;
+}
+
+/**
+ * 会議が長くなったことの警告（F-15。お知らせ帯に出す）。経過時間が、アプリサーバーの調整値
+ * （既定 7,200 秒 = 2 時間）を超えたときに出す。会議は止めないこと、警告が会議の終了まで残ることを伝える。
+ * 経過時間の数は、調整値から組み立てる（調整値を変えても、文面が食い違わない）。
+ *
+ * @param seconds 警告を出す経過時間（秒）
+ */
+export function meetingLengthWarning(seconds: number): string {
+  return `会議が ${describeLength(seconds)}を超えました。会議は続けられます。会議を終了するまで、この警告は残ります。`;
+}

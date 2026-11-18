@@ -99,19 +99,27 @@ export async function fetchSubtitles(meetingId: string): Promise<Subtitle[]> {
 export interface LiveStatus {
   /** 字幕の状況。通知 subtitle_status.changed の status と同じ値。 */
   readonly subtitleStatus: SubtitleStatus;
+  /** 会議の長さの警告を出す経過時間（秒）。アプリサーバーの調整値。画面が、経過時間と比べて判定する。 */
+  readonly meetingLengthWarningSeconds: number;
 }
 
 /** 状況の取得の応答を、画面の型に読み替える。読めなければ例外（呼び出し側が想定外のエラーにする）。 */
 function parseLiveStatus(body: unknown): LiveStatus {
-  const status = (body as { subtitle_status?: unknown } | null)?.subtitle_status;
-  if (!isSubtitleStatus(status)) {
+  const record = (body ?? {}) as { subtitle_status?: unknown; meeting_length_warning_seconds?: unknown };
+  const seconds = record.meeting_length_warning_seconds;
+  if (
+    !isSubtitleStatus(record.subtitle_status) ||
+    typeof seconds !== 'number' ||
+    !Number.isInteger(seconds) ||
+    seconds <= 0
+  ) {
     throw new Error('会議中の状況の形ではありません');
   }
-  return { subtitleStatus: status };
+  return { subtitleStatus: record.subtitle_status, meetingLengthWarningSeconds: seconds };
 }
 
 /**
- * 進行中の会議の状況（字幕の状況）を取得する（GET /api/meetings/{会議番号}/live-status）。
+ * 進行中の会議の状況（字幕の状況と、会議の長さの警告を出す経過時間）を取得する（GET /api/meetings/{会議番号}/live-status）。
  * 「会議中」の画面が、開いた時点で呼ぶ。会議の開始の直後に出た通知は、画面が購読する前に届くことが
  * あるため、通知を待たずに現在の状況を読む。変化は、通知で受け取る。
  *
