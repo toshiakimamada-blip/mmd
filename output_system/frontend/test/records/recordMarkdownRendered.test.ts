@@ -45,9 +45,15 @@ function skeletonTags(html: string): string[] {
     .filter((tag) => tag !== 'p' && tag !== 'br');
 }
 
-/** 描画結果の、表示される文字（要素を除き、文字参照を戻したもの）。空白は 1 つにそろえる。 */
+/**
+ * 描画結果の、表示される文字（要素を除き、文字参照を戻したもの）。空白は 1 つにそろえる。
+ * markdown-it が本文に出す文字参照は、`&amp;` `&lt;` `&gt;` `&quot;` の 4 つだけ。本文には、生の `<` が残らない
+ * （残っていれば、要素の検査が見つける）。
+ */
 function visibleText(html: string): string {
-  const text = new DOMParser().parseFromString(html, 'text/html').body.textContent ?? '';
+  const text = html
+    .replace(/<[^>]*>/g, '')
+    .replace(/&(amp|lt|gt|quot);/g, (_all, name: string) => ({ amp: '&', lt: '<', gt: '>', quot: '"' })[name] as string);
   return normalize(text);
 }
 
