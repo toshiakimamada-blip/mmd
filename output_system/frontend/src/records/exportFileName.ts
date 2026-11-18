@@ -3,7 +3,7 @@
  *
  * 名前は「開始日時_タイトル.md」（例: `20261019-1430_週次の定例.md`）。
  *
- * - 開始日時は、PC のタイムゾーンで「年月日-時分」にする。画面の開始日時（formatDateTimeToMinute）と同じ時刻になる
+ * - 開始日時は、PC のタイムゾーンで「年月日-時分」にする。画面の開始日時（formatDateTimeToMinute）の整形を使い、同じ時刻になる
  *   （横断設計規約「日時の扱い」）
  * - タイトルのうち、ファイル名に使えない文字（`\ / : * ? " < > |`）は `_` に置き換える。制御文字と、見えない文字
  *   （U+200B や、文字の向きを変える U+202E など）も `_` にする。改行・タブ・続く空白は、空白 1 つに畳む
@@ -17,24 +17,13 @@
  *   予約名の判定（最初の「.」より前が予約名と同じか）に当たらないため。隠しファイル（先頭の「.」）にもならない
  */
 
+import { formatDateTimeToMinute } from './formatDateTime';
+
 /** 取り出すファイルの拡張子。 */
 export const EXPORT_FILE_EXTENSION = '.md';
 
 /** 名前に入れるタイトルの長さの上限（コードポイントの数）。 */
 export const MAX_TITLE_CODE_POINTS = 50;
-
-// 開始日時の整形。画面の開始日時（formatDateTimeToMinute）と同じ項目・同じ 24 時間表記。
-// hourCycle: 'h23' は、0 時を「24」ではなく「00」にする。
-const OPTIONS: Intl.DateTimeFormatOptions = {
-  year: 'numeric',
-  month: '2-digit',
-  day: '2-digit',
-  hour: '2-digit',
-  minute: '2-digit',
-  hourCycle: 'h23',
-};
-// タイムゾーンを指定しない（PC の設定を使う）ときの整形器。1 つを使い回す。
-const pcFormatter = new Intl.DateTimeFormat('ja-JP', OPTIONS);
 
 /** ファイル名に使えない文字（Windows）。 */
 const FORBIDDEN_CHARACTERS = /[\\/:*?"<>|]/g;
@@ -45,17 +34,16 @@ const INVISIBLE_CHARACTERS = /[\p{Cc}\p{Cf}\p{Zl}\p{Zp}]/gu;
 /**
  * 開始日時を、「年月日-時分」にする。
  *
+ * 画面の開始日時（formatDateTimeToMinute。「2026/10/19 14:30」）の数字だけを取り出して作る。整形を 1 か所に保ち、
+ * 画面の表示とファイル名の日時が、同じ時刻になる（0 時は「0000」で、「2400」にならない）。
+ *
  * @param startedAt 開始日時
  * @param timeZone タイムゾーン（例: 'Asia/Tokyo'）。省略すると PC の設定
  * @returns 例: 「20261019-1430」
  */
 function formatStamp(startedAt: Date, timeZone: string | undefined): string {
-  const formatter = timeZone === undefined ? pcFormatter : new Intl.DateTimeFormat('ja-JP', { ...OPTIONS, timeZone });
-  const parts: Record<string, string> = {};
-  for (const part of formatter.formatToParts(startedAt)) {
-    parts[part.type] = part.value;
-  }
-  return `${parts.year}${parts.month}${parts.day}-${parts.hour}${parts.minute}`;
+  const digits = formatDateTimeToMinute(startedAt, timeZone).replace(/\D/g, '');
+  return `${digits.slice(0, 8)}-${digits.slice(8)}`;
 }
 
 /**
