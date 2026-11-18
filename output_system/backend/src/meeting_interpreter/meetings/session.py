@@ -53,6 +53,14 @@ from ..interpreter.protocol import Backlog, ErrorKind, Silence, Stopped, WorkerE
 from ..interpreter.protocol import Subtitle as WorkerSubtitle
 from ..logs import current_trace_id, log_error, log_processing, trace_scope
 from ..logs.events import format_timestamp
+from ..process_memory import (
+    TRIGGER_MEETING_ENDED,
+    TRIGGER_MEETING_INTERRUPTED,
+    MemoryProbe,
+    MemoryUsage,
+    ProcessMemoryProbe,
+    log_memory_usage,
+)
 from ..records.errors import RecordError
 from ..records.models import Meeting, MeetingStatus
 from ..records.models import Subtitle as SavedSubtitle
@@ -282,6 +290,7 @@ class MeetingSession:
         policy: SessionPolicy,
         clock: Callable[[], datetime] = lambda: datetime.now(UTC),
         monotonic: Callable[[], float] = time.monotonic,
+        memory_probe: MemoryProbe | None = None,
         on_meeting_ended: Callable[[Meeting], Awaitable[None]] | None = None,
         on_finished: Callable[["MeetingSession"], None] | None = None,
         on_interpreter_stopped: Callable[[str], None] | None = None,
@@ -295,6 +304,8 @@ class MeetingSession:
             policy: 時間と回数の決め。
             clock: アプリサーバーの時計。音声が届いた日時と、終了日時に使う。
             monotonic: 単調増加時計（秒）。保存と通知にかかった時間を測る。テストが差し替える。
+            memory_probe: プロセスごとのメモリの使用量を取る部品。省略すると、実際の /proc を読む。
+                会議の終了・中断の記録（process_memory）に使う。
             on_meeting_ended: 会議を終了し、要約作成中になったあとに呼ぶ。作成ジョブ管理部への口。
             on_finished: セッションが終わったあとに呼ぶ。会議管理部が、進行中の枠を空ける。
             on_interpreter_stopped: 通訳ワーカーを止めたあとに、会議番号を渡して 1 回だけ呼ぶ
@@ -308,6 +319,9 @@ class MeetingSession:
         self._policy = policy
         self._clock = clock
         self._monotonic = monotonic
+        self._memory_probe: MemoryProbe = memory_probe or ProcessMemoryProbe()
+        # 会議を閉じる手順で、通訳ワーカーに終了処理を頼む直前に取ったメモリの使用量。
+        self._memory_at_close: list[MemoryUsage] | None = None
         self._on_meeting_ended = on_meeting_ended
         self._on_finished = on_finished
         self._on_interpreter_stopped = on_interpreter_stopped
@@ -683,6 +697,8 @@ class MeetingSession:
                 case _PumpIdle(generation=generation) if generation == handle.generation:
                     if phase is not _Phase.FLUSHING:
                         continue
+                    # 通訳ワーカーは、終了処理のあと自分で終わる。動いている間に、メモリを取る。
+                    self._take_memory_at_close()
                     try:
                         await asyncio.to_thread(
                             handle.client.finish,
@@ -958,6 +974,15 @@ class MeetingSession:
             duration_ms=elapsed_ms(meeting.started_at, ended_at),
             item_count=self._subtitle_count,
         )
+        # プロセスごとのメモリの使用量。終了処理の前に取った値があればそれを、無ければ（ワーカーが
+        # 起動できなかった・固まって止めたなど）いまの値を出す。動いていないワーカーの行は出ない。
+        log_memory_usage(
+            self._memory_at_close if self._memory_at_close is not None else self._read_memory(),
+            trigger=(
+                TRIGGER_MEETING_ENDED if reason is CloseReason.END else TRIGGER_MEETING_INTERRUPTED
+            ),
+            meeting_id=self.meeting_id,
+        )
 
         handle = self._handle
         if handle is not None:
@@ -986,6 +1011,24 @@ class MeetingSession:
             and self._on_meeting_ended is not None
         ):
             await self._call_on_meeting_ended(meeting)
+
+    def _take_memory_at_close(self) -> None:
+        """終了処理を頼む直前のメモリの使用量を取って、控える。会議ごとに 1 回だけ。"""
+        if self._memory_at_close is None:
+            self._memory_at_close = self._read_memory()
+
+    def _read_memory(self) -> list[MemoryUsage]:
+        """メモリの使用量を取る。取れなくても、会議を閉じる手順を止めない（空の一覧を返す）。"""
+        try:
+            return list(self._memory_probe.snapshot())
+        except Exception as error:  # noqa: BLE001 (測定の失敗で、会議を閉じる手順を止めない)
+            log_error(
+                "SYSTEM_UNEXPECTED_ERROR",
+                COMPONENT,
+                meeting_id=self.meeting_id,
+                exception_type=type(error).__name__,
+            )
+            return []
 
     def _notify_interpreter_stopped(self) -> None:
         """通訳ワーカーを止めたことを、1 回だけ知らせる。知らせ先の失敗で、後始末を止めない。"""
