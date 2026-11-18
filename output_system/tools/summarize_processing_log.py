@@ -164,7 +164,8 @@ def parse_line(line: str) -> dict[str, object] | None:
             continue
         try:
             value = json.loads(candidate)
-        except ValueError:
+        except (ValueError, RecursionError):
+            # 壊れた JSON は ValueError、深く入れ子になった配列は RecursionError。どちらも飛ばす。
             continue
         if isinstance(value, dict) and value.get("log_type") == "processing":
             return value
@@ -173,9 +174,13 @@ def parse_line(line: str) -> dict[str, object] | None:
 
 def _number(value: object) -> float | None:
     """ログの値が有限な数ならその値、そうでなければ None。真偽値は数として扱わない。"""
-    if isinstance(value, bool) or not isinstance(value, int | float) or not math.isfinite(value):
+    if isinstance(value, bool) or not isinstance(value, int | float):
         return None
-    return float(value)
+    try:
+        # 桁数の多い整数（400 桁など）は、float に直せず OverflowError になる。値なしとして扱う。
+        return float(value) if math.isfinite(value) else None
+    except OverflowError:
+        return None
 
 
 def _text(value: object) -> str | None:

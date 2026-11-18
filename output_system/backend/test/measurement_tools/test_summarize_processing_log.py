@@ -160,6 +160,46 @@ class TestParseLine:
         assert tool.parse_line(line) is None
 
 
+class TestBrokenLinesDoNotStopTheTool:
+    """壊れた行（桁数の多い整数・深く入れ子になった JSON）で止まらないこと。"""
+
+    def test_should_skip_a_number_that_is_too_large_for_a_float(self):
+        """
+        【テスト対象】read_logs（400 桁の整数の duration_ms）
+        【テスト内容】duration_ms が 400 桁の整数の字幕の行と、ふつうの字幕の行を読む。
+                    400 桁の整数は float に直せず、OverflowError になる値
+        【期待結果】例外にならず、字幕の件数には数えるが、遅れの値には入れないこと。
+                    ふつうの行の値は集計されること
+        """
+        huge = "1" + "0" * 399
+        broken = (
+            '{"log_type":"processing","process_type":"subtitle_sent",'
+            f'"meeting_id":"{MEETING_A}","duration_ms":{huge}}}'
+        )
+
+        result = tool.read_logs([broken, subtitle(MEETING_A, 2500)])
+
+        meeting = result.meetings[MEETING_A]
+        assert meeting.subtitle_count == 2
+        assert meeting.delays_ms == [2500.0]
+
+    def test_should_skip_a_deeply_nested_json_line(self):
+        """
+        【テスト対象】parse_line と read_logs（深く入れ子になった配列を持つ行）
+        【テスト内容】「{」で始まり、配列を 200,000 段に入れ子にした行を読む。
+                    JSON の読み取りが、再帰の深さの上限で RecursionError になる行。
+                    「docker logs -t」の行頭の日時が付いた同じ行も読む
+        【期待結果】どちらも例外にならず None になり、あとに続くふつうの行は集計されること
+        """
+        depth = 200_000
+        nested = '{"log_type":"processing","x":' + "[" * depth + "]" * depth + "}"
+
+        assert tool.parse_line(nested) is None
+        assert tool.parse_line("2026-11-18T01:23:45.123456789Z " + nested) is None
+        result = tool.read_logs([nested, subtitle(MEETING_A, 1000)])
+        assert result.meetings[MEETING_A].subtitle_count == 1
+
+
 class TestPercentile:
     """パーセンタイル（最近順位法）。"""
 
