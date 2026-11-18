@@ -949,6 +949,16 @@ class MeetingSession:
             self._result.set_exception(error)
             return
 
+        # 終了日時を記録した時点で、処理ログを出す（ワーカーを止める前）。字幕の遅れの判定が使う
+        # 「会議の終了」の日時は、この記録の日時になる。終了ボタンを受け付けた時点ではない。
+        # 中断は、終了とは別の種類（meeting_interrupted）で出す。
+        log_processing(
+            "meeting_ended" if reason is CloseReason.END else "meeting_interrupted",
+            meeting_id=self.meeting_id,
+            duration_ms=elapsed_ms(meeting.started_at, ended_at),
+            item_count=self._subtitle_count,
+        )
+
         handle = self._handle
         if handle is not None:
             await self._teardown(handle)
@@ -957,12 +967,6 @@ class MeetingSession:
         self._notify_interpreter_stopped()
 
         self._meeting = meeting
-        log_processing(
-            "meeting_ended" if reason is CloseReason.END else "meeting_interrupted",
-            meeting_id=self.meeting_id,
-            duration_ms=max((ended_at - meeting.started_at).total_seconds() * 1000, 0.0),
-            item_count=self._subtitle_count,
-        )
         self._publish(
             MEETING_STATE_CHANGED,
             {
