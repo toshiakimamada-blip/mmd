@@ -102,6 +102,18 @@ def log_processing(
     wait_ms: float | None = None,
     startup_ms: float | None = None,
     load_ms: float | None = None,
+    received_at: str | None = None,
+    sent_at: str | None = None,
+    audio_ms: float | None = None,
+    transcribe_ms: float | None = None,
+    translate_ms: float | None = None,
+    save_notify_ms: float | None = None,
+    original_char_count: int | None = None,
+    translated_char_count: int | None = None,
+    first_subtitle_ms: float | None = None,
+    memory_trigger: str | None = None,
+    process_role: str | None = None,
+    memory_mb: float | None = None,
     **not_allowed: object,
 ) -> None:
     """処理ログを出す（情報のレベル）。
@@ -116,9 +128,21 @@ def log_processing(
         peak_memory_mb: プロセスのメモリの最大値（MB）。無ければ省略する（項目ごと出ない）。
         job_type: 作成ジョブの種類（summary か questions）。作成ジョブの記録だけ。
         job_status: 作成ジョブの状況（queued・running・succeeded・failed）。
-        wait_ms: 作成ジョブが順番を待った時間（ミリ秒）。
+        wait_ms: 待った時間（ミリ秒）。作成ジョブが順番を待った時間、または字幕の処理の待ち。
         startup_ms: 生成ワーカーの起動にかかった時間（ミリ秒）。モデルの読み込みを含む。
         load_ms: 生成ワーカーが、モデルの読み込みにかかった時間（ミリ秒）。
+        received_at: 先頭の音声が届いた日時（UTC のミリ秒までの文字列）。字幕の記録だけ。
+        sent_at: 字幕を画面へ送った日時（同じ形）。字幕の記録だけ。
+        audio_ms: 発話の区切りの音声の長さ（ミリ秒）。字幕の記録だけ。
+        transcribe_ms: 文字起こしの所要時間（ミリ秒）。字幕の記録だけ。
+        translate_ms: 翻訳の所要時間（ミリ秒）。字幕の記録だけ。
+        save_notify_ms: 保存と通知の所要時間（ミリ秒）。字幕の記録だけ。
+        original_char_count: 英語の原文の文字数。文字数だけを渡し、文字そのものは渡さない。
+        translated_char_count: 日本語訳の文字数（翻訳に失敗したときは 0）。
+        first_subtitle_ms: 会議を作ってから、最初の字幕を画面へ送るまでの時間（ミリ秒）。
+        memory_trigger: メモリの使用量を取った時点（meeting_ended など）。process_memory だけ。
+        process_role: メモリの使用量を取ったプロセスの役割（app_server など）。process_memory だけ。
+        memory_mb: いまの常駐メモリ（MB）。process_memory だけ。
         **not_allowed: 許可リストに無い項目。渡しても出力されない（捨てる）。
             本文やタイトルなどを渡す誤りが、ログに現れないようにする仕組みの受け口。
     """
@@ -139,6 +163,18 @@ def log_processing(
             "wait_ms": wait_ms,
             "startup_ms": startup_ms,
             "load_ms": load_ms,
+            "received_at": received_at,
+            "sent_at": sent_at,
+            "audio_ms": audio_ms,
+            "transcribe_ms": transcribe_ms,
+            "translate_ms": translate_ms,
+            "save_notify_ms": save_notify_ms,
+            "original_char_count": original_char_count,
+            "translated_char_count": translated_char_count,
+            "first_subtitle_ms": first_subtitle_ms,
+            "memory_trigger": memory_trigger,
+            "process_role": process_role,
+            "memory_mb": memory_mb,
         },
     )
 

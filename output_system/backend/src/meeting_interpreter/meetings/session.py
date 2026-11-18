@@ -55,6 +55,7 @@ from ..logs import current_trace_id, log_error, log_processing, trace_scope
 from ..logs.events import format_timestamp
 from ..records.errors import RecordError
 from ..records.models import Meeting, MeetingStatus
+from ..records.models import Subtitle as SavedSubtitle
 from ..records.store import RecordStore
 from ..tuning import Tuning
 from ..worker_client import WorkerExited
@@ -225,6 +226,20 @@ def _iso(moment: datetime) -> str:
     return format_timestamp(moment)
 
 
+def elapsed_ms(start: datetime, end: datetime) -> float:
+    """2 つの日時の差（ミリ秒）。終わりが始まりより前のとき（時計が戻った）は 0。
+
+    字幕の遅れ（画面へ送った日時 - 先頭の音声が届いた日時）と、最初の字幕までの時間の計算に使う。
+    負の値は、遅れとして意味を持たず、ログの項目にも書けない。
+    """
+    return max((end - start).total_seconds() * 1000, 0.0)
+
+
+def _rounded_ms(seconds: float) -> float:
+    """秒をミリ秒にして、小数 1 桁（0.1 ミリ秒）に丸める。ログの行を短くするため。"""
+    return round(seconds * 1000, 1)
+
+
 def describe_worker_exit(exited: WorkerExited) -> str:
     """通訳ワーカーの終わり方を、エラーログの exception_type に書ける 1 語にする。
 
@@ -266,6 +281,7 @@ class MeetingSession:
         launcher: InterpreterLauncher,
         policy: SessionPolicy,
         clock: Callable[[], datetime] = lambda: datetime.now(UTC),
+        monotonic: Callable[[], float] = time.monotonic,
         on_meeting_ended: Callable[[Meeting], Awaitable[None]] | None = None,
         on_finished: Callable[["MeetingSession"], None] | None = None,
         on_interpreter_stopped: Callable[[str], None] | None = None,
@@ -278,6 +294,7 @@ class MeetingSession:
             launcher: 通訳ワーカーの起動の入口。
             policy: 時間と回数の決め。
             clock: アプリサーバーの時計。音声が届いた日時と、終了日時に使う。
+            monotonic: 単調増加時計（秒）。保存と通知にかかった時間を測る。テストが差し替える。
             on_meeting_ended: 会議を終了し、要約作成中になったあとに呼ぶ。作成ジョブ管理部への口。
             on_finished: セッションが終わったあとに呼ぶ。会議管理部が、進行中の枠を空ける。
             on_interpreter_stopped: 通訳ワーカーを止めたあとに、会議番号を渡して 1 回だけ呼ぶ
@@ -290,6 +307,7 @@ class MeetingSession:
         self._launcher = launcher
         self._policy = policy
         self._clock = clock
+        self._monotonic = monotonic
         self._on_meeting_ended = on_meeting_ended
         self._on_finished = on_finished
         self._on_interpreter_stopped = on_interpreter_stopped
@@ -307,6 +325,8 @@ class MeetingSession:
         self._closed_at: datetime | None = None
         self._result: asyncio.Future[Meeting] = asyncio.get_running_loop().create_future()
         self._subtitle_count = 0
+        # 最初の字幕を画面へ送った記録を出したか（最初の字幕までの時間は、その記録にだけ付ける）。
+        self._first_subtitle_logged = False
         self._failures = 0
         self._ready_monotonic: float | None = None
         self._generation = 0
@@ -777,8 +797,9 @@ class MeetingSession:
         """字幕 1 件を保存し、保存が確定してから画面へ通知する。
 
         保存に失敗した字幕は、通知しない（画面に出た字幕が、必ず記録に残る）。
-        エラーを通知して、会議は続ける。
+        エラーを通知して、会議は続ける。通知したあとで、処理ログ（subtitle_sent）を 1 件出す。
         """
+        save_started = self._monotonic()
         try:
             saved = await self._store.add_subtitle(
                 self.meeting_id,
@@ -800,13 +821,56 @@ class MeetingSession:
                 "spoken_at": _iso(saved.spoken_at),
             },
         )
-        delay_ms = max((self._clock() - subtitle.received_at).total_seconds() * 1000, 0.0)
+        # 画面へ送った時点。字幕が「除く区間」の内か外かは、この日時で決める。
+        sent_at = self._clock()
+        self._log_subtitle_sent(
+            subtitle,
+            saved,
+            sent_at=sent_at,
+            save_notify_seconds=self._monotonic() - save_started,
+        )
+
+    def _log_subtitle_sent(
+        self,
+        subtitle: WorkerSubtitle,
+        saved: SavedSubtitle,
+        *,
+        sent_at: datetime,
+        save_notify_seconds: float,
+    ) -> None:
+        """字幕を画面へ送った時点の処理ログ（subtitle_sent）を、字幕 1 件につき 1 行出す。
+
+        項目（時間はミリ秒、日時は UTC のミリ秒までの文字列）
+        - duration_ms: 字幕の遅れ。画面へ送った日時 - 先頭の音声が届いた日時
+        - received_at・sent_at: 先頭の音声が届いた日時・画面へ送った日時
+        - audio_ms・wait_ms・transcribe_ms・translate_ms: 通訳ワーカーが返した段の時間
+        - save_notify_ms: 保存と通知の時間（保存を始めてから、通知を送り終えるまで）
+        - original_char_count・translated_char_count: 文字数（翻訳に失敗した字幕の訳は 0）
+        - first_subtitle_ms: 会議を作ってから、最初の字幕を画面へ送るまでの時間（最初の 1 行だけ）。
+          起点は会議を作った時点のため、ブラウザーの共有の確認に答えている時間は含まない
+
+        字幕の本文は渡さない（文字数だけ）。許可リストも、本文が入る形の値を捨てる。
+        """
+        first_subtitle_ms = None
+        if not self._first_subtitle_logged:
+            self._first_subtitle_logged = True
+            first_subtitle_ms = round(elapsed_ms(self._meeting.started_at, sent_at), 1)
+        timings = subtitle.timings
         log_processing(
             "subtitle_sent",
             meeting_id=self.meeting_id,
             trace_id=subtitle.trace_id,
-            duration_ms=delay_ms,
-            char_count=len(saved.original_text) + len(saved.translated_text or ""),
+            duration_ms=round(elapsed_ms(subtitle.received_at, sent_at), 1),
+            received_at=_iso(subtitle.received_at),
+            sent_at=_iso(sent_at),
+            audio_ms=_rounded_ms(subtitle.audio_seconds),
+            wait_ms=_rounded_ms(timings.wait_seconds),
+            transcribe_ms=_rounded_ms(timings.transcribe_seconds),
+            translate_ms=_rounded_ms(timings.translate_seconds),
+            save_notify_ms=_rounded_ms(save_notify_seconds),
+            original_char_count=len(saved.original_text),
+            translated_char_count=len(saved.translated_text or ""),
+            first_subtitle_ms=first_subtitle_ms,
         )
 
     # --- 止める -------------------------------------------------------------------------
