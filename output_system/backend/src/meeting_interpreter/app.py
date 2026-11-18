@@ -47,6 +47,7 @@ from .models.fetch import ModelFetcher
 from .models.manager import ModelManager, ModelStatus, ModelStatusNotifier
 from .models.store import ModelStore
 from .notify.hub import NotificationHub
+from .process_memory import MemoryProbe
 from .records.database import RecordDatabase
 from .records.disk_space import DiskSpaceMonitor, DiskUsage
 from .records.errors import RecordSchemaError
@@ -194,6 +195,7 @@ def create_app(
     job_policy: JobPolicy | None = None,
     job_outcomes: JobOutcomeHandler | None = None,
     disk_usage: Callable[[Path], DiskUsage] | None = None,
+    memory_probe: MemoryProbe | None = None,
 ) -> FastAPI:
     """アプリサーバーを組み立てる。
 
@@ -215,6 +217,9 @@ def create_app(
             記録するだけの受け取り先を渡すために使う。
         disk_usage: ディスクの使用状況を返す関数。ディスクの空きが少ないことの警告の判定に使う。
             省略すると、実際のディスクを読む。テストが、空きを決めた偽の関数を渡すために使う。
+        memory_probe: プロセスごとのメモリの使用量を取る部品。会議の終了・中断と、作成ジョブの
+            終了の処理ログ（process_memory）に使う。省略すると、実際の /proc を読む。
+            テストが、決まった値を返す偽物を渡すために使う。
 
     Returns:
         経路をすべて登録した FastAPI のアプリ。
@@ -255,6 +260,7 @@ def create_app(
         publisher=notification_hub,
         policy=job_policy or JobPolicy.from_tuning(settings.tuning),
         outcomes=job_outcomes or JobOutcomes(summary_outcomes, question_outcomes),
+        memory_probe=memory_probe,
     )
     # 作成の依頼（要約・質問）と記録の削除を、1 つずつ処理する鍵。3 つの部で共有する。
     # 依頼が会議を読んでから作成ジョブを登録するまでの間に、同じ会議の削除が割り込まないため
@@ -292,6 +298,7 @@ def create_app(
         has_active_job=app.state.job_manager.has_active_job,
         # 記録の削除は、作成の依頼と同じ鍵の中で、条件を確かめて削除する。
         request_lock=request_lock,
+        memory_probe=memory_probe,
     )
 
     register_exception_handlers(app)

@@ -9,7 +9,7 @@
 名前を変えて渡されても、値の形の検査で止める（会議の文面は、空白や日本語を含むため、
 識別子や種類を表す短い英数字の形に当てはまらない）。
 
-項目を足すときは、`FieldSpec` を 1 つ足す（性能の測定の値などを、後続の作業で足す）。
+項目を足すときは、`FieldSpec` を 1 つ足す。
 値の形は、会議の内容が入り込めない、狭い形にする。
 """
 
@@ -116,12 +116,14 @@ _COMPONENT = short_text(r"[a-z][a-z0-9_]*(?:\.[a-z0-9_]+)*", 128)
 _EXCEPTION_TYPE = short_text(r"[A-Za-z_][A-Za-z0-9_]*(?:\.[A-Za-z_][A-Za-z0-9_]*)*", 128)
 # 発生場所。モジュール名.関数名:行番号。
 _LOCATION = short_text(r"[A-Za-z_][A-Za-z0-9_.<>]*:[0-9]+", 200)
+# 日時。UTC のミリ秒までの文字列（例: 2026-10-20T01:23:45.678Z）。ログの timestamp と同じ形。
+_MOMENT = short_text(r"[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}\.[0-9]{3}Z", 24)
 # 宛先と送り元の名前。印字できる ASCII 文字だけ。長さは 255 文字まで。
 # 要求のヘッダーの値は送った側が決められるため、log_connection が先に整えてから渡す。
 _HEADER_NAME = short_text(r"[\x21-\x7e]{1,255}", 255)
 
 # 処理ログ: 会議の開始と終了、発話の区切りの処理、作成ジョブ、AI モデルの入手、
-# 記録の削除、起動時の復旧。
+# 記録の削除、起動時の復旧、プロセスごとのメモリの使用量。
 PROCESSING_LOG: Final = LogKind(
     "processing",
     (
@@ -131,7 +133,8 @@ PROCESSING_LOG: Final = LogKind(
         FieldSpec("duration_ms", non_negative_number, always=True),
         FieldSpec("item_count", non_negative_int, always=True),
         FieldSpec("char_count", non_negative_int, always=True),
-        # プロセスのメモリの最大値（MB）。翻訳モデルの変換が済んだ時点などで出す。
+        # プロセスのメモリの最大値（MB）。翻訳モデルの変換が済んだ時点、ワーカーが止まる時点、
+        # プロセスごとのメモリの使用量の記録（process_memory）で出す。
         # 必ず含める項目ではない（出す契機のときだけ付く）。
         FieldSpec("peak_memory_mb", non_negative_number),
         # 作成ジョブの記録の項目。必ず含める項目ではない（作成ジョブの記録のときだけ付く）。
@@ -139,12 +142,41 @@ PROCESSING_LOG: Final = LogKind(
         FieldSpec("job_type", _KIND_WORD),
         # 作成ジョブの状況（queued・running・succeeded・failed）。
         FieldSpec("job_status", _KIND_WORD),
-        # 受け付けから、順番を待った時間（ミリ秒）。譲った・後回しにした間の待ちも含む。
+        # 待った時間（ミリ秒）。作成ジョブでは、受け付けから順番を待った時間（譲った・
+        # 後回しにした間の待ちも含む）。字幕では、発話の区切りができてから、通訳ワーカーが
+        # 処理を始めるまでの待ち。
         FieldSpec("wait_ms", non_negative_number),
         # 生成ワーカーの起動にかかった時間（ミリ秒）。モデルの読み込みを含む。
         FieldSpec("startup_ms", non_negative_number),
         # 生成ワーカーが、モデルの読み込みにかかった時間（ミリ秒）。
         FieldSpec("load_ms", non_negative_number),
+        # 字幕を画面へ送った時点の記録（subtitle_sent）の項目。必ず含める項目ではない。
+        # 字幕の遅れは duration_ms（画面へ送った日時 - 先頭の音声が届いた日時）に出す。
+        # 先頭の音声がアプリサーバーへ届いた日時。
+        FieldSpec("received_at", _MOMENT),
+        # 字幕を画面へ送った日時。字幕が「除く区間」の内か外かは、この日時で決める。
+        FieldSpec("sent_at", _MOMENT),
+        # 発話の区切りの音声の長さ（ミリ秒）。字幕の遅れの配分の「発話の区切りができるまで」。
+        FieldSpec("audio_ms", non_negative_number),
+        # 文字起こしの所要時間（ミリ秒）。
+        FieldSpec("transcribe_ms", non_negative_number),
+        # 翻訳の所要時間（ミリ秒）。
+        FieldSpec("translate_ms", non_negative_number),
+        # 保存と通知の所要時間（ミリ秒）。
+        FieldSpec("save_notify_ms", non_negative_number),
+        # 英語の原文の文字数と、日本語訳の文字数（翻訳に失敗した字幕は 0）。文字そのものは出さない。
+        FieldSpec("original_char_count", non_negative_int),
+        FieldSpec("translated_char_count", non_negative_int),
+        # 会議を作った時点から、最初の字幕を画面へ送るまでの時間（ミリ秒）。
+        # 最初の字幕の記録だけに付く。
+        FieldSpec("first_subtitle_ms", non_negative_number),
+        # プロセスごとのメモリの使用量の記録（process_memory）の項目。必ず含める項目ではない。
+        # 記録の時点（meeting_ended・meeting_interrupted・job_finished）。
+        FieldSpec("memory_trigger", _KIND_WORD),
+        # 役割（app_server・interpreter_worker・generation_worker・conversion_process・container）。
+        FieldSpec("process_role", _KIND_WORD),
+        # いまの常駐メモリ（MB）。最大値は peak_memory_mb に出す。
+        FieldSpec("memory_mb", non_negative_number),
     ),
 )
 

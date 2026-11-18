@@ -48,6 +48,12 @@ from ..generation.protocol import (
 )
 from ..logs import log_error, log_processing
 from ..meetings.session import ERROR_OCCURRED, describe_worker_exit, error_payload
+from ..process_memory import (
+    TRIGGER_JOB_FINISHED,
+    MemoryProbe,
+    ProcessMemoryProbe,
+    log_memory_usage,
+)
 from ..records.models import QuestionPhase
 from ..tuning import Tuning
 from ..worker_client import WorkerExited
@@ -141,6 +147,7 @@ class JobManager:
         outcomes: JobOutcomeHandler | None = None,
         clock: Callable[[], datetime] = lambda: datetime.now(UTC),
         monotonic: Callable[[], float] = time.monotonic,
+        memory_probe: MemoryProbe | None = None,
     ) -> None:
         """
         Args:
@@ -150,7 +157,10 @@ class JobManager:
             outcomes: 作成の結果の受け取り先。省略すると、結果を捨てる（保存を行う部をつなぐまで）。
             clock: アプリサーバーの時計。受け付けた日時に使う。
             monotonic: 単調増加の時計（秒）。待ち時間の計算に使う。
+            memory_probe: プロセスごとのメモリの使用量を取る部品。作成ジョブの終了の記録に使う。
+                省略すると、実際の /proc を読む。
         """
+        self._memory_probe: MemoryProbe = memory_probe or ProcessMemoryProbe()
         self._launcher = launcher
         self._publisher = publisher
         self._policy = policy
@@ -687,6 +697,36 @@ class JobManager:
             wait_ms=record.timeline.waited_seconds(now) * 1000,
             startup_ms=record.worker_start_seconds * 1000 if started else None,
             load_ms=record.model_load_seconds * 1000 if started else None,
+        )
+        if finished:
+            self._log_memory(record)
+
+    def _log_memory(self, record: JobRecord) -> None:
+        """作成ジョブの終了の時点の、プロセスごとのメモリの使用量を、処理ログに出す。
+
+        動いているプロセスだけが出る（生成ワーカーは、ジョブが終わった直後はまだ動いている。
+        ワーカーが止まって失敗になったジョブでは、生成ワーカーの行は出ない）。会議中に質問を作る
+        ときは、通訳ワーカーの行も並ぶ。測れなくても、作成ジョブの終了の処理は止めない。
+        """
+        try:
+            usages = list(self._memory_probe.snapshot())
+        except Exception as error:  # noqa: BLE001 (測定の失敗で、作成ジョブの終了を止めない)
+            _, location = describe_origin(error)
+            log_error(
+                "SYSTEM_UNEXPECTED_ERROR",
+                COMPONENT,
+                meeting_id=record.meeting_id,
+                trace_id=record.trace_id,
+                exception_type=type(error).__name__,
+                location=location,
+            )
+            return
+        log_memory_usage(
+            usages,
+            trigger=TRIGGER_JOB_FINISHED,
+            meeting_id=record.meeting_id,
+            trace_id=record.trace_id,
+            job_type=record.kind.value,
         )
 
     # --- 失敗 -----------------------------------------------------------------------

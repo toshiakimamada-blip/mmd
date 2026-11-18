@@ -53,8 +53,17 @@ from ..interpreter.protocol import Backlog, ErrorKind, Silence, Stopped, WorkerE
 from ..interpreter.protocol import Subtitle as WorkerSubtitle
 from ..logs import current_trace_id, log_error, log_processing, trace_scope
 from ..logs.events import format_timestamp
+from ..process_memory import (
+    TRIGGER_MEETING_ENDED,
+    TRIGGER_MEETING_INTERRUPTED,
+    MemoryProbe,
+    MemoryUsage,
+    ProcessMemoryProbe,
+    log_memory_usage,
+)
 from ..records.errors import RecordError
 from ..records.models import Meeting, MeetingStatus
+from ..records.models import Subtitle as SavedSubtitle
 from ..records.store import RecordStore
 from ..tuning import Tuning
 from ..worker_client import WorkerExited
@@ -219,10 +228,30 @@ class _Served(StrEnum):
 # 出力を読むスレッドが、ワーカーのメッセージを待つ間隔（秒）。止める合図を確かめる間隔でもある。
 _READ_POLL_SECONDS: Final = 0.25
 
+# 音声が届いた日時と、そのときの単調増加時計の読みの対応表に、残す件数の上限。
+# 音声は約 100 ミリ秒ごとに届くため、36,000 件は約 1 時間分（約 5MB）。字幕を送るたびに、その字幕
+# より古い分を捨てるため、ふつうはこの上限に届かない。声が 1 時間以上途切れた会議だけ、古い分から
+# 捨てる。
+MAX_ARRIVAL_RECORDS: Final = 36_000
+
 
 def _iso(moment: datetime) -> str:
     """通知の日時の形。UTC のミリ秒までの文字列。"""
     return format_timestamp(moment)
+
+
+def elapsed_ms(start: datetime, end: datetime) -> float:
+    """2 つの日時の差（ミリ秒）。終わりが始まりより前のとき（時計が戻った）は 0。
+
+    字幕の遅れ（画面へ送った日時 - 先頭の音声が届いた日時）と、最初の字幕までの時間の計算に使う。
+    負の値は、遅れとして意味を持たず、ログの項目にも書けない。
+    """
+    return max((end - start).total_seconds() * 1000, 0.0)
+
+
+def _rounded_ms(seconds: float) -> float:
+    """秒をミリ秒にして、小数 1 桁（0.1 ミリ秒）に丸める。ログの行を短くするため。"""
+    return round(seconds * 1000, 1)
 
 
 def describe_worker_exit(exited: WorkerExited) -> str:
@@ -266,6 +295,9 @@ class MeetingSession:
         launcher: InterpreterLauncher,
         policy: SessionPolicy,
         clock: Callable[[], datetime] = lambda: datetime.now(UTC),
+        monotonic: Callable[[], float] = time.monotonic,
+        started_monotonic: float | None = None,
+        memory_probe: MemoryProbe | None = None,
         on_meeting_ended: Callable[[Meeting], Awaitable[None]] | None = None,
         on_finished: Callable[["MeetingSession"], None] | None = None,
         on_interpreter_stopped: Callable[[str], None] | None = None,
@@ -278,6 +310,13 @@ class MeetingSession:
             launcher: 通訳ワーカーの起動の入口。
             policy: 時間と回数の決め。
             clock: アプリサーバーの時計。音声が届いた日時と、終了日時に使う。
+            monotonic: 単調増加時計（秒）。字幕の遅れ・最初の字幕までの時間・保存と通知にかかった
+                時間を測る。壁時計は、WSL2 などで単調増加時計と違う進み方をするため、時間の長さは
+                この時計で求める。テストが差し替える。
+            started_monotonic: 会議を作った時点の、単調増加時計の読み。最初の字幕までの時間の起点。
+                省略すると、セッションを作った時点の読み。
+            memory_probe: プロセスごとのメモリの使用量を取る部品。省略すると、実際の /proc を読む。
+                会議の終了・中断の記録（process_memory）に使う。
             on_meeting_ended: 会議を終了し、要約作成中になったあとに呼ぶ。作成ジョブ管理部への口。
             on_finished: セッションが終わったあとに呼ぶ。会議管理部が、進行中の枠を空ける。
             on_interpreter_stopped: 通訳ワーカーを止めたあとに、会議番号を渡して 1 回だけ呼ぶ
@@ -290,6 +329,14 @@ class MeetingSession:
         self._launcher = launcher
         self._policy = policy
         self._clock = clock
+        self._monotonic = monotonic
+        self._started_monotonic = monotonic() if started_monotonic is None else started_monotonic
+        # 音声が届いた日時 → そのときの単調増加時計の読み。届いた順に並ぶ。字幕の遅れを、単調増加
+        # 時計の差で求めるために使う（通訳ワーカーは、先頭の音声の届いた日時を、同じ値のまま返す）。
+        self._arrival_monotonic: dict[datetime, float] = {}
+        self._memory_probe: MemoryProbe = memory_probe or ProcessMemoryProbe()
+        # 会議を閉じる手順で、通訳ワーカーに終了処理を頼む直前に取ったメモリの使用量。
+        self._memory_at_close: list[MemoryUsage] | None = None
         self._on_meeting_ended = on_meeting_ended
         self._on_finished = on_finished
         self._on_interpreter_stopped = on_interpreter_stopped
@@ -307,6 +354,8 @@ class MeetingSession:
         self._closed_at: datetime | None = None
         self._result: asyncio.Future[Meeting] = asyncio.get_running_loop().create_future()
         self._subtitle_count = 0
+        # 最初の字幕を画面へ送った記録を出したか（最初の字幕までの時間は、その記録にだけ付ける）。
+        self._first_subtitle_logged = False
         self._failures = 0
         self._ready_monotonic: float | None = None
         self._generation = 0
@@ -387,9 +436,20 @@ class MeetingSession:
         """
         if not self._accepting:
             return False
-        self._audio.append((pcm, self._clock()))
+        received_at = self._clock()
+        self._audio.append((pcm, received_at))
+        self._note_arrival(received_at)
         self._audio_ready.set()
         return True
+
+    def _note_arrival(self, received_at: datetime) -> None:
+        """音声が届いた日時に、そのときの単調増加時計の読みを対応させて控える。
+
+        同じ日時の音声が続けて届いたときは、最初の読みを残す。上限を超えたら、古い分から捨てる。
+        """
+        self._arrival_monotonic.setdefault(received_at, self._monotonic())
+        while len(self._arrival_monotonic) > MAX_ARRIVAL_RECORDS:
+            del self._arrival_monotonic[next(iter(self._arrival_monotonic))]
 
     def notify_capture(self, event: CaptureEvent) -> None:
         """音声の取り込みの知らせを受け取り、受け取り先へ渡す。"""
@@ -663,6 +723,8 @@ class MeetingSession:
                 case _PumpIdle(generation=generation) if generation == handle.generation:
                     if phase is not _Phase.FLUSHING:
                         continue
+                    # 通訳ワーカーは、終了処理のあと自分で終わる。動いている間に、メモリを取る。
+                    self._take_memory_at_close()
                     try:
                         await asyncio.to_thread(
                             handle.client.finish,
@@ -777,8 +839,10 @@ class MeetingSession:
         """字幕 1 件を保存し、保存が確定してから画面へ通知する。
 
         保存に失敗した字幕は、通知しない（画面に出た字幕が、必ず記録に残る）。
-        エラーを通知して、会議は続ける。
+        エラーを通知して、会議は続ける。通知したあとで、処理ログ（subtitle_sent）を 1 件出す。
         """
+        self._forget_arrivals_before(subtitle.received_at)
+        save_started = self._monotonic()
         try:
             saved = await self._store.add_subtitle(
                 self.meeting_id,
@@ -800,13 +864,92 @@ class MeetingSession:
                 "spoken_at": _iso(saved.spoken_at),
             },
         )
-        delay_ms = max((self._clock() - subtitle.received_at).total_seconds() * 1000, 0.0)
+        # 画面へ送った時点。字幕が「除く区間」の内か外かは、この日時（壁時計）で決める。
+        # 時間の長さ（遅れ・保存と通知）は、同じ時点の単調増加時計の読みで求める。
+        sent_at = self._clock()
+        sent_monotonic = self._monotonic()
+        self._log_subtitle_sent(
+            subtitle,
+            saved,
+            sent_at=sent_at,
+            sent_monotonic=sent_monotonic,
+            save_notify_seconds=sent_monotonic - save_started,
+        )
+
+    def _forget_arrivals_before(self, received_at: datetime) -> None:
+        """この字幕より前に届いた音声の対応を捨てる。
+
+        字幕は、発話の区切りの順に届く。先頭の音声が届いた日時は、あとの字幕ほど新しいため、
+        古い対応は、これから届く字幕には使わない。
+        """
+        arrivals = self._arrival_monotonic
+        while arrivals:
+            oldest = next(iter(arrivals))
+            if oldest >= received_at:
+                break
+            del arrivals[oldest]
+
+    def _subtitle_delay_ms(
+        self, subtitle: WorkerSubtitle, sent_at: datetime, sent_monotonic: float
+    ) -> float:
+        """字幕の遅れ（ミリ秒）。先頭の音声が届いてから、画面へ送るまで。
+
+        音声が届いたときの単調増加時計の読みが残っていれば、単調増加時計の差で求める。壁時計は、
+        環境によって、単調増加時計と違う進み方をする（WSL2 で毎分約 2 秒進んだ記録がある）ため。
+        読みが残っていないとき（上限を超えて捨てた、起動前に届いた）だけ、壁時計の差で求める。
+        """
+        arrived = self._arrival_monotonic.get(subtitle.received_at)
+        if arrived is None:
+            return elapsed_ms(subtitle.received_at, sent_at)
+        return max((sent_monotonic - arrived) * 1000, 0.0)
+
+    def _log_subtitle_sent(
+        self,
+        subtitle: WorkerSubtitle,
+        saved: SavedSubtitle,
+        *,
+        sent_at: datetime,
+        sent_monotonic: float,
+        save_notify_seconds: float,
+    ) -> None:
+        """字幕を画面へ送った時点の処理ログ（subtitle_sent）を、字幕 1 件につき 1 行出す。
+
+        項目（時間はミリ秒、日時は UTC のミリ秒までの文字列）
+        - duration_ms: 字幕の遅れ。画面へ送るまでの時間 - 先頭の音声が届いてからの時間。
+          単調増加時計の差で求める（_subtitle_delay_ms）
+        - received_at・sent_at: 先頭の音声が届いた日時・画面へ送った日時（壁時計。区間の切り分けに
+          使う）
+        - audio_ms・wait_ms・transcribe_ms・translate_ms: 通訳ワーカーが返した段の時間
+        - save_notify_ms: 保存と通知の時間（保存を始めてから、通知を送り終えるまで）
+        - original_char_count・translated_char_count: 文字数（翻訳に失敗した字幕の訳は 0）
+        - first_subtitle_ms: 会議を作ってから、最初の字幕を画面へ送るまでの時間（最初の 1 行だけ。
+          単調増加時計の差）。起点は会議を作った時点のため、ブラウザーの共有の確認に答えている時間は
+          含まない
+
+        字幕の本文は渡さない（文字数だけ）。許可リストも、本文が入る形の値を捨てる。
+        """
+        first_subtitle_ms = None
+        if not self._first_subtitle_logged:
+            self._first_subtitle_logged = True
+            first_subtitle_ms = max(
+                round((sent_monotonic - self._started_monotonic) * 1000, 1), 0.0
+            )
+        timings = subtitle.timings
         log_processing(
             "subtitle_sent",
             meeting_id=self.meeting_id,
             trace_id=subtitle.trace_id,
-            duration_ms=delay_ms,
-            char_count=len(saved.original_text) + len(saved.translated_text or ""),
+            duration_ms=round(self._subtitle_delay_ms(subtitle, sent_at, sent_monotonic), 1),
+            received_at=_iso(subtitle.received_at),
+            sent_at=_iso(sent_at),
+            audio_ms=_rounded_ms(subtitle.audio_seconds),
+            wait_ms=_rounded_ms(timings.wait_seconds),
+            transcribe_ms=_rounded_ms(timings.transcribe_seconds),
+            translate_ms=_rounded_ms(timings.translate_seconds),
+            save_notify_ms=_rounded_ms(save_notify_seconds),
+            original_char_count=len(saved.original_text),
+            translated_char_count=len(saved.translated_text or ""),
+            first_subtitle_ms=first_subtitle_ms,
         )
 
     # --- 止める -------------------------------------------------------------------------
@@ -885,6 +1028,25 @@ class MeetingSession:
             self._result.set_exception(error)
             return
 
+        # 終了日時を記録した時点で、処理ログを出す（ワーカーを止める前）。字幕の遅れの判定が使う
+        # 「会議の終了」の日時は、この記録の日時になる。終了ボタンを受け付けた時点ではない。
+        # 中断は、終了とは別の種類（meeting_interrupted）で出す。
+        log_processing(
+            "meeting_ended" if reason is CloseReason.END else "meeting_interrupted",
+            meeting_id=self.meeting_id,
+            duration_ms=elapsed_ms(meeting.started_at, ended_at),
+            item_count=self._subtitle_count,
+        )
+        # プロセスごとのメモリの使用量。終了処理の前に取った値があればそれを、無ければ（ワーカーが
+        # 起動できなかった・固まって止めたなど）いまの値を出す。動いていないワーカーの行は出ない。
+        log_memory_usage(
+            self._memory_at_close if self._memory_at_close is not None else self._read_memory(),
+            trigger=(
+                TRIGGER_MEETING_ENDED if reason is CloseReason.END else TRIGGER_MEETING_INTERRUPTED
+            ),
+            meeting_id=self.meeting_id,
+        )
+
         handle = self._handle
         if handle is not None:
             await self._teardown(handle)
@@ -893,12 +1055,6 @@ class MeetingSession:
         self._notify_interpreter_stopped()
 
         self._meeting = meeting
-        log_processing(
-            "meeting_ended" if reason is CloseReason.END else "meeting_interrupted",
-            meeting_id=self.meeting_id,
-            duration_ms=max((ended_at - meeting.started_at).total_seconds() * 1000, 0.0),
-            item_count=self._subtitle_count,
-        )
         self._publish(
             MEETING_STATE_CHANGED,
             {
@@ -918,6 +1074,24 @@ class MeetingSession:
             and self._on_meeting_ended is not None
         ):
             await self._call_on_meeting_ended(meeting)
+
+    def _take_memory_at_close(self) -> None:
+        """終了処理を頼む直前のメモリの使用量を取って、控える。会議ごとに 1 回だけ。"""
+        if self._memory_at_close is None:
+            self._memory_at_close = self._read_memory()
+
+    def _read_memory(self) -> list[MemoryUsage]:
+        """メモリの使用量を取る。取れなくても、会議を閉じる手順を止めない（空の一覧を返す）。"""
+        try:
+            return list(self._memory_probe.snapshot())
+        except Exception as error:  # noqa: BLE001 (測定の失敗で、会議を閉じる手順を止めない)
+            log_error(
+                "SYSTEM_UNEXPECTED_ERROR",
+                COMPONENT,
+                meeting_id=self.meeting_id,
+                exception_type=type(error).__name__,
+            )
+            return []
 
     def _notify_interpreter_stopped(self) -> None:
         """通訳ワーカーを止めたことを、1 回だけ知らせる。知らせ先の失敗で、後始末を止めない。"""

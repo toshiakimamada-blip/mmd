@@ -21,12 +21,14 @@
 """
 
 import asyncio
+import time
 from collections.abc import Awaitable, Callable
 from datetime import UTC, datetime
 from typing import Final
 
 from ..logs import log_error, log_processing
 from ..logs.events import format_timestamp
+from ..process_memory import MemoryProbe
 from ..records.errors import RecordError
 from ..records.models import DeletedCounts, Meeting, MeetingRecord, MeetingStatus, Subtitle
 from ..records.store import RecordStore
@@ -74,6 +76,7 @@ class MeetingManager:
         has_active_job: Callable[[str], bool] | None = None,
         request_lock: asyncio.Lock | None = None,
         shutdown_wait_seconds: float = SHUTDOWN_WAIT_SECONDS,
+        memory_probe: MemoryProbe | None = None,
     ) -> None:
         """
         Args:
@@ -98,7 +101,10 @@ class MeetingManager:
                 中で条件を確かめて削除する。本番は、SummaryRequests と QuestionRequests と同じ鍵を
                 渡す。省略すると、この部だけの鍵を作る（テスト用）。
             shutdown_wait_seconds: アプリの停止のとき、進行中の会議を閉じるのを待つ秒数。
+            memory_probe: プロセスごとのメモリの使用量を取る部品。会議の終了・中断の記録に使う。
+                省略すると、実際の /proc を読む。
         """
+        self._memory_probe = memory_probe
         self._store = store
         self._publisher = publisher
         self._launcher = launcher
@@ -158,6 +164,8 @@ class MeetingManager:
             raise meeting_already_running(self._session.meeting_id if self._session else None)
         self._occupied = True
         try:
+            # 会議を作る直前の単調増加時計の読み。最初の字幕までの時間の起点（会議を作った時点）。
+            started_monotonic = time.monotonic()
             meeting = await self._store.create_meeting(title=checked_title, audio_source=source)
             session = MeetingSession(
                 meeting,
@@ -166,6 +174,8 @@ class MeetingManager:
                 launcher=self._launcher,
                 policy=self._policy,
                 clock=self._clock,
+                started_monotonic=started_monotonic,
+                memory_probe=self._memory_probe,
                 on_meeting_ended=self._on_meeting_ended,
                 on_finished=self._on_session_finished,
                 on_interpreter_stopped=self._on_interpreter_stopped,

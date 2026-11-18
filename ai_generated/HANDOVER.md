@@ -27,6 +27,7 @@ output_system/
 │   │   ├── tuning.py         # config/tuning.toml の調整値（MMD_TUNING_* で上書き）
 │   │   ├── config_error.py   # 設定の誤りで起動を止める例外
 │   │   ├── logs/             # 3 種類のログ（標準出力・JSON 1 行）。許可リストは fields.py
+│   │   ├── process_memory.py # プロセスごとのメモリの使用量（/proc と cgroup。標準ライブラリだけ）。`ProcessMemoryProbe.snapshot()` と `log_memory_usage()`。会議の終了・中断と作成ジョブの終了の処理ログ（`process_memory`）が使う。使い方は docs/measurement.md
 │   │   ├── errors.py         # 画面へ返すエラーの共通の形（3 分類・9 領域・例外ハンドラー）
 │   │   ├── healthcheck.py    # HEALTHCHECK 用（外向きの通信の例外: 127.0.0.1 だけ）
 │   │   ├── child_process.py  # ワーカー・変換プロセスの起動の入口。自動入手と利用状況の送信を止める環境変数を必ず付ける
@@ -55,8 +56,9 @@ output_system/
 │   ├── src/components/notices/ # お知らせ帯・7 つのエラー表示パターン・確認の表示（使い方は docs/notices.md）
 │   └── test/                 # src と同じ構造。test/browser/capture-check/ は実ブラウザーで音声の取り込みを確かめる確認用のページ（ビルドの対象外。出荷しない）。test/audio/fakes.ts は偽のトラック・ストリーム・WebSocket・AudioContext・処理部
 ├── tools/with-pinned-node.sh # Dockerfile と同じ版の Node.js で、渡されたコマンド（npm install など）を実行する
+├── tools/summarize_processing_log.py # 処理ログ（docker logs の出力）から、会議ごとの字幕の遅れ・最初の字幕までの時間・メモリを Markdown の表で集計する（標準ライブラリだけ。区間の規則は適用しない）。テストは backend/test/measurement_tools/
 ├── config/                   # tuning.toml（調整値の仮置き）、models.toml（3 つの AI モデルの定義）、translation_alternatives.md（翻訳モデルの代わりの候補）
-├── docs/                     # errors.md（エラーの扱い・コード一覧）、notices.md（画面の部品の使い方）、models.md（入手・変換）、interpreter.md（通訳ワーカー・測定値）、generation.md（生成ワーカー・測定値）、meetings.md（会議の開始と終了・通知・実機での確認）、events.md（通知の受信と再接続）、record-screen.md（「会議の記録」の画面と確認）、live-screen.md（「会議中」の画面と確認）、prepare-screen.md（「会議の準備」の画面と確認）、list-screen.md（「会議の一覧」の画面・ディスクの空きの警告と確認）、jobs.md（作成ジョブ管理部）
+├── docs/                     # errors.md（エラーの扱い・コード一覧）、notices.md（画面の部品の使い方）、models.md（入手・変換）、interpreter.md（通訳ワーカー・測定値）、generation.md（生成ワーカー・測定値）、meetings.md（会議の開始と終了・通知・実機での確認）、events.md（通知の受信と再接続）、record-screen.md（「会議の記録」の画面と確認）、live-screen.md（「会議中」の画面と確認）、prepare-screen.md（「会議の準備」の画面と確認）、list-screen.md（「会議の一覧」の画面・ディスクの空きの警告と確認）、jobs.md（作成ジョブ管理部）、measurement.md（処理ログの測定項目と集計コマンド）、measure-early.md（利用者が実機で先行測定する手順書）
 ```
 
 ## ビルド・起動方法
@@ -142,7 +144,7 @@ output_system/
 - 順番を譲る・後回しにする: 作成中の要約へ、ブロックの区切りで止まるよう頼み（`interrupt`）、止まったら中間メモと次のブロックの番号を覚えて `queued` へ戻す。再開は続きのブロックから依頼する。質問が待ち、通訳中の会議もあるときは、後回しの理由を優先する（質問のあとも、会議が終わるまで再開しないため）。止まったときの理由（処理ログの `job_postponed` か `job_yielded`）は、そのときの状況から決め直す（`yield_reason`）。状況に理由が無いときだけ、止まるよう頼んだときの理由（`_interrupt_reason`）を使う。たとえば、会議のために止めるよう頼んだあとで会議が終わった場合、質問が待っていれば `job_yielded`、待っていなければ `job_postponed` を残す。待った時間（`wait_ms`）は、待機中の間（譲った・後回しにした間を含む）から、生成ワーカーの起動の間を除いた時間。起動は待機中のまま行うため、起動の前後で待ちを締め直す（`JobTimeline.begin_worker_start`・`end_worker_start`）。起動の時間は `startup_ms` に分けて出す。ブロックの途中では打ち切らない（確認事項 13 で目標に届かないときの見直しの候補）
 - 会議管理部は、`meeting_started` と `interpreter_stopped` を作成ジョブ管理部へ知らせる。`interpreter_stopped` は、通訳ワーカーを止めたあと、要約を始める呼び出し（`on_meeting_ended`）より先に呼ぶ。2 つのワーカーのメモリを重ねないため。会議中に起動する生成ワーカーは、CPU の割り当てを会議中にして始める
 - 結果の保存と、会議の状態の変更は、`JobManager` 自身ではしない。`JobOutcomeHandler`（`summary_ready`・`questions_ready`・`summary_failed`）の受け取り先を `create_app(job_outcomes=...)` へ渡す。省略すると `SummaryOutcomes`（要約を保存し、状態を変える。質問は PBI 5.3 が足すまで捨てる）。会議を `summarizing` にしてから `submit_summary` を呼ぶのは依頼する側（`SummaryRequests`）。窓口が終わってから、ジョブを完了にして通知する（窓口が例外なら `*_SAVE_FAILED`）
-- 生成ワーカーが止まったときは、理由を問わず（強制終了・出力の終わり・依頼を書けない例外）、作成中のジョブだけを失敗にする（`*_WORKER_STOPPED`）。待機中のジョブは、次のワーカーの起動で続く。ブラウザー（通知の接続）は持たないため、閉じても作成は続く。処理ログは `job_*`（本文なし。件数と文字数だけ）。メモリ使用量は、PBI 4.1 を後回しにしたため記録していない（`_log_job` の `job_finished` に足す。docs/jobs.md）
+- 生成ワーカーが止まったときは、理由を問わず（強制終了・出力の終わり・依頼を書けない例外）、作成中のジョブだけを失敗にする（`*_WORKER_STOPPED`）。待機中のジョブは、次のワーカーの起動で続く。ブラウザー（通知の接続）は持たないため、閉じても作成は続く。処理ログは `job_*`（本文なし。件数と文字数だけ）。`job_finished` の直後に、プロセスごとのメモリの使用量（`process_memory`）を出す（`_log_memory`。docs/jobs.md）
 
 - 要約は 2 回に分けて確定する。1 回目は状態を `summarizing` に（利用者の操作は `SummaryRequests.request`、会議の終了は会議管理部の終了の保存）。2 回目は `SummaryOutcomes` が、要約の作成または置き換えと状態の `completed` を `RecordStore.save_summary` の 1 回の確定で行う（失敗理由も空になる）。失敗は `update_meeting(status=summary_failed, summary_failure_reason=エラーコード)` で、要約の表には触れない（作り直しの失敗で前の要約が残る）。依頼は、同じ会議の要約のジョブがあればそれを返す（遷移規則より先）。依頼は `asyncio.Lock` で 1 つずつ処理する。会議が無いときのコードは、依頼書の `RECORD_NOT_FOUND` ではなく、既存の `MEETING_NOT_FOUND`（404）にそろえた
 - 待機中の理由 `wait_reason`（`other_job`・`meeting_in_progress`・`null`）は `policy.wait_reason` が決め、管理のタスクが出来事のたびに決め直す。変わったときだけ `job.status_changed` をもう一度出す（同じ `queued` が続くことがある。テストの `statuses` は連続する同じ状況を 1 つにまとめる）。`JobManager.active_jobs(会議番号)` が、画面を開いた時点の取得の元になる（Task 5.4.1 が会議の取得 API に含める）
@@ -168,6 +170,9 @@ output_system/
 - 取り出しの変換の検査は、markdown-it（frontend の dev 依存。15.0.3。linkify-it 6.1.0）で描画する（`test/records/recordMarkdownRendered.test.ts`。設定は `{ html: true, linkify: true }` と、fuzzyLink・fuzzyEmail・fuzzyIP を有効にしたものの 2 つ）。補助に、変換器を使わない規則の検査（`test/records/markdownInertKit.ts`）。規則を変えたときは、別の版（14.1.0）でも、使い捨ての別のフォルダーに入れて確かめた（`npm install markdown-it@14.1.0 --min-release-age=7`。記録の全項目 × 悪意のある内容 109 例 = 981 通りを描画。リンク・画像・`script` と、骨組みに無い見出し・一覧・引用・コード・表が出ないこと）。linkify-it の fuzzy の既定値は版で違うため、テストは明示する
 - ファイル名は「開始日時_タイトル.md」。タイトルは 50 文字（コードポイント）で切る（4 バイトの文字だけでも 255 バイト以内）。名前が日時の数字から始まるため、Windows の予約名にならない
 - 一時的な URL は、クリックの 1 秒後に解放する（`REVOKE_DELAY_MS`）。クリックの直後に解放すると、ダウンロードの開始に間に合わないブラウザーがあるため
+- 性能の測定の値は、処理ログに出す（PBI #74）。字幕を画面へ送った時点の `subtitle_sent`（`duration_ms` が字幕の遅れ。**単調増加時計の差**で求める。音声が届いたとき、届いた日時 → 単調増加時計の読みを `MeetingSession._arrival_monotonic` に控え、字幕を送るたびに古い分を捨てる。上限 36,000 件。対応が無いときだけ `sent_at` - `received_at`（壁時計）。`received_at`・`sent_at` は区間の切り分け用に壁時計のまま。段の時間 `wait_ms`・`transcribe_ms`・`translate_ms`・`save_notify_ms`・区切りの長さ `audio_ms`・文字数 `original_char_count`/`translated_char_count`。最初の 1 行だけ `first_subtitle_ms` = 会議を作る直前の単調増加時計から）、`meeting_ended`/`meeting_interrupted`（終了日時を保存した直後、ワーカーを止める前に出す）、`process_memory`（1 プロセス 1 行。`memory_trigger`・`process_role`・`memory_mb`・`peak_memory_mb`）。項目の一覧と数え方は docs/measurement.md。許可リストの形の検査が、本文の混入を止める。時間は 0.1 ミリ秒に丸める
+- メモリは `/proc/<番号>/status` の `VmRSS`・`VmHWM`（MB は 1,048,576 バイト）。ワーカーは「アプリサーバーの子で、引数が `-m <WORKER_MODULE>` のもの」で見つける（番号を会議管理部・作成ジョブ管理部から受け渡さない。変換プロセスは番号を公開していないため）。**通訳ワーカーは終了処理のあと自分で終わるため、会議の終了の値は、終了処理を頼む直前（`_PumpIdle`）に取る**（閉じる時点では読めない）。ワーカーが起動できなかった・固まったときは、閉じる時点の値を出す。`psutil` は入れていない。コンテナ全体は cgroup の `memory.current`（ファイルのキャッシュを含む）
+- 集計コマンドは、字幕の遅れの判定から除く区間の規則を適用しない（出力の先頭に書く）。区間の規則の適用と作成時間の集計は Epic 8（Task 8.1.1・8.1.2）。95 パーセンタイルは最近順位法、10 秒を超えた件数は「10 秒より長い」
 
 ## はまりポイント
 - `.gitignore` の `tools/`（gaido 管理）が `output_system/tools/` にも当たる。`!/output_system/tools/` で打ち消している
@@ -251,6 +256,8 @@ output_system/
 - frontend の dev 依存に markdown-it を足した（取り出しのテスト専用。画面のコードから import しない。出荷イメージの静的ファイルに含まれないことを確かめた）。型は同梱（`import MarkdownIt, { type MarkdownIt as MarkdownItInstance } from 'markdown-it'`）。npm は `../tools/with-pinned-node.sh npm install -D markdown-it`。markdown-it 15.0.3・linkify-it 6.1.0・mdurl 2.1.0・uc.micro 3.0.0・argparse 3.0.4・punycode.js 2.3.1 を、公開から 7 日以上の版で入れた
 - 本物の変換器で描画するテストは重い（約 2,000 回の描画）。`vi.setConfig({ testTimeout })` で長くしてある。描画した文字の取り出しは、jsdom の DOMParser を使わず、`<…>` を除いて 4 つの文字参照を戻す（DOMParser は 4 倍遅かった）
 - `test/records/recordFixtures.ts`: 取り出しのテストが共通で使う記録の部品と、会議の内容を入れる 9 つの項目（`HOSTILE_FIELDS`）
+- `.gitignore` の `tools/` は `output_system/backend/test/tools/` にも当たる（`!/output_system/tools/` だけを打ち消している）。集計コマンドのテストは `backend/test/measurement_tools/` に置く
+- 全体のテストを走らせると、`test_job_manager_wait_reason.py::test_should_say_why_a_postponed_summary_waits` が 14 回に 1 回ほど落ちる（変更前の main のソースでも同じ。再実行で通る）。ほかのテストが起動した生成ワーカーが、pytest のプロセスの子として残ることがあり、メモリの記録の結合テストは、生成ワーカーの行が無いことを前提にしない
 
 ## 実装済み機能
 - PBI #2: コンテナの起動、共通の枠と 4 画面の骨組み、`GET /api/health`、配信部、名前付きボリューム 2 つ、自動再起動
@@ -273,3 +280,4 @@ output_system/
 - PBI #123: 記録を削除できる。`DELETE /api/meetings/{会議番号}`（状態と作成ジョブの確認、2 回に分けた確定、`secure_delete`）、「会議の一覧」と「会議の記録」の削除の確認と操作（取りやめ・お知らせ帯・応答までボタンを押せなくする）
 - PBI #127: 記録をクリップボードへコピーできる。「会議の記録」の要約・質問のまとまりごと・字幕のコピーのボタン、プレーンテキストの文面の組み立て、成功の表示（「コピーしました」）、書き込みを断られたときのお知らせ帯と文面の欄。出荷するコンテナを Chrome で確かめた（`docs/record-screen.md`）。「会議中」の質問のコピーは含まない（質問の領域は PBI 5.5）
 - PBI #130: 記録を Markdown のファイルで取り出せる。「会議の記録」の見出しの領域に「取り出す」（どの状態でも押せる）。押すと、読み込み済みの記録から画面が Markdown の文面（タイトル・開始日時・会議の長さ・要約の 4 項目・質問のまとまり・字幕）とファイル名（`20261019-1430_タイトル.md`）を組み立て、UTF-8（BOM なし）でダウンロードさせる。アプリサーバーへ要求を送らない。会議の内容の記号は、記法として働かない形へ変換する。ダウンロードを始められないときはお知らせ帯の `RECORD_EXPORT_FAILED`。画面の最後に取り出しの案内。要約作成中・要約失敗では、前の要約であることを 1 行で書く。全体の概要の改行は行末の 2 つの空白で残す。出荷するコンテナを Chrome で確かめた（`docs/record-screen.md`「記録の取り出し」）。バックエンドは変えていない
+- PBI #74: 字幕の遅れと会議開始の待ち時間を測り、集計できる。字幕ごとの処理ログ（遅れ・段ごとの時間・文字数・日時）、会議の開始・終了・中断と最初の字幕までの時間、会議の終了・中断と作成ジョブの終了の時点のプロセスごとのメモリの使用量（作成ジョブの終了時の記録は PBI 5.1 の Task 5.1.6 の後回し分）、集計コマンド `tools/summarize_processing_log.py`、利用者向けの先行測定の手順書 `docs/measure-early.md`。出荷するコンテナで確かめた（`docs/measurement.md`）。区間の規則の適用・作成時間の集計は含まない（Epic 8）
