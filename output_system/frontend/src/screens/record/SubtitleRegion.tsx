@@ -2,7 +2,7 @@ import { useId } from 'react';
 
 import { CopyButton } from '../../components/records/CopyButton';
 import { SubtitleList } from '../../components/subtitles/SubtitleList';
-import { buildSubtitlesText } from '../../records/recordText';
+import { NO_SUBTITLES_TEXT, buildSubtitlesText } from '../../records/recordText';
 import { type Subtitle } from '../../subtitles/subtitleTypes';
 
 /**
@@ -28,7 +28,7 @@ export function SubtitleRegion({ subtitles }: { readonly subtitles: readonly Sub
           getText={() => buildSubtitlesText(subtitles)}
         />
       </div>
-      {subtitles.length === 0 ? <p>字幕はありません。</p> : <SubtitleList subtitles={subtitles} />}
+      {subtitles.length === 0 ? <p>{NO_SUBTITLES_TEXT}</p> : <SubtitleList subtitles={subtitles} />}
     </section>
   );
 }

@@ -1,7 +1,7 @@
 import { useId } from 'react';
 import { Link } from 'react-router';
 
-import { formatDateTimeToMinute, formatDuration } from '../../records/formatDateTime';
+import { formatDateTimeToMinute, formatMeetingDuration } from '../../records/formatDateTime';
 import { MEETING_STATUS_LABELS, type RecordMeeting } from '../../records/recordTypes';
 import { screenPaths } from '../../routes';
 
@@ -11,6 +11,8 @@ import { screenPaths } from '../../routes';
  * - 開始日時は分まで、会議の長さは秒まで。会議の長さは、開始日時と終了日時から求める
  *   （保存していない）。通訳中の会議では表示しない
  * - 一覧へ戻るは、どの状態でも行える。画面の移動のため、リンクにする
+ * - 「取り出す」は、どの状態でも押せる（S-04）。押すと、読み込み済みの記録を、Markdown のファイルとして
+ *   ダウンロードさせる（F-13。呼び出し側が行う）。「一覧へ戻る」と「記録を削除する」の間に置く
  * - 「記録を削除する」は、状態別の表示と操作（deletable）に従って押せる。押せない間も、表示したまま残す
  *   （操作の場所を見失わないため）。削除の応答を待つ間も押せない（二度押しで、二重に依頼しない）
  * - タイトルは会議の内容。文字として表示する（ADR-15）
@@ -18,20 +20,24 @@ import { screenPaths } from '../../routes';
  * @param meeting 表示する会議
  * @param deletable 記録を削除できる状態か（records/recordView.ts の deletable）
  * @param deleting 削除を依頼して、応答を待っているか
+ * @param onExport 「取り出す」を押したときの処理（記録をファイルとしてダウンロードさせる）
  * @param onDelete 「記録を削除する」を押したときの処理（削除の確認を出す）
  */
 export function RecordHeader({
   meeting,
   deletable,
   deleting,
+  onExport,
   onDelete,
 }: {
   readonly meeting: RecordMeeting;
   readonly deletable: boolean;
   readonly deleting: boolean;
+  readonly onExport: () => void;
   readonly onDelete: () => void;
 }) {
   const factsId = useId();
+  const duration = formatMeetingDuration(meeting);
   return (
     <div className="record__header">
       <div className="record__headline">
@@ -40,6 +46,9 @@ export function RecordHeader({
           <Link className="record__back" to={screenPaths.meetingList()}>
             一覧へ戻る
           </Link>
+          <button type="button" className="record__export" onClick={onExport}>
+            取り出す
+          </button>
           <button
             type="button"
             className="record__delete"
@@ -63,12 +72,12 @@ export function RecordHeader({
               </time>
             </dd>
           </div>
-          {meeting.status !== 'interpreting' && meeting.endedAt !== null ? (
+          {duration === null ? null : (
             <div className="record__fact">
               <dt>会議の長さ</dt>
-              <dd>{formatDuration(meeting.startedAt, meeting.endedAt)}</dd>
+              <dd>{duration}</dd>
             </div>
-          ) : null}
+          )}
           <div className="record__fact">
             <dt>状態</dt>
             <dd>{MEETING_STATUS_LABELS[meeting.status]}</dd>

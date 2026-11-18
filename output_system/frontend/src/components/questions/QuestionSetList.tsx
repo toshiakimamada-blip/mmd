@@ -1,13 +1,7 @@
 import { formatDateTimeToMinute } from '../../records/formatDateTime';
-import { buildQuestionSetText } from '../../records/recordText';
+import { QUESTION_PHASE_LABELS, buildQuestionSetText } from '../../records/recordText';
 import { type RecordQuestionSet } from '../../records/recordTypes';
 import { CopyButton } from '../records/CopyButton';
-
-/** 質問を作成した時点の表示名（データモデル設計書の区分コード）。 */
-const PHASE_LABELS: Readonly<Record<RecordQuestionSet['createdPhase'], string>> = {
-  during_meeting: '会議中',
-  after_meeting: '会議後',
-};
 
 /**
  * 質問のまとまりの一覧。「会議中」と「会議の記録」で使い回す。
@@ -47,7 +41,7 @@ export function QuestionSetList({
           <p className="question-set__meta">
             <time dateTime={set.createdAt.toISOString()}>{formatDateTimeToMinute(set.createdAt)}</time>
             {showPhase ? (
-              <span className="question-set__phase">作成した時点: {PHASE_LABELS[set.createdPhase]}</span>
+              <span className="question-set__phase">作成した時点: {QUESTION_PHASE_LABELS[set.createdPhase]}</span>
             ) : null}
           </p>
           <ol className="question-set__questions" aria-label="質問">

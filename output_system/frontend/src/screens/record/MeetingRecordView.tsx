@@ -6,8 +6,10 @@ import { type MeetingRecord } from '../../records/recordTypes';
 import { decideRecordView } from '../../records/recordView';
 import { useMeetingDelete } from '../../records/useMeetingDelete';
 import { useMeetingRecord } from '../../records/useMeetingRecord';
+import { useRecordExport } from '../../records/useRecordExport';
 import { useSummaryRequest } from '../../records/useSummaryRequest';
 import { SCREENS, screenPaths } from '../../routes';
+import { ExportGuide } from './ExportGuide';
 import { RecordHeader } from './RecordHeader';
 import { SubtitleRegion } from './SubtitleRegion';
 import { SummaryRegion } from './SummaryRegion';
@@ -25,10 +27,13 @@ import { QuestionRegion } from './QuestionRegion';
  * 「記録を削除する」へフォーカスを戻す。
  * 削除の応答を待つ間は、状態の領域（role=status）で読み上げソフトへ伝え、ボタンを押せなくする。
  *
+ * 「取り出す」（F-13）は、読み込み済みの記録から、Markdown のファイルを組み立ててダウンロードさせる
+ * （records/useRecordExport.ts。アプリサーバーへ要求を送らない）。取り出しの案内（F-14）は、画面の最後に置く
+ * （ExportGuide）。
+ *
  * コピーのボタン（F-12）は、要約・質問のまとまりごと・字幕の各領域に置く（records/recordText.ts が文面を組み立て、
  * components/records/CopyButton.tsx が書き込みと結果の表示を受け持つ）。
- * 暫定版で置かない操作: 取り出す（取り出しの作業で足す）、質問を作るボタン（質問の作成の作業で足す）。
- * 取り出しの案内も、取り出すボタンを置くときに足す。
+ * 暫定版で置かない操作: 質問を作るボタン（質問の作成の作業で足す）。
  * 会議の内容（タイトル・要約・質問・字幕）は、常に文字として表示する（ADR-15）。
  *
  * @param meetingId 表示する会議の番号
@@ -97,6 +102,7 @@ function RecordBody({
   readonly deleting: boolean;
   readonly onDelete: () => void;
 }) {
+  const { exportRecord } = useRecordExport();
   const view = decideRecordView({
     status: record.meeting.status,
     subtitleCount: record.subtitles.length,
@@ -109,11 +115,13 @@ function RecordBody({
         meeting={record.meeting}
         deletable={view.deletable}
         deleting={deleting}
+        onExport={() => exportRecord(record)}
         onDelete={onDelete}
       />
       <SummaryRegion record={record} view={view} requesting={requesting} onRequest={onRequestSummary} />
       <QuestionRegion record={record} />
       <SubtitleRegion subtitles={record.subtitles} />
+      <ExportGuide />
     </>
   );
 }

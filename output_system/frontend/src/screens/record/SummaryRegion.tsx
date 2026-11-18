@@ -3,7 +3,7 @@ import { useId } from 'react';
 import { RegionError } from '../../components/notices';
 import { CopyButton } from '../../components/records/CopyButton';
 import { toDisplayErrorFromCode } from '../../errors/errorMessages';
-import { buildSummaryText } from '../../records/recordText';
+import { NO_SUMMARY_TEXT, PREVIOUS_SUMMARY_LABEL, buildSummaryText } from '../../records/recordText';
 import { type MeetingRecord, type RecordJob } from '../../records/recordTypes';
 import { isActiveJob, type RecordView } from '../../records/recordView';
 import { SummaryContent } from './SummaryContent';
@@ -83,9 +83,9 @@ function SummaryArea({
     case 'no_content':
       return <p>内容がありません。</p>;
     case 'no_summary':
-      return <p>要約はまだありません。</p>;
+      return <p>{NO_SUMMARY_TEXT}</p>;
     case 'summary':
-      return summary === null ? <p>要約はまだありません。</p> : <SummaryContent summary={summary} />;
+      return summary === null ? <p>{NO_SUMMARY_TEXT}</p> : <SummaryContent summary={summary} />;
     case 'creating':
       return (
         <>
@@ -113,7 +113,7 @@ function SummaryArea({
 function PreviousSummary({ summary }: { readonly summary: NonNullable<MeetingRecord['summary']> }) {
   return (
     <div className="summary-previous">
-      <p className="summary-previous__label">前の要約</p>
+      <p className="summary-previous__label">{PREVIOUS_SUMMARY_LABEL}</p>
       <SummaryContent summary={summary} />
     </div>
   );
