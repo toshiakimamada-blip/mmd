@@ -16,6 +16,7 @@ from meeting_fakes import (
     AppHandle,
     FakeEngineLauncher,
     make_app,
+    read_meeting,
     running_app,
     speak,
     start_meeting,
@@ -33,6 +34,8 @@ from meeting_interpreter.settings import Settings
 
 # 会議の内容にあたるもの。ログのどこにも現れてはならない。
 TITLE = "極秘の人事会議ZZ"
+# 例外の文面。エラーログに出してはならない（文面に、会議の内容が混ざるおそれがあるため）。
+SECRET_IN_EXCEPTION = "SECRET-EXCEPTION-TEXT-ZZ"
 
 
 class RecordingProbe:
@@ -58,6 +61,17 @@ class RecordingProbe:
             MemoryUsage(ROLE_APP_SERVER, 100.0, 120.0),
             MemoryUsage(ROLE_INTERPRETER, 900.0, 950.0),
         ]
+
+
+class RaisingProbe:
+    """メモリを取ろうとすると例外を投げる偽の取得部。例外の文面に、会議の内容にあたる語を入れる。"""
+
+    def __init__(self) -> None:
+        self.calls = 0
+
+    def snapshot(self) -> list[MemoryUsage]:
+        self.calls += 1
+        raise RuntimeError(SECRET_IN_EXCEPTION)
 
 
 def memory_lines(output: str, meeting_id: str) -> list[dict]:
@@ -205,3 +219,66 @@ class TestMemoryAtTheEndOfAMeeting:
             (ROLE_APP_SERVER, 100.0),
             (ROLE_INTERPRETER, 900.0),
         ]
+
+
+class TestWhenTheMemoryCannotBeRead:
+    """メモリを取れなかったときも、会議は終わる。"""
+
+    def test_should_end_the_meeting_without_memory_records_when_the_probe_raises(
+        self, settings, capfd
+    ):
+        """
+        【テスト対象】会議の終了（メモリの取得が例外を投げるとき）
+        【テスト内容】メモリの取得部を、例外を投げる偽物に替えて、字幕を 1 件作ってから
+                    会議を終了する
+        【期待結果】終了の依頼が成功し、記録した状態が「要約作成中」（終了の確定）になり、
+                    meeting_ended の処理ログが出ること。process_memory は 0 行で、
+                    SYSTEM_UNEXPECTED_ERROR のエラーログが、この会議に 1 件だけ出ること
+                    （種類 RuntimeError。例外の文面は出ない）。取得は 1 回だけ呼ばれること
+        """
+        probe = RaisingProbe()
+        launcher = FakeEngineLauncher(settings)
+        with running_app(make_app(settings, launcher, memory_probe=probe)) as handle:
+            events = handle.events()
+            meeting_id = start_meeting(handle, title=TITLE)
+            with handle.audio(meeting_id) as audio:
+                speak(audio, 1.0)
+                events.wait_for_count("subtitle.created", 1)
+                status, _ = handle.post(f"/api/meetings/{meeting_id}/end")
+            assert status == 200
+            output = collect_until(capfd, lambda text: '"process_type":"meeting_ended"' in text)
+            stored = read_meeting(settings, meeting_id)
+            handle.close_all()
+
+        lines = [
+            json.loads(line) for line in output.splitlines() if line.startswith('{"timestamp"')
+        ]
+        mine = [line for line in lines if line.get("meeting_id") == meeting_id]
+        assert stored is not None and stored["status"] == "summarizing"
+        assert stored["ended_at"] is not None
+        assert [line for line in mine if line.get("process_type") == "meeting_ended"]
+        assert [line for line in mine if line.get("process_type") == "process_memory"] == []
+        errors = [line for line in mine if line["log_type"] == "error"]
+        assert [(line["error_code"], line["exception_type"]) for line in errors] == [
+            ("SYSTEM_UNEXPECTED_ERROR", "RuntimeError")
+        ]
+        assert SECRET_IN_EXCEPTION not in output
+        assert probe.calls == 1
+
+
+def collect_until(capfd, done, timeout: float = 15.0) -> str:
+    """done(これまでの出力) が True になるまで、標準出力と標準エラー出力を集める。
+
+    出力全体を返す。
+    """
+    output = ""
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        captured = capfd.readouterr()
+        output += captured.out + captured.err
+        if done(output):
+            time.sleep(0.3)  # 同じ時点の残りの行が出そろうのを待つ。
+            captured = capfd.readouterr()
+            return output + captured.out + captured.err
+        time.sleep(0.05)
+    raise AssertionError(f"期待した行が出ませんでした: {output[-2000:]}")

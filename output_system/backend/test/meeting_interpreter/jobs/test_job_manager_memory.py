@@ -26,6 +26,8 @@ from meeting_interpreter.process_memory import (
     ProcessMemoryProbe,
 )
 
+# 例外の文面。ログに出してはならない。
+SECRET_IN_EXCEPTION = "SECRET-EXCEPTION-TEXT-ZZ"
 POLICY = JobPolicy(worker_start_timeout_seconds=30.0, stop_timeout_seconds=2.0)
 QUESTION_INPUT = QuestionInput(transcript="We discussed the budget.", summary=None)
 
@@ -47,6 +49,13 @@ class FixedProbe:
             MemoryUsage(ROLE_APP_SERVER, 120.5, 130.0),
             MemoryUsage(ROLE_GENERATION, 3500.0, 3600.0),
         ]
+
+
+class RaisingProbe:
+    """メモリを取ろうとすると例外を投げる偽の取得部。例外の文面に、秘密の語を入れる。"""
+
+    def snapshot(self) -> list[MemoryUsage]:
+        raise RuntimeError(SECRET_IN_EXCEPTION)
 
 
 def read_logs(capsys) -> list[dict]:
@@ -168,3 +177,44 @@ class TestMemoryAtTheEndOfAJob:
         assert ROLE_GENERATION in roles
         assert roles[ROLE_GENERATION]["memory_mb"] > 0
         assert roles[ROLE_APP_SERVER]["memory_mb"] > 0
+
+    def test_should_finish_the_job_without_memory_records_when_the_probe_raises(self, capsys):
+        """
+        【テスト対象】作成ジョブの終了（メモリの取得が例外を投げるとき）
+        【テスト内容】メモリの取得部を、例外を投げる偽物に替えて、質問を 1 件作る
+        【期待結果】質問のジョブが成功して、結果が受け取り先へ渡り、job_finished（job_status が
+                    succeeded）が出ること。process_memory は 0 行で、SYSTEM_UNEXPECTED_ERROR の
+                    エラーログが、この会議に 1 件だけ出ること（種類 RuntimeError。例外の文面は
+                    出ない）
+        """
+
+        async def scenario() -> RecordingOutcomes:
+            outcomes = RecordingOutcomes()
+            launcher = InProcessLauncher()
+            manager = JobManager(
+                launcher=launcher,
+                publisher=RecordingPublisher(),
+                outcomes=outcomes,
+                policy=POLICY,
+                memory_probe=RaisingProbe(),
+            )
+            manager.start()
+            manager.submit_questions("m1", QUESTION_INPUT)
+            await wait_until(lambda: len(outcomes.questions) == 1, description="質問の完成")
+            await wait_until(lambda: "worker_stop" in launcher.events, description="停止")
+            await manager.shutdown()
+            return outcomes
+
+        outcomes = asyncio.run(scenario())
+        output = capsys.readouterr().out
+        lines = [json.loads(row) for row in output.splitlines() if row.startswith("{")]
+
+        assert [meeting for meeting, _ in outcomes.questions] == ["m1"]
+        finished = [line for line in lines if line.get("process_type") == "job_finished"]
+        assert [line["job_status"] for line in finished] == ["succeeded"]
+        assert [line for line in lines if line.get("process_type") == "process_memory"] == []
+        errors = [line for line in lines if line.get("log_type") == "error"]
+        assert [
+            (line["error_code"], line["meeting_id"], line["exception_type"]) for line in errors
+        ] == [("SYSTEM_UNEXPECTED_ERROR", "m1", "RuntimeError")]
+        assert SECRET_IN_EXCEPTION not in output
