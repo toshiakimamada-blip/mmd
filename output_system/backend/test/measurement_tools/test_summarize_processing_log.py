@@ -329,7 +329,9 @@ class TestRender:
         text = tool.render(tool.read_logs(sample_lines()), limit_seconds=5)
 
         assert "5 秒を超えた件数" in text
-        row_a = next(r for r in text.splitlines() if r.startswith(f"| `{MEETING_A}`") and "終了" in r)
+        row_a = next(
+            r for r in text.splitlines() if r.startswith(f"| `{MEETING_A}`") and "終了" in r
+        )
         assert row_a.split("|")[9].strip() == "15"
 
     def test_should_show_the_stage_times_as_median_and_maximum(self):
@@ -347,7 +349,9 @@ class TestRender:
         assert "2.00 / 2.00" in stage_a  # 文字起こし
         assert "0.50 / 0.50" in stage_a  # 翻訳
         assert "0.01 / 0.01" in stage_a  # 保存と通知
-        stage_b = next(r for r in rows if r.startswith(f"| `{MEETING_B}`") and "—" in r and "|" in r)
+        stage_b = next(
+            r for r in rows if r.startswith(f"| `{MEETING_B}`") and "—" in r and "|" in r
+        )
         assert stage_b.count("—") >= 5
 
     def test_should_list_the_memory_of_each_process_and_the_total_of_four_processes(self):
@@ -356,7 +360,8 @@ class TestRender:
         【テスト内容】会議の終了の時点（アプリサーバー・通訳ワーカー・コンテナ全体）と、
                     作成ジョブの終了の時点（生成ワーカーだけ）の表を作る
         【期待結果】動いていたプロセスの行だけが並び、動いていない生成ワーカーは会議の終了の時点に出ないこと。
-                    合計は 4 つのプロセスだけの和で、コンテナ全体を含めない（300.0 + 1500.5 = 1800.5）
+                    合計は 4 つのプロセスだけの和で、コンテナ全体を含めない
+                    （300.0 + 1500.5 = 1800.5）
         """
         text = tool.render(tool.read_logs(sample_lines()))
 
@@ -433,7 +438,8 @@ class TestMain:
         """
         【テスト対象】main（JSON ではない行だらけのログ）
         【テスト内容】JSON でない行と壊れた行だけのファイルを渡して実行する
-        【期待結果】例外にならず、終了コード 1 で、会議が見つからなかったことを標準エラー出力へ出すこと
+        【期待結果】例外にならず、終了コード 1 で、会議が見つからなかったことを
+                    標準エラー出力へ出すこと
         """
         path = tmp_path / "app.log"
         path.write_text("INFO: a\n{壊れた\n\n\xff\n", encoding="utf-8", errors="replace")

@@ -177,7 +177,7 @@ HTTPS の証明書は、必ず確かめます（確認を無効にする設定�
 
 | 種別 | `log_type` | レベル | 項目 |
 |---|---|---|---|
-| 処理ログ | `processing` | 情報(`info`) | `process_type`（処理の種類）、`meeting_id`（会議番号）、`trace_id`（処理の識別子）、`duration_ms`（かかった時間）、`item_count`（件数）、`char_count`（文字数） |
+| 処理ログ | `processing` | 情報(`info`) | `process_type`（処理の種類）、`meeting_id`（会議番号）、`trace_id`（処理の識別子）、`duration_ms`（かかった時間）、`item_count`（件数）、`char_count`（文字数）。種類によって、字幕の遅れ・段ごとの所要時間・メモリの使用量などの項目が付く（[docs/measurement.md](docs/measurement.md)） |
 | エラーログ | `error` | 業務エラーは警告(`warning`)、システムエラーは異常(`error`) | `error_code`、`component`（発生したコンポーネント）、`meeting_id`、`trace_id`。想定外の例外は、`exception_type`（種類）と `location`（発生場所）も出す |
 | 接続ログ | `connection` | 警告(`warning`) | `reject_reason`（断った理由の種類）、`destination_name`（宛先の名前）、`source_name`（送り元の名前） |
 
@@ -185,7 +185,8 @@ HTTPS の証明書は、必ず確かめます（確認を無効にする設定�
 - 「必ず含める項目」は、値が無いときも `null` で出します。
 - 利用者の項目は持ちません。ログインが無いためです。
 - 会議の内容は、ログに書けません。字幕・要約・質問の本文、会議のタイトル、文章生成モデルへ渡す指示と受け取った出力、音声は、渡しても出力されません。書ける項目は、`backend/src/meeting_interpreter/logs/fields.py` の許可リストで決めています。許可リストに無い項目と、決めた形に当てはまらない値は捨てます。捨てた数は `dropped_field_count` に出します。名前も値も出しません。
-- 項目を足すときは、許可リストに `FieldSpec` を 1 つ足します（性能の測定の値を足す作業で使います）。値の形は、会議の内容が入り込めない狭い形にします。
+- 項目を足すときは、許可リストに `FieldSpec` を 1 つ足します。値の形は、会議の内容が入り込めない狭い形にします。
+- 性能の目標を測る値（字幕の遅れ・最初の字幕までの時間・プロセスごとのメモリの使用量）は、処理ログに出ます。項目と、集計コマンド（`tools/summarize_processing_log.py`）の使い方は [docs/measurement.md](docs/measurement.md)、利用者が自分の PC で測る手順は [docs/measure-early.md](docs/measure-early.md) にあります。
 - 処理の識別子は、1 回の要求に 1 つ振ります（ミドルウェアが振ります）。ワーカーへ渡すメッセージには、`attach_trace_id` で付けます。受け取った側は、`trace_scope_from_message` で同じ識別子の範囲に入ります。
 - 標準のロガー（`logging`）を使う部品（uvicorn など）のログも、標準出力へ出します。`log_type` は `runtime` で、項目は `logger`（ロガーの名前）と `message`（文面）です。文面は、出してよいと決めた記録だけに付けます。それ以外は、`logger`・`level`・`exception_type`（例外の種類）だけを出し、文面と引数は出しません（出さなかった数は `dropped_field_count` に出します）。例外の文面とスタックトレースも出しません。
   - 文面を出す記録は、2 つだけです。起動の知らせ用のロガー `STARTUP_LOGGER`（`meeting_interpreter.startup`）の記録と、uvicorn の起動・終了・接続の開始と終了の知らせです。後者は、文の形が `logs/output.py` の `_UVICORN_FIXED_MESSAGES` にあるものに限ります。
