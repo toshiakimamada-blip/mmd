@@ -39,6 +39,7 @@ from .protocol import (
     ErrorKind,
     OutputMessage,
     Silence,
+    SpeechResumed,
     StageTimings,
     Subtitle,
     WorkerError,
@@ -92,6 +93,9 @@ class InterpreterWorker:
         self._last_backlog = 0.0
         # 警告を出したあと、待ちが上限以下に戻るまで、続けて出さない。
         self._warned = False
+        # 無音の知らせを出したあと、声が戻った知らせをまだ出していないか。音声を受け取る
+        # スレッドだけが読み書きする（_dispatch の呼び出しは、そのスレッドに限る）。
+        self._silence_reported = False
 
     @property
     def pending_audio_seconds(self) -> float:
@@ -170,11 +174,20 @@ class InterpreterWorker:
     # --- 内部 -----------------------------------------------------------------------
 
     def _dispatch(self, events: list[SegmenterEvent]) -> None:
-        """区切りを待ち行列へ入れ、無音の知らせを送る。"""
+        """区切りを待ち行列へ入れ、無音の知らせと、声が戻った知らせを送る。
+
+        声が戻った知らせは、無音の知らせのあと、最初の区切りができた時点で、その区切りを待ち行列へ
+        入れる前に 1 回だけ送る。文字起こしと翻訳の終わりを待たないため、親は声が戻ったことを
+        すぐ知れる。
+        """
         for event in events:
             if isinstance(event, SilenceNotice):
                 self._send(Silence(silent_seconds=event.silent_seconds))
+                self._silence_reported = True
             else:
+                if self._silence_reported:
+                    self._silence_reported = False
+                    self._send(SpeechResumed())
                 self._enqueue(event)
 
     def _enqueue(self, utterance: Utterance) -> None:

@@ -14,6 +14,8 @@
     準備完了のあと              ──▶ on_time から始める
     on_time ──字幕の遅れが目標を超えた、または待つ音声が目標を超えた──▶ delayed
     delayed ──直近の字幕の遅れが目標以内で、待つ音声が無い──▶ on_time
+    on_time ──通訳ワーカーの無音の知らせ（声が無い状態が調整値の秒数続いた）──▶ waiting_for_speech
+    waiting_for_speech ──声が戻った知らせ（最初の発話の区切りができた）──▶ on_time
 
 - 「字幕の遅れ」は、字幕を画面へ送る時点の、単調増加時計の差（秒）。この部品は時計を持たず、求めた
   値を受け取る（壁時計の差を使わない）
@@ -22,6 +24,11 @@
 - 「超えた」は、目標より大きい値。目標ちょうどは超えていない
 - 遅れから戻る条件には、すき間を持たせる。待つ音声が目標以内でも 0 でない間と、直近の字幕の遅れが
   目標を超えている間は、遅れのままにする（正常と遅れが、細かく入れ替わらないため）
+- 無音の待機は、遅れよりも優先度が低い。処理を待つ音声がある間は、字幕がこれから出るため、遅れの
+  ままにする。無音の知らせを受けたときは、直近の字幕の遅れを忘れる（声が止まると新しい字幕が
+  来ず、古い遅れでは、遅れから戻れなくなるため）
+- 音声が届かないとき（取り込みが止まっているとき）は、通訳ワーカーが声の有無を数えないので、
+  無音の待機にならない。取り込み停止は、別の知らせで扱う
 - 通訳ワーカーを起動し直すときは、開始準備中へ戻し、前のワーカーの遅れを忘れる
 - 準備完了の前に届いた遅れの知らせは、覚えておき、準備完了の時点で反映する
 
@@ -56,6 +63,8 @@ class SubtitleStatusTracker:
         """
         self._target = delay_target_seconds
         self._ready = False
+        # 無音の待機か。通訳ワーカーの無音の知らせで立ち、声が戻った知らせで下りる。
+        self._silent = False
         # 遅れの判定の結果。ready に関わらず、知らせを受けるたびに更新する。
         self._late = False
         # 直近の字幕の遅れ（秒）。まだ字幕が無い、または起動し直したときは None。
@@ -79,6 +88,7 @@ class SubtitleStatusTracker:
     def worker_restarting(self) -> SubtitleStatus | None:
         """通訳ワーカーを起動し直す。開始準備中へ戻し、前のワーカーの遅れを忘れる。"""
         self._ready = False
+        self._silent = False
         self._late = False
         self._last_delay = None
         self._backlog = 0.0
@@ -104,6 +114,23 @@ class SubtitleStatusTracker:
         """
         self._backlog = pending_audio_seconds
         self._judge_delay()
+        return self._settle()
+
+    # --- 無音 ---------------------------------------------------------------------------
+
+    def silence_detected(self) -> SubtitleStatus | None:
+        """通訳ワーカーが、無音の知らせを出した。声が無い状態が、決めた秒数続いている。
+
+        古い字幕の遅れは忘れる。処理を待つ音声が残っている間は、遅れのままにする。
+        """
+        self._silent = True
+        self._last_delay = None
+        self._judge_delay()
+        return self._settle()
+
+    def speech_resumed(self) -> SubtitleStatus | None:
+        """通訳ワーカーが、声が戻った知らせを出した。無音の待機を終える。"""
+        self._silent = False
         return self._settle()
 
     # --- 内部 ---------------------------------------------------------------------------
@@ -133,4 +160,6 @@ class SubtitleStatusTracker:
             return SubtitleStatus.STARTING
         if self._late:
             return SubtitleStatus.DELAYED
+        if self._silent:
+            return SubtitleStatus.WAITING_FOR_SPEECH
         return SubtitleStatus.ON_TIME

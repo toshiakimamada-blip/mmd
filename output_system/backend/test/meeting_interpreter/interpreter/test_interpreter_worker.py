@@ -20,6 +20,7 @@ from meeting_interpreter.interpreter.protocol import (
     FakeEngineOptions,
     OutputMessage,
     Silence,
+    SpeechResumed,
     Subtitle,
     WorkerError,
 )
@@ -270,6 +271,76 @@ class TestSilence:
         assert [type(message) for message in sent] == [Silence]
         assert isinstance(sent[0], Silence)
         assert sent[0].silent_seconds == pytest.approx(10.0, abs=0.04)
+
+
+class TestSpeechResumed:
+    """無音の知らせのあと、声が戻って発話の区切りができたときの知らせ。"""
+
+    def test_should_send_speech_resumed_after_silence_when_an_utterance_is_cut(self):
+        """
+        【テスト対象】InterpreterWorker（声が戻った知らせ）
+        【テスト内容】無音を 12 秒（知らせる長さは 10 秒）渡したあと、声 1 秒と、区切りが確定する
+                    無音を渡す
+        【期待結果】無音の知らせ、声が戻った知らせ、字幕の順に出ること（声が戻った知らせは、字幕の
+                    文字起こしと翻訳を待たず、区切りができた時点で出す）
+        """
+        worker, sent = make_worker()
+
+        worker.accept_audio(Audio(pcm=silence(12.0), received_at=START))
+        worker.accept_audio(Audio(pcm=tone(1.0) + silence(1.0), received_at=START))
+        assert [type(message) for message in sent] == [Silence, SpeechResumed]
+        settle(worker)
+
+        assert [type(message) for message in sent] == [Silence, SpeechResumed, Subtitle]
+
+    def test_should_not_send_speech_resumed_when_no_silence_was_reported(self):
+        """
+        【テスト対象】InterpreterWorker（声が戻った知らせ）
+        【テスト内容】無音の知らせが出ていない、ふつうの発話だけを渡す
+        【期待結果】声が戻った知らせは出ず、字幕だけが出ること
+        """
+        worker, sent = make_worker()
+
+        say(worker, 1.0, 1.0)
+
+        assert [type(message) for message in sent] == [Subtitle, Subtitle]
+
+    def test_should_send_speech_resumed_once_per_silence(self):
+        """
+        【テスト対象】InterpreterWorker（声が戻った知らせは、無音の知らせごとに 1 回）
+        【テスト内容】無音の知らせのあとに、発話の区切りを 2 つ続けて渡し、さらに無音で知らせて、
+                    もう 1 つ区切りを渡す
+        【期待結果】声が戻った知らせは、2 つ目の区切りでは出ず、次の無音の知らせのあとの区切りで
+                    もう 1 回出ること（Silence, SpeechResumed, Silence, SpeechResumed の順）
+        """
+        worker, sent = make_worker()
+
+        worker.accept_audio(Audio(pcm=silence(12.0), received_at=START))
+        worker.accept_audio(Audio(pcm=tone(1.0) + silence(1.0), received_at=START))
+        worker.accept_audio(Audio(pcm=tone(1.0) + silence(1.0), received_at=START))
+        worker.accept_audio(Audio(pcm=silence(12.0), received_at=START))
+        worker.accept_audio(Audio(pcm=tone(1.0) + silence(1.0), received_at=START))
+
+        assert [type(message) for message in sent] == [
+            Silence,
+            SpeechResumed,
+            Silence,
+            SpeechResumed,
+        ]
+
+    def test_should_not_send_speech_resumed_for_a_sound_too_short_to_be_an_utterance(self):
+        """
+        【テスト対象】InterpreterWorker（声が戻った知らせ）
+        【テスト内容】無音の知らせのあと、咳のような 0.1 秒の音だけを渡す（発話の区切りにならない）
+        【期待結果】声が戻った知らせは出ないこと（無音の待機のままにする）
+        """
+        worker, sent = make_worker()
+
+        worker.accept_audio(Audio(pcm=silence(12.0), received_at=START))
+        worker.accept_audio(Audio(pcm=tone(0.1) + silence(1.0), received_at=START))
+        settle(worker)
+
+        assert [type(message) for message in sent] == [Silence]
 
 
 class TestAudioRelease:

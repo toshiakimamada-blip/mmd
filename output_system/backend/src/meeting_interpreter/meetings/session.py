@@ -49,7 +49,7 @@ from typing import Final, Protocol
 
 from ..errors import AppError, describe_origin
 from ..interpreter.client import InterpreterClient
-from ..interpreter.protocol import Backlog, ErrorKind, Silence, Stopped, WorkerError
+from ..interpreter.protocol import Backlog, ErrorKind, Silence, SpeechResumed, Stopped, WorkerError
 from ..interpreter.protocol import Subtitle as WorkerSubtitle
 from ..logs import current_trace_id, log_error, log_processing, trace_scope
 from ..logs.events import format_timestamp
@@ -812,7 +812,10 @@ class MeetingSession:
                     self._subtitle_status.backlog_reported(message.pending_audio_seconds)
                 )
             case Silence():
-                pass  # 無音の待機（後続の作業）。
+                # 音声は届いているが、声が無い状態が続いている。会議は続け、字幕は作らない。
+                self._announce_status(self._subtitle_status.silence_detected())
+            case SpeechResumed():
+                self._announce_status(self._subtitle_status.speech_resumed())
         return None
 
     def _log_worker_crash(self, kind: str) -> None:

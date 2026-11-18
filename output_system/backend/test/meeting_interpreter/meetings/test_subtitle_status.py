@@ -212,3 +212,86 @@ class TestWorkerRestart:
         【期待結果】変化なし（None）であること
         """
         assert SubtitleStatusTracker(TARGET).worker_restarting() is None
+
+
+class TestWaitingForSpeech:
+    """無音の待機。声が届いていない状態が続いたあと、声が戻るまで。"""
+
+    def test_should_become_waiting_for_speech_when_silence_is_reported_and_return_with_speech(self):
+        """
+        【テスト対象】SubtitleStatusTracker.silence_detected / speech_resumed
+        【テスト内容】正常のときに、無音の知らせ、もう一度の無音の知らせ、声が戻った知らせを渡す
+        【期待結果】無音の待機（waiting_for_speech）へ変わり、2 回目は変化なし（None）、声が戻ると
+                    正常（on_time）へ戻ること
+        """
+        tracker = ready_tracker()
+
+        assert tracker.silence_detected() is SubtitleStatus.WAITING_FOR_SPEECH
+        assert tracker.silence_detected() is None
+        assert tracker.speech_resumed() is SubtitleStatus.ON_TIME
+        assert tracker.speech_resumed() is None
+
+    def test_should_not_change_when_speech_resumes_without_silence(self):
+        """
+        【テスト対象】SubtitleStatusTracker.speech_resumed
+        【テスト内容】無音の待機でないときに、声が戻った知らせを渡す
+        【期待結果】変化なし（None）で、正常のままであること
+        """
+        tracker = ready_tracker()
+
+        assert tracker.speech_resumed() is None
+        assert tracker.status is SubtitleStatus.ON_TIME
+
+    def test_should_forget_the_last_late_subtitle_when_silence_lasts_and_nothing_waits(self):
+        """
+        【テスト対象】無音の知らせと、直近の字幕の遅れ
+        【テスト内容】遅れ 15 秒の字幕で遅れにし、待つ音声が 0 秒の知らせを渡す。そのあと、無音の
+                    知らせと、声が戻った知らせを渡す
+        【期待結果】無音の知らせで、無音の待機へ変わること（声が止まったあとは、新しい字幕が来ず、
+                    古い字幕の遅れでは、遅れから戻れないため）。声が戻ると、正常に戻ること
+        """
+        tracker = ready_tracker()
+        tracker.subtitle_delivered(15.0)
+        tracker.backlog_reported(0.0)
+        assert tracker.status is SubtitleStatus.DELAYED
+
+        assert tracker.silence_detected() is SubtitleStatus.WAITING_FOR_SPEECH
+        assert tracker.speech_resumed() is SubtitleStatus.ON_TIME
+
+    def test_should_stay_delayed_while_audio_still_waits_during_silence(self):
+        """
+        【テスト対象】遅れと無音の待機が重なるとき
+        【テスト内容】待つ音声が 40 秒で遅れにし、無音の知らせを渡す。そのあと、待つ音声が 0 秒の
+                    知らせを渡す
+        【期待結果】待つ音声がある間は、遅れのまま（字幕がこれから出るため）。待つ音声が無くなると、
+                    無音の待機へ変わること
+        """
+        tracker = ready_tracker()
+        tracker.backlog_reported(40.0)
+
+        assert tracker.silence_detected() is None
+        assert tracker.status is SubtitleStatus.DELAYED
+        assert tracker.backlog_reported(0.0) is SubtitleStatus.WAITING_FOR_SPEECH
+
+    def test_should_become_delayed_when_the_waiting_audio_exceeds_the_target_during_silence(self):
+        """
+        【テスト対象】無音の待機の間の、処理を待つ音声
+        【テスト内容】無音の待機のときに、待つ音声が目標を超えた知らせを渡す
+        【期待結果】遅れへ変わること（字幕を出せずにいる状況を優先して知らせる）
+        """
+        tracker = ready_tracker()
+        tracker.silence_detected()
+
+        assert tracker.backlog_reported(12.0) is SubtitleStatus.DELAYED
+
+    def test_should_forget_the_silence_when_the_worker_restarts(self):
+        """
+        【テスト対象】SubtitleStatusTracker.worker_restarting
+        【テスト内容】無音の待機のときに、ワーカーの起動し直しと、準備完了を知らせる
+        【期待結果】開始準備中へ戻り、準備完了で正常になること（新しいワーカーの音声の数え直し）
+        """
+        tracker = ready_tracker()
+        tracker.silence_detected()
+
+        assert tracker.worker_restarting() is SubtitleStatus.STARTING
+        assert tracker.worker_ready() is SubtitleStatus.ON_TIME

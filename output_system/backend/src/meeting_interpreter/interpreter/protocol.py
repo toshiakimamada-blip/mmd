@@ -21,7 +21,8 @@
 
     親から子（InputMessage）  開始（Start）／音声（Audio）／終了処理の依頼（Finish）／停止（Stop）
     子から親（OutputMessage） 準備完了（Ready）／字幕（Subtitle）／無音の知らせ（Silence）／
-                              遅れの見込み（Backlog）／エラー（WorkerError）／停止完了（Stopped）
+                              声が戻った知らせ（SpeechResumed）／遅れの見込み（Backlog）／
+                              エラー（WorkerError）／停止完了（Stopped）
 
 どちらの向きも、決めた形に厳密に当てはまるときだけ読む。項目の過不足、型の違い、範囲の外の値は
 ProtocolError にする。会議の内容（英語の原文と日本語訳）は、字幕のメッセージにだけ入る。
@@ -190,6 +191,15 @@ class Silence:
 
 
 @dataclass(frozen=True, slots=True)
+class SpeechResumed:
+    """声が戻った知らせ。無音の知らせのあと、最初の発話の区切りができた。
+
+    無音の知らせ 1 回につき、1 回だけ知らせる。声が短すぎて区切りにならなかったときは知らせない
+    （親は、無音の待機のままにする）。
+    """
+
+
+@dataclass(frozen=True, slots=True)
 class Backlog:
     """遅れの見込み。処理を待っている音声の長さ。定期的に知らせる。"""
 
@@ -231,7 +241,7 @@ class Stopped:
     trace_id: str | None = None
 
 
-OutputMessage = Ready | Subtitle | Silence | Backlog | WorkerError | Stopped
+OutputMessage = Ready | Subtitle | Silence | SpeechResumed | Backlog | WorkerError | Stopped
 
 
 # --- 項目の読み取り -------------------------------------------------------------------
@@ -342,6 +352,8 @@ def encode_output(message: OutputMessage) -> bytes:
             )
         case Silence():
             return json_frame({"type": "silence", "silent_seconds": message.silent_seconds})
+        case SpeechResumed():
+            return json_frame({"type": "speech_resumed"})
         case Backlog():
             return json_frame(
                 {"type": "backlog", "pending_audio_seconds": message.pending_audio_seconds}
@@ -487,7 +499,7 @@ def decode_output(kind: int, payload: bytes) -> OutputMessage:
     """
     data = _load_json(kind, payload)
     message_type = _message_type(
-        data, ("ready", "subtitle", "silence", "backlog", "error", "stopped")
+        data, ("ready", "subtitle", "silence", "speech_resumed", "backlog", "error", "stopped")
     )
     fields = {key: value for key, value in data.items() if key != "type"}
     match message_type:
@@ -525,6 +537,9 @@ def decode_output(kind: int, payload: bytes) -> OutputMessage:
         case "silence":
             body = _Body(fields, {"silent_seconds"}, what="silence")
             return Silence(silent_seconds=body.number("silent_seconds"))
+        case "speech_resumed":
+            _Body(fields, set(), what="speech_resumed")
+            return SpeechResumed()
         case "backlog":
             body = _Body(fields, {"pending_audio_seconds"}, what="backlog")
             return Backlog(pending_audio_seconds=body.number("pending_audio_seconds"))

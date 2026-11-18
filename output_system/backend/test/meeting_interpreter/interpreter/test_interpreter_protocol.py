@@ -23,6 +23,7 @@ from meeting_interpreter.interpreter.protocol import (
     ProtocolError,
     Ready,
     Silence,
+    SpeechResumed,
     StageTimings,
     Start,
     Stop,
@@ -114,6 +115,7 @@ OUTPUT_MESSAGES = [
         trace_id="abc124",
     ),
     Silence(silent_seconds=10.0),
+    SpeechResumed(),
     Backlog(pending_audio_seconds=12.5),
     Backlog(pending_audio_seconds=0),
     WorkerError(kind=ErrorKind.TRANSCRIPTION_FAILED, recoverable=True, trace_id="abc123"),
@@ -266,6 +268,16 @@ class TestRejectInvalidInput:
             decode_output(*_json_frame({"type": "silence"}))
         with pytest.raises(ProtocolError):
             decode_output(*_json_frame({"type": "silence", "silent_seconds": 1.0, "x": 1}))
+
+    def test_should_reject_extra_items_in_a_speech_resumed_message(self):
+        """
+        【テスト対象】decode_output（speech_resumed）
+        【テスト内容】項目を持たない speech_resumed に、余分な項目がついたメッセージを読む
+        【期待結果】ProtocolError。項目の過不足は読まない（子の出力を信頼しない）
+        """
+        assert decode_output(*_json_frame({"type": "speech_resumed"})) == SpeechResumed()
+        with pytest.raises(ProtocolError):
+            decode_output(*_json_frame({"type": "speech_resumed", "x": 1}))
 
     @pytest.mark.parametrize(
         "value",

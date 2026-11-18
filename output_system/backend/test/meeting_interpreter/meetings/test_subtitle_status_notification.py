@@ -15,17 +15,20 @@ from collections.abc import Iterator
 
 import pytest
 
+from interpreter_audio import silence
 from meeting_fakes import (
     FAST,
     AppHandle,
     FakeEngineLauncher,
+    frames,
     make_app,
     running_app,
+    speak,
     start_meeting,
     wait_for_worker,
 )
 from meeting_interpreter.interpreter.client import InterpreterClient
-from meeting_interpreter.interpreter.protocol import Backlog
+from meeting_interpreter.interpreter.protocol import Backlog, Silence, SpeechResumed
 from meeting_interpreter.meetings import session as session_module
 from meeting_interpreter.meetings.session import SUBTITLE_STATUS_CHANGED, MeetingSession
 from meeting_interpreter.meetings.subtitle_status import SubtitleStatus
@@ -209,6 +212,29 @@ class TestSessionStatusNotification:
         run_session(time_source, FakeStore(time_source), scenario)
 
 
+class TestWaitingForSpeechNotification:
+    """単体: 無音の知らせと、声が戻った知らせを受けたセッションが、状況を通知する。"""
+
+    def test_should_notify_waiting_for_speech_and_back_to_on_time(self):
+        """
+        【テスト対象】通訳ワーカーの無音の知らせ・声が戻った知らせと、字幕の状況の通知
+        【テスト内容】準備完了のあと、無音の知らせ、声が戻った知らせを順に受け取る
+        【期待結果】通知の状況が on_time → waiting_for_speech → on_time の順に出ること
+        """
+
+        async def scenario(session: MeetingSession, recorder: Recorder) -> None:
+            session._mark_worker_ready()
+            running = session_module._Phase.RUNNING
+            await session._on_worker_message(None, Silence(silent_seconds=10.0), running)  # type: ignore[arg-type]
+            assert session.subtitle_status is SubtitleStatus.WAITING_FOR_SPEECH
+            await session._on_worker_message(None, SpeechResumed(), running)  # type: ignore[arg-type]
+
+        time_source = FakeTime(STARTED_AT)
+        recorder = run_session(time_source, FakeStore(time_source), scenario)
+
+        assert statuses(recorder) == ["on_time", "waiting_for_speech", "on_time"]
+
+
 class SlowToStart(InterpreterClient):
     """起動に 1.5 秒かかる通訳ワーカー（モデルの読み込みの代わり）。"""
 
@@ -337,3 +363,74 @@ def test_should_keep_the_delay_target_in_the_session_policy(settings: Settings):
     policy = session_module.SessionPolicy.from_tuning(settings.tuning)
 
     assert policy.subtitle_delay_target_seconds == settings.tuning.subtitle_delay_target_seconds
+
+
+@pytest.fixture
+def quick_silence_app_handle(settings: Settings) -> Iterator[AppHandle]:
+    """無音を知らせるまでの秒数を 1 秒にして、アプリを動かす（本来の調整値は 10 秒）。"""
+    launcher = FakeEngineLauncher(settings, silence_wait_seconds=1.0)
+    with running_app(make_app(settings, launcher, FAST)) as handle:
+        try:
+            yield handle
+        finally:
+            handle.close_all()
+
+
+class TestWaitingForSpeechOverTheWire:
+    """結合: 本物の通訳ワーカー（偽のエンジン）と、本物のアプリサーバーで、無音の待機を確かめる。
+
+    無音の秒数（調整値 silence_wait_seconds）は、確かめる時間を短くするため 1 秒にしている。
+    10 秒にしたときの通訳ワーカーの動きは、単体のテストが確かめている（秒数は音声の長さで数える）。
+    """
+
+    def test_should_wait_for_speech_when_silence_lasts_and_return_when_speech_comes(
+        self, quick_silence_app_handle
+    ):
+        """
+        【テスト対象】無音の待機（無音の音声を流すと待機になり、声で戻る）
+        【テスト内容】会議を開始し、無音の音声を 2 秒流す。次に、声を 1 秒流す
+        【期待結果】状況の通知が on_time → waiting_for_speech → on_time の順に出ること。
+                    無音の間は字幕が作られず、会議は通訳中のままであること。声には字幕が 1 件できる
+        """
+        handle = quick_silence_app_handle
+        events = handle.events()
+        meeting_id = start_meeting(handle)
+        events.wait_for_count(SUBTITLE_STATUS_CHANGED, 1)
+
+        with handle.audio(meeting_id) as audio:
+            for frame in frames(silence(2.0)):
+                audio.send(frame)
+            events.wait_for_count(SUBTITLE_STATUS_CHANGED, 2)
+            assert current_status(handle) is SubtitleStatus.WAITING_FOR_SPEECH
+            assert events.of_type("subtitle.created") == []
+            session = handle.app.state.meeting_manager.active_session
+            assert session is not None and session.meeting.status is MeetingStatus.INTERPRETING
+
+            speak(audio, 1.0)
+            events.wait_for_count(SUBTITLE_STATUS_CHANGED, 3)
+            events.wait_for_count("subtitle.created", 1)
+
+        assert [item["status"] for item in events.of_type(SUBTITLE_STATUS_CHANGED)] == [
+            "on_time",
+            "waiting_for_speech",
+            "on_time",
+        ]
+        assert all(item["meeting_id"] == meeting_id for item in events.received)
+
+    def test_should_not_wait_for_speech_while_no_audio_arrives(self, quick_silence_app_handle):
+        """
+        【テスト対象】音声が届かない状態は、無音の待機にしないこと
+        【テスト内容】音声の WebSocket はつないだまま、音声を 1 つも送らずに、無音の秒数（1 秒）の
+                    2 倍以上（2.5 秒）待つ
+        【期待結果】状況は正常のままで、無音の待機の通知が出ないこと（声が無いのではなく、音声が
+                    届いていない。取り込み停止は、別の状況として扱う）
+        """
+        handle = quick_silence_app_handle
+        events = handle.events()
+        meeting_id = start_meeting(handle)
+        events.wait_for_count(SUBTITLE_STATUS_CHANGED, 1)
+
+        with handle.audio(meeting_id):
+            time.sleep(2.5)
+
+        assert [item["status"] for item in events.of_type(SUBTITLE_STATUS_CHANGED)] == ["on_time"]
