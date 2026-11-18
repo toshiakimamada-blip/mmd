@@ -1,4 +1,4 @@
-import { act, render, screen } from '@testing-library/react';
+import { act, cleanup, render, screen } from '@testing-library/react';
 import { RouterProvider, createMemoryRouter } from 'react-router';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
@@ -183,6 +183,25 @@ describe('MeetingLiveScreen subtitle status', () => {
     await act(async () => respond(liveStatus('on_time')));
 
     expect(statusText()).toContain('遅れ');
+  });
+
+  /**
+   * 【ユーザーストーリー】
+   * 状況の取得の応答を待つ間に画面を離れたとき、あとから届いた応答は捨てる（離れた画面を更新しない）
+   *
+   * 【期待結果】画面を離れたあとに応答（遅れ）が届いても、例外にならず、警告も出ない
+   */
+  it('should discard a response that arrives after the screen was closed', async () => {
+    let respond: (response: Response) => void = () => undefined;
+    answerStatus = () => new Promise<Response>((resolve) => (respond = resolve));
+    openLive();
+    await act(async () => undefined);
+
+    cleanup();
+    await act(async () => respond(liveStatus('delayed')));
+
+    expect(screen.queryByText(DELAY_WARNING)).not.toBeInTheDocument();
+    expect(statusRequests).toBe(1);
   });
 
   /**
