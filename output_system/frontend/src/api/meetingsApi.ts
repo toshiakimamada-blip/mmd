@@ -6,6 +6,7 @@ import { readLiveMeeting } from '../meetings/liveMeeting';
 import { type MeetingStartRequest } from '../meetings/meetingInput';
 import { type MeetingListItem, parseMeetingList } from '../records/meetingListTypes';
 import { type MeetingRecord, parseMeetingRecord } from '../records/recordTypes';
+import { isSubtitleStatus, type SubtitleStatus } from '../subtitles/subtitleStatus';
 import { parseSubtitle, type Subtitle } from '../subtitles/subtitleTypes';
 import { requestJson } from './apiClient';
 
@@ -91,6 +92,37 @@ export async function fetchSubtitles(meetingId: string): Promise<Subtitle[]> {
     `/api/meetings/${encodeURIComponent(meetingId)}/subtitles`,
     { method: 'GET', cache: 'no-store' },
     parseSubtitleList,
+  );
+}
+
+/** 進行中の会議の、「会議中」の画面が読む状況。 */
+export interface LiveStatus {
+  /** 字幕の状況。通知 subtitle_status.changed の status と同じ値。 */
+  readonly subtitleStatus: SubtitleStatus;
+}
+
+/** 状況の取得の応答を、画面の型に読み替える。読めなければ例外（呼び出し側が想定外のエラーにする）。 */
+function parseLiveStatus(body: unknown): LiveStatus {
+  const status = (body as { subtitle_status?: unknown } | null)?.subtitle_status;
+  if (!isSubtitleStatus(status)) {
+    throw new Error('会議中の状況の形ではありません');
+  }
+  return { subtitleStatus: status };
+}
+
+/**
+ * 進行中の会議の状況（字幕の状況）を取得する（GET /api/meetings/{会議番号}/live-status）。
+ * 「会議中」の画面が、開いた時点で呼ぶ。会議の開始の直後に出た通知は、画面が購読する前に届くことが
+ * あるため、通知を待たずに現在の状況を読む。変化は、通知で受け取る。
+ *
+ * @param meetingId 会議番号。URL の 1 つの区間として符号化する
+ * @throws ApiError 会議が進行中でない（MEETING_NOT_RUNNING）・応答が読めない・アプリサーバーに届かなかったとき
+ */
+export async function fetchLiveStatus(meetingId: string): Promise<LiveStatus> {
+  return requestJson(
+    `/api/meetings/${encodeURIComponent(meetingId)}/live-status`,
+    { method: 'GET', cache: 'no-store' },
+    parseLiveStatus,
   );
 }
 

@@ -5,6 +5,7 @@
  * - 会議中に読み続けるのは字幕。状況の領域（タイトル・経過時間・終了のボタン）は、字幕の邪魔をしない
  *   落ち着いた作りにして、ヘッダと同じ紺の線で字幕の領域と分ける。
  * - 経過時間は、桁の幅がそろう数字（tabular-nums）にして、秒が変わっても幅がぶれないようにする。
+ * - 字幕の状況は、状況ごとの色と、形の違うアイコンと、文字で示す（色だけに頼らない）。
  * - 終了のボタンは、紺の枠だけにする。常に目に入る場所にあるため、塗りつぶすと押したくなる。
  *   押せない間は、枠と文字を薄くして残す（操作の場所を見失わないため）。
  * - 色は frame.css の変数を使う。文字と背景の明るさの差は AA（通常の文字で 4.5 対 1 以上）を満たす。
@@ -95,6 +96,74 @@
 .live__elapsed {
   font-size: 1.25rem;
   font-variant-numeric: tabular-nums;
+}
+
+/*
+ * 字幕の状況（開始準備中・正常・遅れ・無音の待機・取り込み停止）。
+ * - 色・形の違うアイコン・文字の 3 つで示す。色だけに頼らない。文字は常に出す
+ * - 色は、状況ごとに、薄い背景と濃い文字の組にする。文字と背景の明るさの差は 7 対 1 以上、
+ *   文字（と枠・アイコン）とページの背景の差は 8 対 1 以上（AA の 4.5 対 1、図形の 3 対 1 を超える）
+ * - 枠も文字と同じ色にして、背景が白に近い画面でも、バッジの輪郭が見えるようにする
+ * - 補足の文は、状況の意味を短く伝える。バッジの横に置き、幅が足りないときは下へ折り返す
+ */
+.live__fact--status dd {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.25rem 0.75rem;
+}
+
+.status-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.375rem;
+  padding: 0.125rem 0.75rem 0.125rem 0.5rem;
+  border: 2px solid currentColor;
+  border-radius: 999px;
+  background: var(--status-bg);
+  color: var(--status-ink);
+  font-weight: 700;
+  line-height: 1.5;
+  /* 表示名が折り返して、丸い枠が崩れないようにする */
+  white-space: nowrap;
+}
+
+.status-badge__icon {
+  flex: none;
+  width: 1.25rem;
+  height: 1.25rem;
+  /* 塗りの円の上の印は、バッジの背景の色にそろえる */
+  --status-icon-mark: var(--status-bg);
+}
+
+.status-badge[data-status='starting'] {
+  --status-ink: #34434f;
+  --status-bg: #e4e9ee;
+}
+
+.status-badge[data-status='on_time'] {
+  --status-ink: #14532d;
+  --status-bg: #dcf1e3;
+}
+
+.status-badge[data-status='delayed'] {
+  --status-ink: #6b3500;
+  --status-bg: #fff0c9;
+}
+
+.status-badge[data-status='waiting_for_speech'] {
+  --status-ink: #17324d;
+  --status-bg: #dbe8f5;
+}
+
+.status-badge[data-status='capture_stopped'] {
+  --status-ink: #8a1a1a;
+  --status-bg: #fde2e2;
+}
+
+.live__status-hint {
+  color: var(--color-ink-muted);
+  font-size: 0.9375rem;
 }
 
 /* 終了している間の知らせ。空のときは高さを持たない */

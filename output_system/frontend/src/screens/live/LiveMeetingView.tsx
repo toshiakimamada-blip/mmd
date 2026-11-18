@@ -4,24 +4,31 @@ import { useNavigate } from 'react-router';
 import { ApiError } from '../../api/apiClient';
 import { endMeeting } from '../../api/meetingsApi';
 import { audioSourceLabel } from '../../audio/audioSource';
-import { ConfirmDialog, useNoticeActions } from '../../components/notices';
+import { ConfirmDialog, useNoticeActions, useWarning } from '../../components/notices';
 import { LiveSubtitleView } from '../../components/subtitles/LiveSubtitleView';
+import { SubtitleStatusFact } from '../../components/subtitles/SubtitleStatusFact';
 import { toDisplayError } from '../../errors/errorMessages';
 import { formatElapsed } from '../../meetings/formatElapsed';
+import { SUBTITLE_DELAYED_WARNING } from '../../meetings/guidanceTexts';
 import { type LiveMeeting } from '../../meetings/liveMeeting';
 import { useMeetingCapture } from '../../meetings/MeetingCaptureProvider';
 import { useElapsedMilliseconds } from '../../meetings/useElapsedMilliseconds';
 import { SCREENS, screenPaths } from '../../routes';
 import { useMeetingSubtitles } from '../../subtitles/useMeetingSubtitles';
+import { useSubtitleStatus } from '../../subtitles/useSubtitleStatus';
 import { LiveGuidance } from './LiveGuidance';
 
 /** 会議の終了に失敗したときのお知らせの識別子。もう一度試すと、同じお知らせが置き換わる。 */
 const END_FAILED_NOTICE_ID = 'end-meeting-failed';
 
+/** 字幕が目標より遅れていることの警告の識別子。 */
+const SUBTITLE_DELAYED_WARNING_ID = 'subtitle-delayed';
+
 /**
  * 「会議中」の画面の中身（S-03）。
  *
- * - 状況の領域: タイトル・経過時間・取り込み中の音声の出どころ・会議を終了するボタン
+ * - 状況の領域: タイトル・経過時間・取り込み中の音声の出どころ・字幕の状況・会議を終了するボタン。
+ *   字幕の状況が遅れの間は、お知らせ帯に警告を出す
  * - 字幕の領域: 話された順の字幕。最新の字幕まで自動で進む（過去へ戻っている間は進まない）
  * - 案内の領域
  * 質問の領域（質問を作る機能）は、この画面にはまだ無い。
@@ -37,7 +44,10 @@ export function LiveMeetingView({ meeting }: { readonly meeting: LiveMeeting }) 
   const capture = useMeetingCapture();
   const elapsed = useElapsedMilliseconds(meeting.startedAt);
   const subtitles = useMeetingSubtitles(meeting.meetingId);
+  const subtitleStatus = useSubtitleStatus(meeting.meetingId);
   const subtitlesHeadingId = useId();
+  // 字幕が遅れている間だけ、お知らせ帯に警告を出す。遅れが解消すると、警告も消える。
+  useWarning(SUBTITLE_DELAYED_WARNING_ID, subtitleStatus === 'delayed', SUBTITLE_DELAYED_WARNING);
   // 終了の確認を出しているか。
   const [confirming, setConfirming] = useState(false);
   // 終了を依頼して、応答を待っているか。待つ間はボタンを押せなくする（二度押しで二重に依頼しない）。
@@ -101,6 +111,7 @@ export function LiveMeetingView({ meeting }: { readonly meeting: LiveMeeting }) 
             <dt>音声の出どころ</dt>
             <dd>{audioSourceLabel(meeting.audioSource)}</dd>
           </div>
+          <SubtitleStatusFact status={subtitleStatus} />
         </dl>
         {/* 領域は先に文書へ置き、終了している間だけ文を入れる（読み上げソフトへ伝わるように） */}
         <p className="live__ending" role="status">

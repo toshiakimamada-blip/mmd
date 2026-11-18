@@ -39,6 +39,7 @@ from ..jobs.summary_requests import SummaryRequests
 from ..logs.events import format_timestamp
 from ..meetings.errors import meeting_not_found
 from ..meetings.manager import MeetingManager
+from ..meetings.subtitle_status import SubtitleStatus
 from ..records.models import Meeting, MeetingRecord, QuestionSet, Subtitle, Summary
 
 router = APIRouter(tags=["meetings"])
@@ -223,6 +224,28 @@ async def list_subtitles(meeting_id: MeetingId, request: Request) -> SubtitleLis
     """
     subtitles = await _manager(request).list_subtitles(meeting_id)
     return SubtitleListResponse(subtitles=[to_subtitle_response(item) for item in subtitles])
+
+
+class LiveStatusResponse(BaseModel):
+    """進行中の会議の、「会議中」の画面が読む状況。"""
+
+    # 字幕の状況。通知 subtitle_status.changed の status と同じ値。保存しない（アプリを起動し直すと
+    # 初期値へ戻る）。
+    subtitle_status: SubtitleStatus
+
+
+@router.get("/meetings/{meeting_id}/live-status", response_model=LiveStatusResponse)
+async def get_live_status(meeting_id: MeetingId, request: Request) -> LiveStatusResponse:
+    """進行中の会議の、いまの字幕の状況を返す。
+
+    「会議中」の画面が、開いた時点で呼ぶ。会議の開始の直後に出た状況の通知は、画面が購読する前に
+    届くことがあるため、通知を待たずに、現在の状況を読む。変化は、通知で受け取る。
+
+    Raises:
+        BusinessAppError: その会議が進行中でないとき（MEETING_NOT_RUNNING、409）。
+    """
+    status = _manager(request).subtitle_status_of(meeting_id)
+    return LiveStatusResponse(subtitle_status=status)
 
 
 class JobResponse(BaseModel):

@@ -4,6 +4,7 @@ import { ApiError } from '../../src/api/apiClient';
 import {
   deleteMeeting,
   endMeeting,
+  fetchLiveStatus,
   fetchMeetingRecord,
   fetchSubtitles,
   requestSummary,
@@ -260,5 +261,62 @@ describe('deleteMeeting', () => {
 
     expect(failure).toBeInstanceOf(ApiError);
     expect((failure as ApiError).body.code).toBe('SYSTEM_REQUEST_FAILED');
+  });
+});
+
+
+/**
+ * 【モジュール】src/api/meetingsApi（字幕の状況の取得）
+ */
+describe('fetchLiveStatus', () => {
+  /**
+   * 【テスト対象】fetchLiveStatus
+   * 【テスト内容】字幕の状況が遅れの会議の状況を取得する
+   * 【期待結果】
+   * - GET /api/meetings/{会議番号}/live-status を呼ぶ。会議番号は 1 つの区間として符号化する
+   * - キャッシュを使わない指定で呼ぶ
+   * - 画面の型（subtitleStatus）に読み替えて返す
+   */
+  it('should fetch the subtitle status without using the cache', async () => {
+    const fetchMock = vi.fn().mockResolvedValue(jsonResponse({ subtitle_status: 'delayed' }));
+    vi.stubGlobal('fetch', fetchMock);
+
+    const live = await fetchLiveStatus('a/b?c');
+
+    expect(fetchMock).toHaveBeenCalledWith('/api/meetings/a%2Fb%3Fc/live-status', {
+      method: 'GET',
+      cache: 'no-store',
+    });
+    expect(live).toEqual({ subtitleStatus: 'delayed' });
+  });
+
+  /**
+   * 【テスト対象】fetchLiveStatus（形が合わない応答）
+   * 【テスト内容】知らない状況・状況が無い応答を受け取る
+   * 【期待結果】どちらも ApiError（想定外のエラー）になること
+   */
+  it.each([{ subtitle_status: 'unknown' }, {}])('should reject a malformed response %j', async (body) => {
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue(jsonResponse(body)));
+
+    await expect(fetchLiveStatus('abc123')).rejects.toBeInstanceOf(ApiError);
+  });
+
+  /**
+   * 【テスト対象】fetchLiveStatus（進行中でない会議）
+   * 【テスト内容】409 の業務エラー MEETING_NOT_RUNNING が返る
+   * 【期待結果】ApiError になること
+   */
+  it('should throw an ApiError when the meeting is not running', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn().mockResolvedValue(
+        jsonResponse(
+          { category: 'business_error', code: 'MEETING_NOT_RUNNING', message: 'm', action: 'a' },
+          409,
+        ),
+      ),
+    );
+
+    await expect(fetchLiveStatus('abc123')).rejects.toBeInstanceOf(ApiError);
   });
 });
