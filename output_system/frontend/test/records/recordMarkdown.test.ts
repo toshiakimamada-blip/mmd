@@ -1,4 +1,4 @@
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 
 import { escapeMarkdownLine, escapeMarkdownParagraph } from '../../src/records/markdownEscape';
 import { buildRecordMarkdown } from '../../src/records/recordMarkdown';
@@ -8,78 +8,47 @@ import {
   NO_SUMMARY_TEXT,
   NO_TRANSLATION_TEXT,
   NOT_APPLICABLE_TEXT,
+  PREVIOUS_SUMMARY_AFTER_FAILURE_TEXT,
+  PREVIOUS_SUMMARY_LABEL,
+  PREVIOUS_SUMMARY_WHILE_CREATING_TEXT,
   SUMMARY_TITLES,
   buildQuestionSetText,
   buildSubtitlesText,
   buildSummaryText,
 } from '../../src/records/recordText';
-import { type MeetingRecord, type RecordQuestionSet } from '../../src/records/recordTypes';
+import { MEETING_STATUSES, type MeetingStatus } from '../../src/records/recordTypes';
 import { splitSummaryLines } from '../../src/records/summaryLines';
-import { type Subtitle } from '../../src/subtitles/subtitleTypes';
 import {
   HOSTILE_TEXTS,
   countStructuralLines,
+  describeText,
   findLiveMarkup,
   skeleton,
   unescapeMarkdown,
 } from './markdownInertKit';
+import { HOSTILE_FIELDS, questionSet, record, subtitle } from './recordFixtures';
 
 const TOKYO = 'Asia/Tokyo';
 
-/** 字幕を作る。話された時刻は UTC の 2026-11-05 01:00:00 から、sequence 秒後（東京で 10:00:sequence）。 */
-function subtitle(sequence: number, overrides: Partial<Subtitle> = {}): Subtitle {
-  return {
-    sequence,
-    originalText: `English line ${sequence}`,
-    translatedText: `日本語訳 ${sequence}`,
-    spokenAt: new Date(Date.UTC(2026, 10, 5, 1, 0, sequence)),
-    ...overrides,
-  };
-}
-
-/** 質問のまとまりを作る。作成日時は、まとまりの番号の時間後（UTC の 2026-11-05 02:15 + 番号 時間）。 */
-function questionSet(setNumber: number, overrides: Partial<RecordQuestionSet> = {}): RecordQuestionSet {
-  return {
-    setNumber,
-    createdAt: new Date(Date.UTC(2026, 10, 5, 2 + setNumber, 15)),
-    createdPhase: setNumber === 1 ? 'during_meeting' : 'after_meeting',
-    questions: [1, 2].map((sequence) => ({
-      sequence,
-      english: `Q${setNumber}-${sequence}?`,
-      japanese: `質問${setNumber}-${sequence}`,
-    })),
-    ...overrides,
-  };
-}
-
-/** 会議の記録を作る。既定は、字幕 2 件・要約あり・質問のまとまり 2 つ（順番 1・2）がある完了の会議。 */
-function record(overrides: Partial<MeetingRecord> = {}, meeting: Partial<MeetingRecord['meeting']> = {}): MeetingRecord {
-  return {
-    meeting: {
-      meetingId: 'abc123',
-      title: '週次の定例',
-      startedAt: new Date('2026-11-05T01:00:00.000Z'),
-      endedAt: new Date('2026-11-05T02:30:15.000Z'),
-      status: 'completed',
-      summaryFailureReason: null,
-      ...meeting,
-    },
-    subtitles: [subtitle(1), subtitle(2, { translatedText: null })],
-    summary: {
-      overview: '予算案を承認しました。',
-      keyPoints: '予算案: 承認された\n作業の分担: 来週決める',
-      decisions: '予算案を承認する',
-      actionItems: '資料を送る',
-      createdAt: new Date('2026-11-05T02:31:00.000Z'),
-    },
-    questionSets: [questionSet(2), questionSet(1)],
-    jobs: [],
-    ...overrides,
-  };
-}
+// 悪意のある内容を、記録の全項目へ入れて文面を組み立てる検査は、文面を千回以上組み立てる。機械が忙しいとき
+// （ほかのテストが同時に動いているときなど）は、既定の 5 秒では足りない。
+vi.setConfig({ testTimeout: 30_000 });
 
 /** 2 つの空白で行を終える（Markdown の改行）。 */
 const BR = '  ';
+
+/**
+ * 全体の概要の、期待する形。段落の中の改行（次の行が空行でない行の終わり）には、行末の 2 つの空白を付ける
+ * （画面は改行を見せる。Markdown の単独の改行は、空白として描画されるため）。
+ */
+function withLineBreaks(paragraph: string): string {
+  const lines = paragraph.split('\n');
+  return lines
+    .map((line, index) =>
+      line !== '' && lines[index + 1] !== undefined && lines[index + 1] !== '' ? `${line}${BR}` : line,
+    )
+    .join('\n');
+}
 
 /**
  * 【モジュール】src/records/recordMarkdown
@@ -352,75 +321,33 @@ describe('buildRecordMarkdown', () => {
    *            悪意のある内容が、文書の骨組み（見出し・箇条書き・番号つき・引用・そのほかの記法の行の数）を変えない
    */
   it('should neutralize hostile content in every field and keep the skeleton', () => {
-    const base = record();
-    const summaryWith = (overrides: Partial<NonNullable<MeetingRecord['summary']>>): MeetingRecord =>
-      record({ summary: { ...base.summary!, ...overrides } });
-    const oneQuestion = (english: string, japanese: string): MeetingRecord =>
-      record({ questionSets: [questionSet(1, { questions: [{ sequence: 1, english, japanese }] })] });
-    const fields: ReadonlyArray<{
-      readonly name: string;
-      readonly make: (text: string) => MeetingRecord;
-      /** 文面に入っているはずの、変換した形。 */
-      readonly fragment: (text: string) => string;
-      /** 比べる相手の、無害な文字。行に分けて箇条書きになる項目は、同じ行数にする。 */
-      readonly benign?: (text: string) => string;
-    }> = [
-      { name: 'title', make: (t) => record({}, { title: t }), fragment: (t) => `# ${escapeMarkdownLine(t)}\n\n` },
-      {
-        name: 'overview',
-        make: (t) => summaryWith({ overview: t }),
-        fragment: (t) => `### 全体の概要\n\n${escapeMarkdownParagraph(t)}\n\n### 話題ごとの要点`,
-      },
-      {
-        name: 'key points',
-        make: (t) => summaryWith({ keyPoints: t }),
-        fragment: (t) => splitSummaryLines(t).map((line) => `- ${escapeMarkdownLine(line)}`).join('\n'),
-        benign: (t) => Array.from({ length: Math.max(1, splitSummaryLines(t).length) }, (_, i) => `x${i}`).join('\n'),
-      },
-      {
-        name: 'decisions',
-        make: (t) => summaryWith({ decisions: t }),
-        fragment: (t) => splitSummaryLines(t).map((line) => `- ${escapeMarkdownLine(line)}`).join('\n'),
-        benign: (t) => Array.from({ length: Math.max(1, splitSummaryLines(t).length) }, (_, i) => `x${i}`).join('\n'),
-      },
-      {
-        name: 'action items',
-        make: (t) => summaryWith({ actionItems: t }),
-        fragment: (t) => splitSummaryLines(t).map((line) => `- ${escapeMarkdownLine(line)}`).join('\n'),
-        benign: (t) => Array.from({ length: Math.max(1, splitSummaryLines(t).length) }, (_, i) => `x${i}`).join('\n'),
-      },
-      {
-        name: 'question english',
-        make: (t) => oneQuestion(t, '日本語'),
-        fragment: (t) => `1. ${escapeMarkdownLine(t)}${BR}\n   日本語\n`,
-      },
-      {
-        name: 'question japanese',
-        make: (t) => oneQuestion('English', t),
-        fragment: (t) => `1. English${BR}\n   ${escapeMarkdownLine(t)}\n`,
-      },
-      {
-        name: 'subtitle original',
-        make: (t) => record({ subtitles: [subtitle(1, { originalText: t })] }),
-        fragment: (t) => `10:00:01 ${escapeMarkdownLine(t)}${BR}\n日本語訳 1\n`,
-      },
-      {
-        name: 'subtitle translation',
-        make: (t) => record({ subtitles: [subtitle(1, { translatedText: t })] }),
-        fragment: (t) => `10:00:01 English line 1${BR}\n${escapeMarkdownLine(t)}\n`,
-      },
-    ];
+    const bullets = (text: string): string =>
+      splitSummaryLines(text)
+        .map((line) => `- ${escapeMarkdownLine(line)}`)
+        .join('\n');
+    // 項目ごとに、文面に入っているはずの、変換した形
+    const fragments: Readonly<Record<string, (text: string) => string>> = {
+      title: (t) => `# ${escapeMarkdownLine(t)}\n\n`,
+      overview: (t) => `### 全体の概要\n\n${withLineBreaks(escapeMarkdownParagraph(t))}\n\n### 話題ごとの要点`,
+      'key points': bullets,
+      decisions: bullets,
+      'action items': bullets,
+      'question english': (t) => `1. ${escapeMarkdownLine(t)}${BR}\n   日本語\n`,
+      'question japanese': (t) => `1. English${BR}\n   ${escapeMarkdownLine(t)}\n`,
+      'subtitle original': (t) => `10:00:01 ${escapeMarkdownLine(t)}${BR}\n日本語訳 1\n`,
+      'subtitle translation': (t) => `10:00:01 English line 1${BR}\n${escapeMarkdownLine(t)}\n`,
+    };
 
     const failures: string[] = [];
     for (const hostile of HOSTILE_TEXTS) {
-      for (const field of fields) {
+      for (const field of HOSTILE_FIELDS) {
         const markdown = buildRecordMarkdown(field.make(hostile), TOKYO);
         const benign = buildRecordMarkdown(field.make(field.benign?.(hostile) ?? 'x'), TOKYO);
-        if (!markdown.includes(field.fragment(hostile))) {
-          failures.push(`${field.name}: ${JSON.stringify(hostile)} が、変換した形で入っていない`);
+        if (!markdown.includes(fragments[field.name](hostile))) {
+          failures.push(`${field.name}: ${describeText(hostile)} が、変換した形で入っていない`);
         }
         if (JSON.stringify(countStructuralLines(markdown)) !== JSON.stringify(countStructuralLines(benign))) {
-          failures.push(`${field.name}: ${JSON.stringify(hostile)} が、文書の骨組みを変えた`);
+          failures.push(`${field.name}: ${describeText(hostile)} が、文書の骨組みを変えた`);
         }
       }
     }
@@ -448,7 +375,7 @@ describe('buildRecordMarkdown', () => {
     );
 
     const section = markdown.split('### 話題ごとの要点')[0];
-    expect(section).toContain(escapeMarkdownParagraph(overview));
+    expect(section).toContain(withLineBreaks(escapeMarkdownParagraph(overview)));
     const bullets = markdown.split('### 話題ごとの要点\n\n')[1].split('\n\n### 決定事項')[0].split('\n');
     expect(bullets).toHaveLength(6);
     for (const bullet of bullets) {
@@ -507,6 +434,73 @@ describe('buildRecordMarkdown', () => {
     expect(markdown.endsWith('\n')).toBe(true);
     expect(markdown.endsWith('\n\n')).toBe(false);
     expect(markdown.charCodeAt(0)).not.toBe(0xfeff);
+  });
+
+  /**
+   * 【テスト対象】buildRecordMarkdown の全体の概要の改行（コードレビュー M2）
+   * 【テスト内容】単独の改行と、空行（段落の区切り）を含む全体の概要
+   * 【期待結果】画面は、概要の改行を見せる（`white-space: pre-line`）。取り出しでも、段落の中の改行は、
+   *            次の行が空行でない行の終わりに、行末の 2 つの空白を付けて残す（Markdown の単独の改行は、空白に描画されるため）。
+   *            最後の行と、空行の前の行には付けない。空行は段落の区切りのまま
+   */
+  it('should keep single line breaks of the overview as Markdown line breaks', () => {
+    const markdown = buildRecordMarkdown(
+      record({ summary: { ...record().summary!, overview: '一行目\n二行目\n\n三段落目\n四行目' } }),
+      TOKYO,
+    );
+
+    expect(markdown).toContain(`### 全体の概要\n\n一行目${BR}\n二行目\n\n三段落目${BR}\n四行目\n\n### 話題ごとの要点`);
+    // 1 行だけの概要は、行末に空白を付けない
+    expect(buildRecordMarkdown(record(), TOKYO)).toContain('\n予算案を承認しました。\n\n### 話題ごとの要点');
+  });
+
+  /**
+   * 【テスト対象】buildRecordMarkdown の前の要約の印（コードレビュー L1）
+   * 【テスト内容】要約作成中（要約を作り直している途中）と要約失敗の会議で、前の要約が残っている記録
+   * 【期待結果】画面の「前の要約」と同じ考え方で、要約の欄の初めに、前の要約であることと、その理由を 1 行で書く。
+   *            言葉は画面の表示（前の要約）に合わせる。4 項目の見出しと内容は、そのあとに続く
+   */
+  it.each([
+    ['summarizing', PREVIOUS_SUMMARY_WHILE_CREATING_TEXT],
+    ['summary_failed', PREVIOUS_SUMMARY_AFTER_FAILURE_TEXT],
+  ] as const)('should say that the summary is the previous one in the "%s" state', (status, note) => {
+    const markdown = buildRecordMarkdown(record({}, { status }), TOKYO);
+
+    expect(markdown).toContain(`## 要約\n\n${note}\n\n### 全体の概要`);
+    expect(note.startsWith(PREVIOUS_SUMMARY_LABEL)).toBe(true);
+    expect(note).not.toContain('\n');
+    expect(PREVIOUS_SUMMARY_LABEL).toBe('前の要約');
+  });
+
+  /**
+   * 【テスト対象】buildRecordMarkdown の前の要約の印が出ない場合
+   * 【テスト内容】完了・中断・通訳中の会議で要約がある記録。要約作成中・要約失敗で、前の要約が無い記録
+   * 【期待結果】前の要約の印は書かない。要約が無いときは、要約がまだ無いことだけを書く
+   */
+  it('should not mark the summary as the previous one when it is the current one or missing', () => {
+    for (const status of MEETING_STATUSES.filter((value: MeetingStatus) => value !== 'summarizing' && value !== 'summary_failed')) {
+      const markdown = buildRecordMarkdown(record({}, { status }), TOKYO);
+
+      expect(markdown).not.toContain(PREVIOUS_SUMMARY_LABEL);
+    }
+    for (const status of ['summarizing', 'summary_failed'] as const) {
+      const markdown = buildRecordMarkdown(record({ summary: null }, { status }), TOKYO);
+
+      expect(markdown).toContain(`## 要約\n\n${NO_SUMMARY_TEXT}\n\n## 質問`);
+      expect(markdown).not.toContain(PREVIOUS_SUMMARY_LABEL);
+    }
+  });
+
+  /**
+   * 【テスト対象】buildRecordMarkdown の訳が空の字幕（コードレビュー L6）
+   * 【テスト内容】日本語訳が、空文字・空白だけ・改行とタブだけの字幕（アプリサーバーの応答の読み替えは、空を null にするが、
+   *             この関数は、空の文字列が届いても壊れない）
+   * 【期待結果】どれも「（訳なし）」を書き、2 行の形を保つ
+   */
+  it.each([[''], ['  '], ['\n\t ']])('should write the placeholder for the blank translation %j', (translatedText) => {
+    const markdown = buildRecordMarkdown(record({ subtitles: [subtitle(1, { translatedText })] }), TOKYO);
+
+    expect(markdown).toContain(`10:00:01 English line 1${BR}\n${NO_TRANSLATION_TEXT}\n`);
   });
 
   /**

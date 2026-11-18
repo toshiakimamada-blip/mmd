@@ -20,17 +20,23 @@
  * その確認は、このテストには含めない（Node の開発時の依存に、変換器が無いため）。
  */
 
-/** 長さ 0 の空白（U+200B）。URL とメールアドレスの自動リンクを止めるために、変換が差し込む。 */
+/** 長さ 0 の空白（U+200B）。`//` の間と `@` の前後に、変換が差し込む。 */
 export const ZERO_WIDTH_SPACE = '\u200B';
 
 /** 有効な逃がし方の置き換え先。本文に現れない私用領域の文字。 */
-const PLACEHOLDER = '\uE000';
+const PLACEHOLDER = '';
 
 /** 有効な逃がし方: バックスラッシュ ＋ ASCII の記号、または、変換が使う 3 つの文字参照。 */
 const ESCAPE_SEQUENCE = /\\([!-/:-@[-`{-~])|&(amp|lt|gt);/g;
 
 /** 文字参照の名前と、表す文字。 */
 const ENTITY_CHARACTERS: Readonly<Record<string, string>> = { amp: '&', lt: '<', gt: '>' };
+
+/** 文字の向きを変える文字と、見えないタグの文字。変換が、本文から取り除く。 */
+export const DIRECTION_AND_TAG_CHARACTERS = /[\u061C\u200E\u200F\u202A-\u202E\u2066-\u2069\u{E0000}-\u{E007F}]/gu;
+
+/** 上と同じ文字を、含むかだけ調べる正規表現（g を付けない。g を付けた正規表現の test は、位置を覚えてしまうため）。 */
+const HAS_DIRECTION_OR_TAG_CHARACTER = new RegExp(DIRECTION_AND_TAG_CHARACTERS.source, 'u');
 
 /**
  * 逃がし方を、元の文字へ戻す。長さ 0 の空白（変換が差し込んだもの）は取り除く。
@@ -46,12 +52,67 @@ export function unescapeMarkdown(escaped: string): string {
     );
 }
 
-/** 変換した文字列のどこにも、逃がしていない形で残っていてはいけない文字。 */
-const LIVE_CHARACTERS = ['\\', '`', '*', '_', '{', '}', '[', ']', '<', '>', '&', '|', '#', '~'] as const;
+/** 改行として扱う文字。 */
+const LINE_BREAKS = /\r\n|[\r\v\f\u0085\u2028\u2029]/g;
 
 /**
- * 変換した文字列に、記法として働きうるものが残っていないかを調べる。
+ * 1 行へ畳んだ、元の文字列。変換が、表示される文字を変えていないことの期待値。
+ * 行ごとの前後の空白と空行を除き、空白 1 つでつなぐ。向きを変える文字・タグの文字・長さ 0 の空白（U+200B）を除く。
+ */
+export function expectedLine(text: string): string {
+  return text
+    .replace(DIRECTION_AND_TAG_CHARACTERS, '')
+    .replace(LINE_BREAKS, '\n')
+    .split('\n')
+    .map((line) => line.trim())
+    .filter((line) => line !== '')
+    .join(' ')
+    .replaceAll(ZERO_WIDTH_SPACE, '');
+}
+
+/**
+ * 段落として畳んだ、元の文字列の期待値。行の前後の空白を除き、空行は 1 行にまとめ、前後の空行を除く。
+ * 向きを変える文字・タグの文字・U+200B を除く。
+ */
+export function expectedParagraph(text: string): string {
+  const lines = text
+    .replace(DIRECTION_AND_TAG_CHARACTERS, '')
+    .replace(LINE_BREAKS, '\n')
+    .split('\n')
+    .map((line) => line.trim());
+  const kept: string[] = [];
+  for (const line of lines) {
+    if (line === '' && (kept.length === 0 || kept[kept.length - 1] === '')) {
+      continue;
+    }
+    kept.push(line);
+  }
+  while (kept.length > 0 && kept[kept.length - 1] === '') {
+    kept.pop();
+  }
+  return kept.join('\n').replaceAll(ZERO_WIDTH_SPACE, '');
+}
+
+/**
+ * テストの名前に使う、内容の見える形。向きを変える文字・見えない文字・制御文字は、`\uXXXX` で書く
+ * （テストの出力に、文字の向きを変える文字が、そのまま入らないようにする）。
+ */
+export function describeText(text: string): string {
+  return JSON.stringify(text).replace(/[\p{Cc}\p{Cf}\p{Zl}\p{Zp}]/gu, (character) => {
+    const codePoint = character.codePointAt(0) as number;
+    return codePoint <= 0xffff ? `\\u${codePoint.toString(16).toUpperCase().padStart(4, '0')}` : `\\u{${codePoint.toString(16).toUpperCase()}}`;
+  });
+}
+
+/** 変換した文字列のどこにも、逃がしていない形で残っていてはいけない文字。 */
+const LIVE_CHARACTERS = ['\\', '`', '*', '_', '{', '}', '[', ']', '<', '>', '&', '|', '#', '~', '$'] as const;
+
+/**
+ * 変換した文字列に、記法として働きうるものが残っていないかを調べる（規則による検査）。
  * 文書の構造に使う記法（見出しの `#` など）を含まない、内容の部分（1 行、または、複数行の段落）に使う。
+ *
+ * 本命の検査は、本物の変換器（markdown-it）で描画する検査（recordMarkdownRendered.test.ts）。
+ * この検査は、変換器が無い環境でも、規則の抜けを速く見つけるための補助。
  *
  * @param escaped 変換した文字列
  * @returns 残っているものの説明。空なら、記法として働くものは無い
@@ -64,27 +125,45 @@ export function findLiveMarkup(escaped: string): string[] {
       problems.push(`逃がしていない ${character}`);
     }
   }
-  // 行の頭。見出し・引用・箇条書き・番号つきの一覧・区切り線・定義リスト・字下げのコード
+  // 2 つ続く記号で働く拡張記法（コメント `%%`、強調 `==`）
+  if (/%%/.test(rest)) {
+    problems.push('逃がしていない %%');
+  }
+  if (/==/.test(rest)) {
+    problems.push('逃がしていない ==');
+  }
+  // 行の頭。見出しの下線・箇条書き・区切り線・定義リスト・注記（!!!）・番号つきの一覧（桁数の上限なし）・字下げのコード
   for (const line of rest.split('\n')) {
-    if (/^[-+=:]/.test(line)) {
+    if (/^[-+=:!]/.test(line)) {
       problems.push(`行頭の ${line.slice(0, 1)}`);
     }
-    if (/^\d{1,9}[.)](?:[ \t]|$)/.test(line)) {
+    if (/^\d+[.)](?:[ \t]|$)/.test(line)) {
       problems.push('行頭の番号つきの一覧');
     }
     if (/^(?: {4}|\t)/.test(line)) {
       problems.push('行頭の字下げ');
     }
   }
-  // 自動リンク: スキームつきの URL（://）、www.、メールアドレス（@ の直後に長さ 0 の空白が無い）
-  if (/:\/\//.test(rest)) {
-    problems.push('URL（://）');
+  // 自動リンク: `//`（スキームつきの URL・`//host`）、www.、メールアドレス（@ の前後に長さ 0 の空白が無い）、
+  // 裸のドメイン（英数字などに挟まれ、あとに英字が 2 文字以上続くドット）、IP アドレス
+  if (/\/\//.test(rest)) {
+    problems.push('URL（//）');
   }
   if (/www\./i.test(rest)) {
     problems.push('URL（www.）');
   }
-  if (/@(?!\u200B)/.test(rest)) {
+  if (/(?<!\u200B)@|@(?!\u200B)/.test(rest)) {
     problems.push('メールアドレス（@）');
+  }
+  if (/(?<=[^\s.\\])\.(?=\p{L}{2,})/u.test(escaped)) {
+    problems.push('裸のドメイン');
+  }
+  if (/(?<!\d)\d{1,3}(?:\.\d{1,3}){3}(?!\d)/.test(rest)) {
+    problems.push('IP アドレス');
+  }
+  // 向きを変える文字とタグの文字は、変換が取り除いている
+  if (HAS_DIRECTION_OR_TAG_CHARACTER.test(escaped)) {
+    problems.push('向きを変える文字、またはタグの文字');
   }
   // 行の区切りとして働く文字と制御文字は、変換が取り除いている
   if (/[\u2028\u2029]|(?![\t\n])\p{Cc}/u.test(escaped)) {
@@ -122,11 +201,11 @@ function lineKind(line: string): LineKind {
   if (/^ {0,3}[-+*](?:[ \t]|$)/.test(line)) {
     return 'bullet';
   }
-  if (/^ {0,3}\d{1,9}[.)](?:[ \t]|$)/.test(line)) {
+  if (/^ {0,3}\d+[.)](?:[ \t]|$)/.test(line)) {
     return 'ordered';
   }
   // 引用・コードのかたまり・区切り線・見出しの下線・HTML・表・定義リスト・字下げのコード
-  if (/^ {0,3}(?:[>`~|<=:_*-]|\+)/.test(line) || /^(?: {4}|\t)/.test(line)) {
+  if (/^ {0,3}(?:[>`~|<=:_*!-]|\+)/.test(line) || /^(?: {4}|\t)/.test(line)) {
     return 'other-block';
   }
   if (/^ {3}\S/.test(line)) {
@@ -148,7 +227,7 @@ export function skeleton(markdown: string): string[] {
     if (kind !== 'bullet' && kind !== 'ordered') {
       return kind;
     }
-    const content = line.replace(/^ {0,3}(?:[-+*]|\d{1,9}[.)])[ \t]*/, '');
+    const content = line.replace(/^ {0,3}(?:[-+*]|\d+[.)])[ \t]*/, '');
     const inner = lineKind(content);
     return inner === 'text' || inner === 'blank' ? kind : `${kind}+nested`;
   });
@@ -245,9 +324,40 @@ export const HOSTILE_TEXTS: readonly string[] = [
   '\\\\',
   '文末のバックスラッシュ\\',
   '\\<script>',
+  // 自動リンクの抜け道（メール・//host・全角のコロン・裸のドメイン・IP アドレス）
+  '連絡先は user@example.com です',
+  'mailto:user@example.com',
+  '<user@example.com>',
+  'a@b',
+  '//evil.example.com/x',
+  'http：//example.com',
+  'www.1password.com',
+  'example.com',
+  'sub.example.co.jp と node.js と 日本語.jp',
+  '192.168.0.1',
+  'http://192.168.0.1:8080/x',
+  // 拡張記法（数式・コメント・強調・注記）と、桁数の大きい番号つきの一覧
+  '$x$',
+  '$$',
+  '$$\nx = 1\n$$',
+  '%%隠す%%',
+  '%%%',
+  '==強調==',
+  'a == b',
+  '!!! note',
+  '!!!',
+  '1234567890. 番号',
+  '12345678901234567890) 番号',
+  // 向きを変える文字・見えないタグの文字（取り除く）。ZWJ と ZWNJ は残す
+  'evil\u202Egpj.exe\u202C',
+  '\u2066x\u2069 \u200Ey\u200F \u061Cz',
+  'a\u{E0041}\u{E0042}b',
+  '👨\u200D👩 と \u200C',
   // 普通の文（変換しても読めること）
   'Hello!',
   'Issue #42 is open.',
+  'Version 3.5 is out. See e.g. the notes.',
+  'ver 1.2.3. ok.Thanks',
   '$100 and $200',
   '予算案（承認済み）を共有します。',
   '😀 emoji and ＡＢＣ　全角',

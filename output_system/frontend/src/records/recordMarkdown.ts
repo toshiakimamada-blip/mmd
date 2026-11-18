@@ -54,10 +54,17 @@ import {
   NO_SUMMARY_TEXT,
   NO_TRANSLATION_TEXT,
   NOT_APPLICABLE_TEXT,
+  PREVIOUS_SUMMARY_AFTER_FAILURE_TEXT,
+  PREVIOUS_SUMMARY_WHILE_CREATING_TEXT,
   QUESTION_PHASE_LABELS,
   SUMMARY_TITLES,
 } from './recordText';
-import { type MeetingRecord, type RecordQuestionSet, type RecordSummary } from './recordTypes';
+import {
+  type MeetingRecord,
+  type MeetingStatus,
+  type RecordQuestionSet,
+  type RecordSummary,
+} from './recordTypes';
 import { splitSummaryLines } from './summaryLines';
 import { formatClockTime } from '../subtitles/formatClockTime';
 import { type Subtitle } from '../subtitles/subtitleTypes';
@@ -97,13 +104,50 @@ function bulletBlock(text: string): string {
   return (items.length === 0 ? [NOT_APPLICABLE_TEXT] : items).map(bullet).join('\n');
 }
 
-/** 要約の欄の塊。要約が無いときは、要約がまだ無いことを書く。 */
-function summaryBlocks(summary: RecordSummary | null): string[] {
+/**
+ * 複数行の内容（全体の概要）の、段落の中の改行を、Markdown の改行にする。
+ * 次の行が空行でない行の終わりに、行末の 2 つの空白を付ける（質問や字幕の 2 行と同じ書き方）。
+ * 画面は、概要の改行を見せる。Markdown の単独の改行は、空白として描画されるため、付けないと 1 つの段落につながる。
+ * 最後の行と、空行（段落の区切り）の前の行には付けない。
+ *
+ * @param paragraph 変換した段落（escapeMarkdownParagraph の結果）
+ */
+function keepLineBreaks(paragraph: string): string {
+  const lines = paragraph.split('\n');
+  return lines
+    .map((line, index) =>
+      line !== '' && lines[index + 1] !== undefined && lines[index + 1] !== '' ? `${line}${LINE_BREAK_MARK}` : line,
+    )
+    .join('\n');
+}
+
+/**
+ * 前の要約であることを示す 1 行。画面が「前の要約」を表示するのと同じ場合（要約作成中・要約失敗で、前の要約が残っている）に、
+ * 要約の欄の初めに書く。それ以外の状態では null。
+ */
+function previousSummaryNote(status: MeetingStatus): string | null {
+  switch (status) {
+    case 'summarizing':
+      return PREVIOUS_SUMMARY_WHILE_CREATING_TEXT;
+    case 'summary_failed':
+      return PREVIOUS_SUMMARY_AFTER_FAILURE_TEXT;
+    default:
+      return null;
+  }
+}
+
+/**
+ * 要約の欄の塊。要約が無いときは、要約がまだ無いことを書く。
+ * 要約作成中と要約失敗で、前の要約が残っているときは、前の要約であることを示す 1 行を、4 項目の前に書く。
+ */
+function summaryBlocks(summary: RecordSummary | null, status: MeetingStatus): string[] {
   if (summary === null) {
     return [NO_SUMMARY_TEXT];
   }
-  const overview = escapeMarkdownParagraph(summary.overview);
+  const overview = keepLineBreaks(escapeMarkdownParagraph(summary.overview));
+  const note = previousSummaryNote(status);
   return [
+    ...(note === null ? [] : [note]),
     heading(3, SUMMARY_TITLES.overview),
     overview === '' ? NOT_APPLICABLE_TEXT : overview,
     heading(3, SUMMARY_TITLES.keyPoints),
@@ -181,7 +225,7 @@ export function buildRecordMarkdown(record: MeetingRecord, timeZone?: string): s
     `# ${title === '' ? UNTITLED_TEXT : title}`,
     facts,
     heading(2, '要約'),
-    ...summaryBlocks(record.summary),
+    ...summaryBlocks(record.summary, meeting.status),
     heading(2, '質問'),
     ...(questionSets.length === 0
       ? [NO_QUESTIONS_TEXT]

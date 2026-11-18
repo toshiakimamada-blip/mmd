@@ -3,7 +3,7 @@ import { useId } from 'react';
 import { RegionError } from '../../components/notices';
 import { CopyButton } from '../../components/records/CopyButton';
 import { toDisplayErrorFromCode } from '../../errors/errorMessages';
-import { NO_SUMMARY_TEXT, buildSummaryText } from '../../records/recordText';
+import { NO_SUMMARY_TEXT, PREVIOUS_SUMMARY_LABEL, buildSummaryText } from '../../records/recordText';
 import { type MeetingRecord, type RecordJob } from '../../records/recordTypes';
 import { isActiveJob, type RecordView } from '../../records/recordView';
 import { SummaryContent } from './SummaryContent';
@@ -113,7 +113,7 @@ function SummaryArea({
 function PreviousSummary({ summary }: { readonly summary: NonNullable<MeetingRecord['summary']> }) {
   return (
     <div className="summary-previous">
-      <p className="summary-previous__label">前の要約</p>
+      <p className="summary-previous__label">{PREVIOUS_SUMMARY_LABEL}</p>
       <SummaryContent summary={summary} />
     </div>
   );

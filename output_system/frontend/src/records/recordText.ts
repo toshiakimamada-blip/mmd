@@ -42,6 +42,18 @@ export const QUESTION_PHASE_LABELS: Readonly<Record<RecordQuestionSet['createdPh
 /** 要約が無いときの文（画面の要約の領域と同じ言葉。Markdown の取り出しも使う）。 */
 export const NO_SUMMARY_TEXT = '要約はまだありません。';
 
+/**
+ * 要約を作り直している途中、または作り直しに失敗したときに、前の要約を示す言葉。
+ * 画面の要約の領域（前の要約の見出し）と、Markdown の取り出しが使う。
+ */
+export const PREVIOUS_SUMMARY_LABEL = '前の要約';
+
+/** 要約作成中の会議の取り出しで、要約の欄の初めに書く 1 行。書いてある要約が、前の要約であることを示す。 */
+export const PREVIOUS_SUMMARY_WHILE_CREATING_TEXT = `${PREVIOUS_SUMMARY_LABEL}です。要約を作り直している途中のため、前に作った要約を書いています。`;
+
+/** 要約失敗の会議の取り出しで、要約の欄の初めに書く 1 行。書いてある要約が、前の要約であることを示す。 */
+export const PREVIOUS_SUMMARY_AFTER_FAILURE_TEXT = `${PREVIOUS_SUMMARY_LABEL}です。要約の作成に失敗したため、前に作った要約を書いています。`;
+
 /** 質問のまとまりが無いときの文（画面の質問の領域と同じ言葉。Markdown の取り出しも使う）。 */
 export const NO_QUESTIONS_TEXT = '質問はまだありません。';
 

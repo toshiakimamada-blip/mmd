@@ -4,41 +4,14 @@ import { escapeMarkdownLine, escapeMarkdownParagraph } from '../../src/records/m
 import {
   HOSTILE_TEXTS,
   ZERO_WIDTH_SPACE,
+  describeText,
+  expectedLine,
+  expectedParagraph,
   findLiveMarkup,
   unescapeMarkdown,
 } from './markdownInertKit';
 
 const Z = ZERO_WIDTH_SPACE;
-
-/** 1 行へ畳んだ、元の文字列。変換が、表示される文字を変えていないことの期待値。 */
-function expectedLine(text: string): string {
-  return text
-    .replace(/\r\n|[\r\v\f\u0085\u2028\u2029]/g, '\n')
-    .split('\n')
-    .map((line) => line.trim())
-    .filter((line) => line !== '')
-    .join(' ')
-    .replaceAll(Z, '');
-}
-
-/** 段落として畳んだ、元の文字列。行の前後の空白を除き、空行は 1 行にまとめ、前後の空行を除く。 */
-function expectedParagraph(text: string): string {
-  const lines = text
-    .replace(/\r\n|[\r\v\f\u0085\u2028\u2029]/g, '\n')
-    .split('\n')
-    .map((line) => line.trim());
-  const kept: string[] = [];
-  for (const line of lines) {
-    if (line === '' && (kept.length === 0 || kept[kept.length - 1] === '')) {
-      continue;
-    }
-    kept.push(line);
-  }
-  while (kept.length > 0 && kept[kept.length - 1] === '') {
-    kept.pop();
-  }
-  return kept.join('\n').replaceAll(Z, '');
-}
 
 /** 決まった乱数（毎回同じ列を出す）。テストの失敗を、同じ入力で再現できるようにする。 */
 function seededRandom(seed: number): () => number {
@@ -61,16 +34,18 @@ describe('escapeMarkdownLine', () => {
   /**
    * 【テスト対象】escapeMarkdownLine の変換の規則
    * 【テスト内容】記号ごとの、変換の結果（文字列の一致）
-   * 【期待結果】どこにあっても働く記号（`\` `` ` `` `*` `_` `{` `}` `[` `]` `|` `#` `~`）は、前に `\` を付ける。
-   *            `<` `>` `&` は、文字参照（&lt; &gt; &amp;）にする。行頭だけで働く記号（`-` `+` `=` `:`、
-   *            番号と `.` または `)`）は、行頭のときだけ逃がす。`(` `)` `!` は、`[` を逃がすため、そのまま残す
+   * 【期待結果】どこにあっても働く記号（`\` `` ` `` `*` `_` `{` `}` `[` `]` `|` `#` `~` `$`）は、前に `\` を付ける。
+   *            2 つ続くと働く `%%` と `==` は、続く記号のすべてを逃がす（1 つだけの `%` と `=` は、そのまま）。
+   *            `<` `>` `&` は、文字参照（&lt; &gt; &amp;）にする。行頭だけで働く記号（`-` `+` `=` `:` `!`、
+   *            番号（桁数の上限なし）と `.` または `)`）は、行頭のときだけ逃がす。
+   *            `(` `)` と文の途中の `!` は、`[` を逃がすため、そのまま残す
    */
   it.each([
     ['# 見出し', '\\# 見出し'],
     ['> 引用', '&gt; 引用'],
     ['- 項目', '\\- 項目'],
     ['+ 項目', '\\+ 項目'],
-    ['=== ', '\\==='],
+    ['=== ', '\\=\\=\\='],
     [': 定義', '\\: 定義'],
     ['1. 項目', '1\\. 項目'],
     ['10) 項目', '10\\) 項目'],
@@ -79,7 +54,7 @@ describe('escapeMarkdownLine', () => {
     ['*強調* と _強調_ と `コード`', '\\*強調\\* と \\_強調\\_ と \\`コード\\`'],
     ['~~取り消し~~', '\\~\\~取り消し\\~\\~'],
     ['[x](javascript:alert(1))', '\\[x\\](javascript:alert(1))'],
-    ['![画像](x)', '!\\[画像\\](x)'],
+    ['![画像](x)', '\\!\\[画像\\](x)'],
     ['<script>alert(1)</script>', '&lt;script&gt;alert(1)&lt;/script&gt;'],
     ['a & b', 'a &amp; b'],
     ['&amp; &lt;', '&amp;amp; &amp;lt;'],
@@ -88,29 +63,62 @@ describe('escapeMarkdownLine', () => {
     ['C:\\Users\\me', 'C:\\\\Users\\\\me'],
     ['末尾の\\', '末尾の\\\\'],
     ['Hello! (really)', 'Hello! (really)'],
+    ['$x$ と $$', '\\$x\\$ と \\$\\$'],
+    ['%%隠す%% と 100% と 50%off', '\\%\\%隠す\\%\\% と 100% と 50%off'],
+    ['==強調== と a = b と a == b', '\\=\\=強調\\=\\= と a = b と a \\=\\= b'],
+    ['!!! note と Hello!', '\\!!! note と Hello!'],
+    ['1234567890. 番号', '1234567890\\. 番号'],
+    ['12345678901234567890) 番号', '12345678901234567890\\) 番号'],
   ])('should convert %j to %j', (input, expected) => {
     expect(escapeMarkdownLine(input)).toBe(expected);
   });
 
   /**
    * 【テスト対象】escapeMarkdownLine の自動リンクの止め方
-   * 【テスト内容】スキームつきの URL・www.・メールアドレス
-   * 【期待結果】URL は `://` の `:` の直後、www は `www` の直後、メールアドレスは `@` の直後に、長さ 0 の空白（U+200B）を
-   *            差し込む。どの変換器も、スキーム・ホスト名・メールアドレスとして読めなくなる。
+   * 【テスト内容】スキームつきの URL・`//host`・全角のコロンの URL・www.・メールアドレス・裸のドメイン・IP アドレス
+   * 【期待結果】`//` は、1 つ目のスラッシュの直後に長さ 0 の空白（U+200B）を差し込んで割る（スキームの形に関わらず）。
+   *            `@` は、前後の両方に U+200B を差し込む。ドメインの区切りのドット（英数字などに挟まれ、あとに英字が
+   *            2 文字以上続くもの、`www` のあと、IP アドレスの中）は、`\` で逃がす。
+   *            数字の `3.5`、文末のドット、`e.g.` のようなドットは、そのまま残す。
    *            表示される文字は、元と同じ（長さ 0 の空白は表示されない）
    */
   it.each([
-    ['https://example.com/a_b', `https:${Z}//example.com/a\\_b`],
-    ['HTTP://EXAMPLE.COM', `HTTP:${Z}//EXAMPLE.COM`],
-    ['ftp://example.com', `ftp:${Z}//example.com`],
-    ['file:///etc/passwd', `file:${Z}///etc/passwd`],
-    ['www.example.com', `www${Z}.example.com`],
-    ['WWW.Example.com', `WWW${Z}.Example.com`],
-    ['user@example.com', `user@${Z}example.com`],
-    ['(https://example.com)', `(https:${Z}//example.com)`],
+    ['https://example.com/a_b', `https:/${Z}/example\\.com/a\\_b`],
+    ['HTTP://EXAMPLE.COM', `HTTP:/${Z}/EXAMPLE\\.COM`],
+    ['ftp://example.com', `ftp:/${Z}/example\\.com`],
+    ['file:///etc/passwd', `file:/${Z}/${Z}/etc/passwd`],
+    ['(https://example.com)', `(https:/${Z}/example\\.com)`],
+    ['//evil.example.com/x', `/${Z}/evil\\.example\\.com/x`],
+    ['http：//example.com', `http：/${Z}/example\\.com`],
+    ['www.example.com', 'www\\.example\\.com'],
+    ['WWW.Example.com', 'WWW\\.Example\\.com'],
+    ['www.1password.com', 'www\\.1password\\.com'],
+    ['user@example.com', `user${Z}@${Z}example\\.com`],
+    ['mailto:a@b.example', `mailto:a${Z}@${Z}b\\.example`],
+    ['example.com', 'example\\.com'],
+    ['sub.example.co.jp と node.js', 'sub\\.example\\.co\\.jp と node\\.js'],
+    ['日本語.jp', '日本語\\.jp'],
+    ['192.168.0.1:8080', '192\\.168\\.0\\.1:8080'],
+    ['Version 3.5 is out. See e.g. the notes.', 'Version 3.5 is out. See e.g. the notes.'],
+    ['ver 1.2.3. と 1.2.3.4.5', 'ver 1.2.3. と 1\\.2\\.3\\.4.5'],
   ])('should break the auto link in %j', (input, expected) => {
     expect(escapeMarkdownLine(input)).toBe(expected);
     expect(unescapeMarkdown(escapeMarkdownLine(input))).toBe(input);
+  });
+
+  /**
+   * 【テスト対象】escapeMarkdownLine の向きを変える文字とタグの文字（セキュリティ L1）
+   * 【テスト内容】文字の向きを変える文字（U+202A〜U+202E・U+2066〜U+2069・U+200E・U+200F・U+061C）と、
+   *             見えないタグの文字（U+E0000〜U+E007F）を含む内容。ZWJ（U+200D）と ZWNJ（U+200C）を含む内容
+   * 【期待結果】向きを変える文字とタグの文字は取り除く（表示の順序を偽装できない）。
+   *            ZWJ と ZWNJ は残す（絵文字の結合と、一部の言語の文字の区切りに要る）
+   */
+  it('should remove direction and tag characters but keep ZWJ and ZWNJ', () => {
+    expect(escapeMarkdownLine('evil\u202Egpj.exe\u202C')).toBe('evilgpj\\.exe');
+    expect(escapeMarkdownLine('\u2066a\u2069 \u200Eb\u200F \u061Cc')).toBe('a b c');
+    expect(escapeMarkdownLine('x\u{E0041}\u{E0042}y')).toBe('xy');
+    expect(escapeMarkdownLine('👨\u200D👩 \u200C')).toBe('👨\u200D👩 \u200C'.trim());
+    expect(escapeMarkdownParagraph('a\u202Eb\nc\u2067d')).toBe('ab\ncd');
   });
 
   /**
@@ -121,9 +129,9 @@ describe('escapeMarkdownLine', () => {
    *            逃がし方を戻すと、元の文字列（1 行に畳んだもの）になる（文字を落とさず、増やさない）。
    *            結果は 1 行で、前後に空白が無い
    */
-  it.each(HOSTILE_TEXTS.map((text) => [text]))(
-    'should neutralize %j without changing the visible text',
-    (input) => {
+  it.each(HOSTILE_TEXTS.map((text) => [describeText(text), text]))(
+    'should neutralize %s without changing the visible text',
+    (_label, input) => {
       const escaped = escapeMarkdownLine(input);
 
       expect(findLiveMarkup(escaped)).toEqual([]);
@@ -160,7 +168,7 @@ describe('escapeMarkdownLine', () => {
    */
   it('should neutralize random mixes of markup characters', () => {
     const random = seededRandom(20261117);
-    const alphabet = ['#', '>', '-', '+', '*', '_', '`', '[', ']', '(', ')', '<', '>', '&', '|', '!', '=', ':', '~', '{', '}', '\\', '@', '.', '/', 'www.', 'http', 'a', 'b', '1', '2', ' ', ' ', '\t', '\n', '\u3000', '日'];
+    const alphabet = ['#', '>', '-', '+', '*', '_', '`', '[', ']', '(', ')', '<', '>', '&', '|', '!', '=', ':', '~', '{', '}', '\\', '@', '.', '/', '$', '^', '%', '?', ';', 'www.', 'http', 'mailto:', 'example.com', '.com', 'a@b', '192.168.0.1', '：', '\u202E', '\u2067', '\u200D', '\u{E0041}', 'a', 'b', '1', '2', '1234567890', ' ', ' ', '\t', '\n', '\u3000', '日'];
     const failures: string[] = [];
     for (let index = 0; index < 3000; index += 1) {
       const length = 1 + Math.floor(random() * 14);
@@ -219,7 +227,7 @@ describe('escapeMarkdownParagraph', () => {
     );
 
     expect(escaped).toBe(
-      '一行目\n\\# 見出し\n\\===\n\\---\n&gt; 引用\n\\- 項目\n1\\. 番号\n字下げ\n\\`\\`\\`\n&lt;div&gt;',
+      '一行目\n\\# 見出し\n\\=\\=\\=\n\\---\n&gt; 引用\n\\- 項目\n1\\. 番号\n字下げ\n\\`\\`\\`\n&lt;div&gt;',
     );
     expect(findLiveMarkup(escaped)).toEqual([]);
   });
@@ -241,9 +249,9 @@ describe('escapeMarkdownParagraph', () => {
    * 【期待結果】記法として働きうるものが残らず、逃がし方を戻すと、元の文字列（行の前後の空白を除き、
    *            空行を 1 行にまとめたもの）になる
    */
-  it.each(HOSTILE_TEXTS.map((text) => [text]))(
-    'should neutralize %j as a paragraph without changing the visible text',
-    (input) => {
+  it.each(HOSTILE_TEXTS.map((text) => [describeText(text), text]))(
+    'should neutralize %s as a paragraph without changing the visible text',
+    (_label, input) => {
       const escaped = escapeMarkdownParagraph(input);
 
       expect(findLiveMarkup(escaped)).toEqual([]);
@@ -258,7 +266,7 @@ describe('escapeMarkdownParagraph', () => {
    */
   it('should neutralize random multi-line mixes of markup characters', () => {
     const random = seededRandom(20261118);
-    const alphabet = ['#', '>', '-', '+', '*', '_', '`', '[', ']', '(', ')', '<', '&', '|', '=', ':', '~', '\\', '@', '.', '1', '2', 'a', ' ', ' ', '\n', '\n', '\n\n', '\r\n', '\t', 'https://x', '日'];
+    const alphabet = ['#', '>', '-', '+', '*', '_', '`', '[', ']', '(', ')', '<', '&', '|', '=', ':', '~', '\\', '@', '.', '$', '^', '%', '!', '?', ';', '/', '//', '1', '2', 'a', ' ', ' ', '\n', '\n', '\n\n', '\r\n', '\t', 'https://x', 'mailto:', 'example.com', '.com', 'a@b', '192.168.0.1', '：', '\u202E', '\u2067', '\u200D', '\u{E0041}', '1234567890', '日'];
     const failures: string[] = [];
     for (let index = 0; index < 3000; index += 1) {
       const length = 1 + Math.floor(random() * 16);

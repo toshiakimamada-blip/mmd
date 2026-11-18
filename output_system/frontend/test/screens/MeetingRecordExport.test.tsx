@@ -177,10 +177,11 @@ describe('MeetingRecordScreen: export the record', () => {
 
     const text = await downloadedText();
     expect(text).toContain('# &lt;script&gt;alert(1)&lt;/script&gt;: 週次/定例?\n');
-    expect(text).toContain('\\# 見出し\n\\[x\\](javascript:alert(1))');
+    // 全体の概要の改行は、行末の 2 つの空白で残る（画面は、概要の改行を見せる）
+    expect(text).toContain('\\# 見出し  \n\\[x\\](javascript:alert(1))');
     expect(text).toContain('- \\- 項目\n- &lt;img src=x onerror=alert(1)&gt;');
-    expect(text).toContain('10:00:01 see https:\u200B//example.com or www\u200B.example.com  \n&gt; 引用 \\*強調\\*');
-    expect(text).toContain('1. !\\[img\\](http:\u200B//evil/x.png)  \n   \\`code\\` \\| 表');
+    expect(text).toContain('10:00:01 see https:/\u200B/example\\.com or www\\.example\\.com  \n&gt; 引用 \\*強調\\*');
+    expect(text).toContain('1. \\!\\[img\\](http:/\u200B/evil/x\\.png)  \n   \\`code\\` \\| 表');
     expect(text).not.toMatch(/<[a-z]/i);
     expect(download.downloads[0].fileName).toBe('20261105-1000__script_alert(1)__script__ 週次_定例_.md');
   });
