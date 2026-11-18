@@ -164,8 +164,8 @@ output_system/
 - 記録のコピー（PBI #127）: 文面は画面が読み込み済みの記録から組み立てる（`records/recordText.ts`。要約は【見出し】と「・」、質問は「番号. 英語」と字下げした日本語、字幕は「時刻 英語」と日本語訳）。会議の内容の記号は変換しない（プレーンテキスト）。Markdown の取り出し（PBI 6.4）は、同じ `SUMMARY_TITLES`・`NO_TRANSLATION_TEXT`・`splitSummaryLines`・日時の整形を使い回し、記号の変換だけを足す
 - コピーのボタン `CopyButton` は、ボタン・結果の表示（`aria-live="polite"` の領域は押す前から置く）・失敗したときの文面の欄を、フラグメントで返す。置き場は折り返せる横並び（`.record__actions--copy`）。失敗はお知らせ帯の `RECORD_COPY_FAILED`（画面だけが決めるコード。サーバーは返さない）。お知らせの識別子は 1 つ（`copy-failed`）で、どのボタンの成功でも消える。「会議中」の質問のコピーは、質問の領域（PBI 5.5）が無いため置いていない。`QuestionSetList` に `copyable` を渡すと置ける
 
-- 取り出す Markdown は、画面が組み立てる（ADR-15）。会議の内容は、すべて `markdownEscape.ts` を通す。`\` で逃がす記号と、文字参照（`&lt;` `&gt;` `&amp;`）にする記号を分け、`://`・`www.`・`@` の直後には U+200B（長さ 0 の空白）を入れる。`\` だけでは、markdown-it の linkify が、逃がした文字を本文へ戻してから URL を探して、リンクにするため（markdown-it-py で、`http\://x` が 1 つの text トークン `http://x` になることを確かめた）。代わりに、URL をコピーすると見えない文字が入る。`\<` の形は、`\` を使えない変換器があるため不採用
-- 取り出しの変換の検査は、変換器の代わりの規則（`test/records/markdownInertKit.ts`）。開発時の依存に変換器が無く、新しいパッケージは入れない方針のため。規則を変えたときは、`backend/.venv` に入っている markdown-it-py（`MarkdownIt('commonmark', {'html': True}).enable(['table', 'strikethrough'])`）で、記録の全項目へ悪意のある内容を入れた文面を描画して、要素が見出し・段落・一覧・改行だけであることを確かめる（コミットしていない使い捨てのスクリプトで 729 通りを確かめた）
+- 取り出す Markdown は、画面が組み立てる（ADR-15）。会議の内容は、すべて `markdownEscape.ts` を通す。`\` で逃がす記号、文字参照（`&lt;` `&gt;` `&amp;`）にする記号、行頭だけの記号、U+200B で割る `//` と `@`（前後の両方）、`\.` で逃がすドメイン・IP のドット、取り除く向きを変える文字とタグの文字。規則と理由は `docs/record-screen.md`「記号の変換の規則」。`@` の直後だけの U+200B は、linkify がホスト名の一部として読んでリンクにした。U+200B はドメインの文字として読まれるため、ドットには使えない（`www\u200B.example.com` が fuzzyLink でリンクになる）。`\` で逃がした文字は、markdown-it 14.1 以降では別のトークン（`text_special`）になり、linkify が読む前に分かれる（14.1.0 と 15.0.3 で確かめた。それより前の版は未確認）
+- 取り出しの変換の検査は、markdown-it（frontend の dev 依存。15.0.3。linkify-it 6.1.0）で描画する（`test/records/recordMarkdownRendered.test.ts`。設定は `{ html: true, linkify: true }` と、fuzzyLink・fuzzyEmail・fuzzyIP を有効にしたものの 2 つ）。補助に、変換器を使わない規則の検査（`test/records/markdownInertKit.ts`）。規則を変えたときは、別の版（14.1.0）でも、使い捨ての別のフォルダーに入れて確かめた（`npm install markdown-it@14.1.0 --min-release-age=7`。記録の全項目 × 悪意のある内容 109 例 = 981 通りを描画。リンク・画像・`script` と、骨組みに無い見出し・一覧・引用・コード・表が出ないこと）。linkify-it の fuzzy の既定値は版で違うため、テストは明示する
 - ファイル名は「開始日時_タイトル.md」。タイトルは 50 文字（コードポイント）で切る（4 バイトの文字だけでも 255 バイト以内）。名前が日時の数字から始まるため、Windows の予約名にならない
 - 一時的な URL は、クリックの 1 秒後に解放する（`REVOKE_DELAY_MS`）。クリックの直後に解放すると、ダウンロードの開始に間に合わないブラウザーがあるため
 
@@ -248,6 +248,9 @@ output_system/
 - 記録の取得の応答だけを差し替えて、出荷ビルドへ悪意のある内容を入れられる: `page.route('**/api/meetings/crafted', route => route.fulfill({ status: 200, contentType: 'application/json', body }))` のあと `goto('/meetings/crafted')`。データベースに触れない
 - ファイルを書く道具が、`\u2028`・`\u200B` などの書き方を、見えない文字の実体へ変えることがある（向きを変える U+202E も）。書いたあとに `grep -nP '[\p{Cf}\p{Zl}\p{Zp}]' -r src test` で探し、あれば `\uXXXX` に戻す。ESLint の `no-control-regex` は `\x0b` `\u000B` を咎める。`\v` `\f` か `\p{Cc}` を使う
 - jsdom に `URL.createObjectURL` は無い。`test/records/downloadKit.ts` が、読み込み時に 1 度だけ偽物を置く（解放の時計が、次のテストの中で働いても落ちない）。クリックの偽物は `download.reset()` が各テストの前に置き直す
+- frontend の dev 依存に markdown-it を足した（取り出しのテスト専用。画面のコードから import しない。出荷イメージの静的ファイルに含まれないことを確かめた）。型は同梱（`import MarkdownIt, { type MarkdownIt as MarkdownItInstance } from 'markdown-it'`）。npm は `../tools/with-pinned-node.sh npm install -D markdown-it`。markdown-it 15.0.3・linkify-it 6.1.0・mdurl 2.1.0・uc.micro 3.0.0・argparse 3.0.4・punycode.js 2.3.1 を、公開から 7 日以上の版で入れた
+- 本物の変換器で描画するテストは重い（約 2,000 回の描画）。`vi.setConfig({ testTimeout })` で長くしてある。描画した文字の取り出しは、jsdom の DOMParser を使わず、`<…>` を除いて 4 つの文字参照を戻す（DOMParser は 4 倍遅かった）
+- `test/records/recordFixtures.ts`: 取り出しのテストが共通で使う記録の部品と、会議の内容を入れる 9 つの項目（`HOSTILE_FIELDS`）
 
 ## 実装済み機能
 - PBI #2: コンテナの起動、共通の枠と 4 画面の骨組み、`GET /api/health`、配信部、名前付きボリューム 2 つ、自動再起動
@@ -269,4 +272,4 @@ output_system/
 - PBI #119: 「会議の一覧」の画面（S-01。`GET /api/meetings`、開始日時の新しい順、タイトル・開始日時・会議の長さ・状態・「開く」・押せない「削除」、0 件の案内、使い方の流れ、通知での更新）と、ディスクの空きの警告（`GET /api/system/alerts`。「会議の一覧」と「会議の準備」を開いた時点で、空きが 1GB を下回ればお知らせ帯に警告。保存は止めない）
 - PBI #123: 記録を削除できる。`DELETE /api/meetings/{会議番号}`（状態と作成ジョブの確認、2 回に分けた確定、`secure_delete`）、「会議の一覧」と「会議の記録」の削除の確認と操作（取りやめ・お知らせ帯・応答までボタンを押せなくする）
 - PBI #127: 記録をクリップボードへコピーできる。「会議の記録」の要約・質問のまとまりごと・字幕のコピーのボタン、プレーンテキストの文面の組み立て、成功の表示（「コピーしました」）、書き込みを断られたときのお知らせ帯と文面の欄。出荷するコンテナを Chrome で確かめた（`docs/record-screen.md`）。「会議中」の質問のコピーは含まない（質問の領域は PBI 5.5）
-- PBI #130: 記録を Markdown のファイルで取り出せる。「会議の記録」の見出しの領域に「取り出す」（どの状態でも押せる）。押すと、読み込み済みの記録から画面が Markdown の文面（タイトル・開始日時・会議の長さ・要約の 4 項目・質問のまとまり・字幕）とファイル名（`20261019-1430_タイトル.md`）を組み立て、UTF-8（BOM なし）でダウンロードさせる。アプリサーバーへ要求を送らない。会議の内容の記号は、記法として働かない形へ変換する。ダウンロードを始められないときはお知らせ帯の `RECORD_EXPORT_FAILED`。画面の最後に取り出しの案内。出荷するコンテナを Chrome で確かめた（`docs/record-screen.md`「記録の取り出し」）。バックエンドは変えていない
+- PBI #130: 記録を Markdown のファイルで取り出せる。「会議の記録」の見出しの領域に「取り出す」（どの状態でも押せる）。押すと、読み込み済みの記録から画面が Markdown の文面（タイトル・開始日時・会議の長さ・要約の 4 項目・質問のまとまり・字幕）とファイル名（`20261019-1430_タイトル.md`）を組み立て、UTF-8（BOM なし）でダウンロードさせる。アプリサーバーへ要求を送らない。会議の内容の記号は、記法として働かない形へ変換する。ダウンロードを始められないときはお知らせ帯の `RECORD_EXPORT_FAILED`。画面の最後に取り出しの案内。要約作成中・要約失敗では、前の要約であることを 1 行で書く。全体の概要の改行は行末の 2 つの空白で残す。出荷するコンテナを Chrome で確かめた（`docs/record-screen.md`「記録の取り出し」）。バックエンドは変えていない
