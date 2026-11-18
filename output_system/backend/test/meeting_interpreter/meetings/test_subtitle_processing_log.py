@@ -11,7 +11,7 @@ import asyncio
 import json
 import re
 import time
-from collections.abc import Callable, Iterator
+from collections.abc import Awaitable, Callable, Iterator
 from datetime import UTC, datetime, timedelta
 
 import pytest
@@ -27,6 +27,7 @@ from meeting_fakes import (
 )
 from meeting_interpreter.interpreter.protocol import FakeEngineOptions, StageTimings
 from meeting_interpreter.interpreter.protocol import Subtitle as WorkerSubtitle
+from meeting_interpreter.meetings import session as session_module
 from meeting_interpreter.meetings.session import MeetingSession, elapsed_ms
 from meeting_interpreter.records.errors import RecordSaveError
 from meeting_interpreter.records.models import AudioSource, Meeting, MeetingStatus
@@ -87,9 +88,13 @@ class FakeTime:
         self.now = now
         self.seconds = 1000.0
 
-    def advance(self, seconds: float) -> None:
+    def advance(self, seconds: float, *, monotonic_seconds: float | None = None) -> None:
+        """壁時計を seconds 進める。単調増加時計は、指定が無ければ同じだけ、あればその分だけ進める。
+
+        壁時計が単調増加時計より速く進む環境（WSL2 など）を、2 つの値を変えて真似るために使う。
+        """
         self.now += timedelta(seconds=seconds)
-        self.seconds += seconds
+        self.seconds += seconds if monotonic_seconds is None else monotonic_seconds
 
 
 class FakeStore:
@@ -148,12 +153,19 @@ def worker_subtitle(
     )
 
 
-def handle_subtitles(
+def run_session(
     time_source: FakeTime,
     store: FakeStore,
-    arrange: Callable[[MeetingSession, Recorder], list[WorkerSubtitle]],
+    scenario: Callable[[MeetingSession, Recorder], Awaitable[None]],
+    *,
+    started_monotonic: float | None = None,
 ) -> Recorder:
-    """セッションを作り、arrange が返した字幕を順に渡す。通知の記録を返す。"""
+    """セッションを作り、scenario を動かす。通知の記録を返す。
+
+    Args:
+        started_monotonic: 会議を作った時点の単調増加時計の読み。省略すると、セッションを作った
+            時点。
+    """
     recorder = Recorder()
 
     async def run() -> None:
@@ -174,12 +186,26 @@ def handle_subtitles(
             policy=FAST,
             clock=lambda: time_source.now,
             monotonic=lambda: time_source.seconds,
+            started_monotonic=started_monotonic,
         )
-        for subtitle in arrange(session, recorder):
-            await session._handle_subtitle(subtitle)
+        await scenario(session, recorder)
 
     asyncio.run(run())
     return recorder
+
+
+def handle_subtitles(
+    time_source: FakeTime,
+    store: FakeStore,
+    arrange: Callable[[MeetingSession, Recorder], list[WorkerSubtitle]],
+) -> Recorder:
+    """セッションを作り、arrange が返した字幕を順に渡す。通知の記録を返す。"""
+
+    async def scenario(session: MeetingSession, recorder: Recorder) -> None:
+        for subtitle in arrange(session, recorder):
+            await session._handle_subtitle(subtitle)
+
+    return run_session(time_source, store, scenario)
 
 
 class TestElapsedMilliseconds:
@@ -206,6 +232,150 @@ class TestElapsedMilliseconds:
         start = datetime(2026, 11, 18, 1, 0, 0, tzinfo=UTC)
 
         assert elapsed_ms(start, start - timedelta(seconds=1)) == 0.0
+
+
+class TestDelayUsesTheMonotonicClock:
+    """字幕の遅れと最初の字幕までの時間は、単調増加時計の差で求める。
+
+    壁時計は、WSL2 などで、単調増加時計と違う進み方をする（毎分約 2 秒進んだ記録がある）。
+    テストでは、2 つの時計を違う量だけ進めて、その環境を真似る。
+    """
+
+    def test_should_use_the_monotonic_difference_when_the_wall_clock_runs_fast(self, capsys):
+        """
+        【テスト対象】MeetingSession._handle_subtitle（遅れの求め方）
+        【テスト内容】音声が届いたあと、壁時計は 10 秒、単調増加時計は 8 秒進んでから、その音声の
+                    先頭を持つ字幕を送る（保存の 0.25 秒は、2 つの時計とも同じだけ進む）
+        【期待結果】duration_ms が 8000.0（単調増加時計の差）になること。received_at と sent_at は
+                    壁時計の日時のままで、10 秒離れていること（区間の切り分けに使うため）
+        """
+        time_source = FakeTime(STARTED_AT)
+        received = {}
+
+        async def scenario(session, recorder):
+            session.push_audio(b"\x00" * 3200)
+            received["at"] = time_source.now
+            time_source.advance(9.75, monotonic_seconds=7.75)
+            await session._handle_subtitle(worker_subtitle(received["at"]))
+
+        run_session(time_source, FakeStore(time_source), scenario)
+
+        (entry,) = subtitle_logs(log_lines(capsys.readouterr().out))
+        assert entry["duration_ms"] == 8000.0
+        wall = datetime.fromisoformat(entry["sent_at"]) - datetime.fromisoformat(
+            entry["received_at"]
+        )
+        assert wall == timedelta(seconds=10)
+
+    def test_should_use_the_wall_clock_difference_when_the_arrival_is_not_remembered(self, capsys):
+        """
+        【テスト対象】MeetingSession._handle_subtitle（対応が残っていないとき）
+        【テスト内容】音声が届いた記録（push_audio）が無い日時を持つ字幕を、壁時計 10 秒・
+                    単調増加時計 8 秒が進んだあとに送る
+        【期待結果】壁時計の差の 10000.0 になること（対応が無いときだけ、壁時計の差へ戻る）
+        """
+        time_source = FakeTime(STARTED_AT)
+
+        async def scenario(session, recorder):
+            time_source.advance(9.75, monotonic_seconds=7.75)
+            await session._handle_subtitle(worker_subtitle(STARTED_AT))
+
+        run_session(time_source, FakeStore(time_source), scenario)
+
+        (entry,) = subtitle_logs(log_lines(capsys.readouterr().out))
+        assert entry["duration_ms"] == 10000.0
+
+    def test_should_measure_the_first_subtitle_time_with_the_monotonic_clock(self, capsys):
+        """
+        【テスト対象】first_subtitle_ms（単調増加時計）
+        【テスト内容】会議を作った時点（単調増加時計 1000.0 秒）から、壁時計は 9 秒、単調増加時計は
+                    6.5 秒進んで、最初の字幕を送る。そのあと、2 件目の字幕も送る
+        【期待結果】最初の字幕の first_subtitle_ms が 6500.0（単調増加時計の差。壁時計の差は
+                    9000）、
+                    2 件目には付かないこと
+        """
+        time_source = FakeTime(STARTED_AT)
+
+        async def scenario(session, recorder):
+            time_source.advance(8.75, monotonic_seconds=6.25)
+            await session._handle_subtitle(worker_subtitle(STARTED_AT, trace_id="first"))
+            time_source.advance(1.0)
+            await session._handle_subtitle(worker_subtitle(STARTED_AT, trace_id="second"))
+
+        run_session(time_source, FakeStore(time_source), scenario, started_monotonic=1000.0)
+
+        first, second = subtitle_logs(log_lines(capsys.readouterr().out))
+        assert first["first_subtitle_ms"] == 6500.0
+        assert "first_subtitle_ms" not in second
+
+    def test_should_forget_the_arrivals_before_the_subtitle_that_was_just_handled(self):
+        """
+        【テスト対象】MeetingSession の音声が届いた日時の対応（捨て方）
+        【テスト内容】0.1 秒ずつ離れた 3 つの音声を届かせ、2 つ目の日時を持つ字幕を送る
+        【期待結果】1 つ目の対応だけが捨てられ、2 つ目と 3 つ目が残ること
+                    （字幕は発話の区切りの順に届くため、古い対応は使わない）
+        """
+        time_source = FakeTime(STARTED_AT)
+        arrivals: list[datetime] = []
+        kept: list[list[datetime]] = []
+
+        async def scenario(session, recorder):
+            for _ in range(3):
+                session.push_audio(b"\x00" * 3200)
+                arrivals.append(time_source.now)
+                time_source.advance(0.1)
+            await session._handle_subtitle(worker_subtitle(arrivals[1]))
+            kept.append(list(session._arrival_monotonic))
+
+        run_session(time_source, FakeStore(time_source), scenario)
+
+        assert kept == [arrivals[1:]]
+
+    def test_should_keep_the_first_reading_for_the_same_arrival_moment(self):
+        """
+        【テスト対象】MeetingSession の音声が届いた日時の対応（同じ日時）
+        【テスト内容】時計が進まないうちに、音声を 2 回届かせる（単調増加時計は 2 回目に進めておく）
+        【期待結果】最初の読み（1000.0）が残ること
+        """
+        time_source = FakeTime(STARTED_AT)
+        readings: list[float] = []
+
+        async def scenario(session, recorder):
+            session.push_audio(b"\x00" * 3200)
+            time_source.seconds += 0.001  # 壁時計は進まず、単調増加時計だけ進む。
+            session.push_audio(b"\x00" * 3200)
+            readings.extend(session._arrival_monotonic.values())
+
+        run_session(time_source, FakeStore(time_source), scenario)
+
+        assert readings == [1000.0]
+
+    def test_should_drop_the_oldest_arrivals_over_the_limit(self, monkeypatch, capsys):
+        """
+        【テスト対象】MeetingSession の音声が届いた日時の対応（上限）
+        【テスト内容】上限を 3 件にして、5 つの音声を届かせる。いちばん古い日時を持つ字幕を送る
+        【期待結果】新しい 3 件だけが残ること。捨てた日時の字幕は、壁時計の差（10.4 秒）で遅れが
+                    出ること（上限を超えても、遅れの記録は出る）
+        """
+        monkeypatch.setattr(session_module, "MAX_ARRIVAL_RECORDS", 3)
+        time_source = FakeTime(STARTED_AT)
+        arrivals: list[datetime] = []
+        kept: list[list[datetime]] = []
+
+        async def scenario(session, recorder):
+            for _ in range(5):
+                session.push_audio(b"\x00" * 3200)
+                arrivals.append(time_source.now)
+                time_source.advance(0.1)
+            kept.append(list(session._arrival_monotonic))
+            time_source.advance(9.65, monotonic_seconds=7.65)
+            await session._handle_subtitle(worker_subtitle(arrivals[0]))
+
+        run_session(time_source, FakeStore(time_source), scenario)
+
+        assert kept == [arrivals[2:]]
+        (entry,) = subtitle_logs(log_lines(capsys.readouterr().out))
+        assert entry["duration_ms"] == 10400.0
 
 
 class TestSubtitleSentFromTheSession:
@@ -415,7 +585,10 @@ class TestSubtitleSentWithTheWholeApp:
             assert entry["received_at"] == notice["spoken_at"]
             received = datetime.fromisoformat(entry["received_at"])
             sent = datetime.fromisoformat(entry["sent_at"])
-            assert abs((sent - received).total_seconds() * 1000 - entry["duration_ms"]) < 2.0
+            # 遅れは単調増加時計の差、日時は壁時計。2 つの時計の進み方が違う環境（毎分約 2 秒）でも
+            # 収まるよう、壁時計の差との違いは 5% と 5 ミリ秒まで許す。
+            wall_ms = (sent - received).total_seconds() * 1000
+            assert abs(wall_ms - entry["duration_ms"]) < wall_ms * 0.05 + 5.0
             assert entry["duration_ms"] >= entry["transcribe_ms"] + entry["translate_ms"]
             assert entry["transcribe_ms"] >= 150
             assert entry["translate_ms"] >= 100
@@ -428,6 +601,34 @@ class TestSubtitleSentWithTheWholeApp:
         assert [entry["audio_ms"] for entry in entries] == sorted(
             entry["audio_ms"] for entry in entries
         )
+
+    def test_should_find_the_arrival_of_every_subtitle_that_the_worker_returns(
+        self, app_handle, capfd, monkeypatch
+    ):
+        """
+        【テスト対象】通訳ワーカーが返す、先頭の音声が届いた日時（単調増加時計との対応）
+        【テスト内容】本物の別のプロセスの通訳ワーカーで、3 つの発話を字幕にする。字幕の遅れを求める
+                    部分を、対応の表に日時があるかを控える包みに替える
+        【期待結果】3 件とも、ワーカーが返した日時が、アプリサーバーが控えた日時と同じ値で表に残って
+                    いること（壁時計の差へ戻らず、単調増加時計の差で遅れを求められる）
+        """
+        found: list[bool] = []
+        original = MeetingSession._subtitle_delay_ms
+
+        def spy(self, subtitle, sent_at, sent_monotonic):
+            found.append(subtitle.received_at in self._arrival_monotonic)
+            return original(self, subtitle, sent_at, sent_monotonic)
+
+        monkeypatch.setattr(MeetingSession, "_subtitle_delay_ms", spy)
+        events = app_handle.events()
+        meeting_id = start_meeting(app_handle)
+        with app_handle.audio(meeting_id) as audio:
+            for seconds in (1.0, 2.0, 3.0):
+                speak(audio, seconds)
+            events.wait_for_count("subtitle.created", 3)
+        collect_subtitle_logs(capfd, 3)
+
+        assert found == [True, True, True]
 
     def test_should_not_write_the_meeting_content_into_the_subtitle_log(self, app_handle, capfd):
         """

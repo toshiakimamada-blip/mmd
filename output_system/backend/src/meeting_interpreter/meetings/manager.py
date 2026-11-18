@@ -21,6 +21,7 @@
 """
 
 import asyncio
+import time
 from collections.abc import Awaitable, Callable
 from datetime import UTC, datetime
 from typing import Final
@@ -163,6 +164,8 @@ class MeetingManager:
             raise meeting_already_running(self._session.meeting_id if self._session else None)
         self._occupied = True
         try:
+            # 会議を作る直前の単調増加時計の読み。最初の字幕までの時間の起点（会議を作った時点）。
+            started_monotonic = time.monotonic()
             meeting = await self._store.create_meeting(title=checked_title, audio_source=source)
             session = MeetingSession(
                 meeting,
@@ -171,6 +174,7 @@ class MeetingManager:
                 launcher=self._launcher,
                 policy=self._policy,
                 clock=self._clock,
+                started_monotonic=started_monotonic,
                 memory_probe=self._memory_probe,
                 on_meeting_ended=self._on_meeting_ended,
                 on_finished=self._on_session_finished,

@@ -204,7 +204,7 @@ class TestTimeToTheFirstSubtitle:
         【テスト内容】3 つの発話を送って、3 件の字幕を作る
         【期待結果】最初の字幕の記録にだけ first_subtitle_ms が付き、2 件目以降には付かないこと。
                     値は、記録した開始日時（会議を作った時点）から、その字幕を画面へ送った日時までの
-                    時間と 3 ミリ秒以内で一致すること
+                    時間と 5% と 5 ミリ秒以内で一致すること（値は単調増加時計の差）
         """
         events = app_handle.events()
         meeting_id = start_meeting(app_handle)
@@ -221,7 +221,10 @@ class TestTimeToTheFirstSubtitle:
         stored = read_meeting(settings, meeting_id)
         assert stored is not None
         from_creation = parse_moment(sent[0]["sent_at"]) - stored_moment(stored["started_at"])
-        assert abs(from_creation.total_seconds() * 1000 - sent[0]["first_subtitle_ms"]) < 3.0
+        # 値は単調増加時計の差、日時は壁時計。進み方が違う環境（毎分約 2 秒）でも収まるよう、
+        # 違いは 5% と 5 ミリ秒まで許す。
+        wall_ms = from_creation.total_seconds() * 1000
+        assert abs(wall_ms - sent[0]["first_subtitle_ms"]) < wall_ms * 0.05 + 5.0
 
     def test_should_start_counting_when_the_meeting_is_created_not_before(self, app_handle, capfd):
         """

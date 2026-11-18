@@ -228,6 +228,12 @@ class _Served(StrEnum):
 # 出力を読むスレッドが、ワーカーのメッセージを待つ間隔（秒）。止める合図を確かめる間隔でもある。
 _READ_POLL_SECONDS: Final = 0.25
 
+# 音声が届いた日時と、そのときの単調増加時計の読みの対応表に、残す件数の上限。
+# 音声は約 100 ミリ秒ごとに届くため、36,000 件は約 1 時間分（約 5MB）。字幕を送るたびに、その字幕
+# より古い分を捨てるため、ふつうはこの上限に届かない。声が 1 時間以上途切れた会議だけ、古い分から
+# 捨てる。
+MAX_ARRIVAL_RECORDS: Final = 36_000
+
 
 def _iso(moment: datetime) -> str:
     """通知の日時の形。UTC のミリ秒までの文字列。"""
@@ -290,6 +296,7 @@ class MeetingSession:
         policy: SessionPolicy,
         clock: Callable[[], datetime] = lambda: datetime.now(UTC),
         monotonic: Callable[[], float] = time.monotonic,
+        started_monotonic: float | None = None,
         memory_probe: MemoryProbe | None = None,
         on_meeting_ended: Callable[[Meeting], Awaitable[None]] | None = None,
         on_finished: Callable[["MeetingSession"], None] | None = None,
@@ -303,7 +310,11 @@ class MeetingSession:
             launcher: 通訳ワーカーの起動の入口。
             policy: 時間と回数の決め。
             clock: アプリサーバーの時計。音声が届いた日時と、終了日時に使う。
-            monotonic: 単調増加時計（秒）。保存と通知にかかった時間を測る。テストが差し替える。
+            monotonic: 単調増加時計（秒）。字幕の遅れ・最初の字幕までの時間・保存と通知にかかった
+                時間を測る。壁時計は、WSL2 などで単調増加時計と違う進み方をするため、時間の長さは
+                この時計で求める。テストが差し替える。
+            started_monotonic: 会議を作った時点の、単調増加時計の読み。最初の字幕までの時間の起点。
+                省略すると、セッションを作った時点の読み。
             memory_probe: プロセスごとのメモリの使用量を取る部品。省略すると、実際の /proc を読む。
                 会議の終了・中断の記録（process_memory）に使う。
             on_meeting_ended: 会議を終了し、要約作成中になったあとに呼ぶ。作成ジョブ管理部への口。
@@ -319,6 +330,10 @@ class MeetingSession:
         self._policy = policy
         self._clock = clock
         self._monotonic = monotonic
+        self._started_monotonic = monotonic() if started_monotonic is None else started_monotonic
+        # 音声が届いた日時 → そのときの単調増加時計の読み。届いた順に並ぶ。字幕の遅れを、単調増加
+        # 時計の差で求めるために使う（通訳ワーカーは、先頭の音声の届いた日時を、同じ値のまま返す）。
+        self._arrival_monotonic: dict[datetime, float] = {}
         self._memory_probe: MemoryProbe = memory_probe or ProcessMemoryProbe()
         # 会議を閉じる手順で、通訳ワーカーに終了処理を頼む直前に取ったメモリの使用量。
         self._memory_at_close: list[MemoryUsage] | None = None
@@ -421,9 +436,20 @@ class MeetingSession:
         """
         if not self._accepting:
             return False
-        self._audio.append((pcm, self._clock()))
+        received_at = self._clock()
+        self._audio.append((pcm, received_at))
+        self._note_arrival(received_at)
         self._audio_ready.set()
         return True
+
+    def _note_arrival(self, received_at: datetime) -> None:
+        """音声が届いた日時に、そのときの単調増加時計の読みを対応させて控える。
+
+        同じ日時の音声が続けて届いたときは、最初の読みを残す。上限を超えたら、古い分から捨てる。
+        """
+        self._arrival_monotonic.setdefault(received_at, self._monotonic())
+        while len(self._arrival_monotonic) > MAX_ARRIVAL_RECORDS:
+            del self._arrival_monotonic[next(iter(self._arrival_monotonic))]
 
     def notify_capture(self, event: CaptureEvent) -> None:
         """音声の取り込みの知らせを受け取り、受け取り先へ渡す。"""
@@ -815,6 +841,7 @@ class MeetingSession:
         保存に失敗した字幕は、通知しない（画面に出た字幕が、必ず記録に残る）。
         エラーを通知して、会議は続ける。通知したあとで、処理ログ（subtitle_sent）を 1 件出す。
         """
+        self._forget_arrivals_before(subtitle.received_at)
         save_started = self._monotonic()
         try:
             saved = await self._store.add_subtitle(
@@ -837,14 +864,44 @@ class MeetingSession:
                 "spoken_at": _iso(saved.spoken_at),
             },
         )
-        # 画面へ送った時点。字幕が「除く区間」の内か外かは、この日時で決める。
+        # 画面へ送った時点。字幕が「除く区間」の内か外かは、この日時（壁時計）で決める。
+        # 時間の長さ（遅れ・保存と通知）は、同じ時点の単調増加時計の読みで求める。
         sent_at = self._clock()
+        sent_monotonic = self._monotonic()
         self._log_subtitle_sent(
             subtitle,
             saved,
             sent_at=sent_at,
-            save_notify_seconds=self._monotonic() - save_started,
+            sent_monotonic=sent_monotonic,
+            save_notify_seconds=sent_monotonic - save_started,
         )
+
+    def _forget_arrivals_before(self, received_at: datetime) -> None:
+        """この字幕より前に届いた音声の対応を捨てる。
+
+        字幕は、発話の区切りの順に届く。先頭の音声が届いた日時は、あとの字幕ほど新しいため、
+        古い対応は、これから届く字幕には使わない。
+        """
+        arrivals = self._arrival_monotonic
+        while arrivals:
+            oldest = next(iter(arrivals))
+            if oldest >= received_at:
+                break
+            del arrivals[oldest]
+
+    def _subtitle_delay_ms(
+        self, subtitle: WorkerSubtitle, sent_at: datetime, sent_monotonic: float
+    ) -> float:
+        """字幕の遅れ（ミリ秒）。先頭の音声が届いてから、画面へ送るまで。
+
+        音声が届いたときの単調増加時計の読みが残っていれば、単調増加時計の差で求める。壁時計は、
+        環境によって、単調増加時計と違う進み方をする（WSL2 で毎分約 2 秒進んだ記録がある）ため。
+        読みが残っていないとき（上限を超えて捨てた、起動前に届いた）だけ、壁時計の差で求める。
+        """
+        arrived = self._arrival_monotonic.get(subtitle.received_at)
+        if arrived is None:
+            return elapsed_ms(subtitle.received_at, sent_at)
+        return max((sent_monotonic - arrived) * 1000, 0.0)
 
     def _log_subtitle_sent(
         self,
@@ -852,31 +909,37 @@ class MeetingSession:
         saved: SavedSubtitle,
         *,
         sent_at: datetime,
+        sent_monotonic: float,
         save_notify_seconds: float,
     ) -> None:
         """字幕を画面へ送った時点の処理ログ（subtitle_sent）を、字幕 1 件につき 1 行出す。
 
         項目（時間はミリ秒、日時は UTC のミリ秒までの文字列）
-        - duration_ms: 字幕の遅れ。画面へ送った日時 - 先頭の音声が届いた日時
-        - received_at・sent_at: 先頭の音声が届いた日時・画面へ送った日時
+        - duration_ms: 字幕の遅れ。画面へ送るまでの時間 - 先頭の音声が届いてからの時間。
+          単調増加時計の差で求める（_subtitle_delay_ms）
+        - received_at・sent_at: 先頭の音声が届いた日時・画面へ送った日時（壁時計。区間の切り分けに
+          使う）
         - audio_ms・wait_ms・transcribe_ms・translate_ms: 通訳ワーカーが返した段の時間
         - save_notify_ms: 保存と通知の時間（保存を始めてから、通知を送り終えるまで）
         - original_char_count・translated_char_count: 文字数（翻訳に失敗した字幕の訳は 0）
-        - first_subtitle_ms: 会議を作ってから、最初の字幕を画面へ送るまでの時間（最初の 1 行だけ）。
-          起点は会議を作った時点のため、ブラウザーの共有の確認に答えている時間は含まない
+        - first_subtitle_ms: 会議を作ってから、最初の字幕を画面へ送るまでの時間（最初の 1 行だけ。
+          単調増加時計の差）。起点は会議を作った時点のため、ブラウザーの共有の確認に答えている時間は
+          含まない
 
         字幕の本文は渡さない（文字数だけ）。許可リストも、本文が入る形の値を捨てる。
         """
         first_subtitle_ms = None
         if not self._first_subtitle_logged:
             self._first_subtitle_logged = True
-            first_subtitle_ms = round(elapsed_ms(self._meeting.started_at, sent_at), 1)
+            first_subtitle_ms = max(
+                round((sent_monotonic - self._started_monotonic) * 1000, 1), 0.0
+            )
         timings = subtitle.timings
         log_processing(
             "subtitle_sent",
             meeting_id=self.meeting_id,
             trace_id=subtitle.trace_id,
-            duration_ms=round(elapsed_ms(subtitle.received_at, sent_at), 1),
+            duration_ms=round(self._subtitle_delay_ms(subtitle, sent_at, sent_monotonic), 1),
             received_at=_iso(subtitle.received_at),
             sent_at=_iso(sent_at),
             audio_ms=_rounded_ms(subtitle.audio_seconds),
