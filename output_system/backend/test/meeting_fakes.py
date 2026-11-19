@@ -7,6 +7,7 @@
 """
 
 import asyncio
+import dataclasses
 import http.client
 import json
 import socket
@@ -41,6 +42,7 @@ FAST = SessionPolicy(
     flush_timeout_seconds=15.0,
     finish_idle_seconds=30.0,
     audio_connect_timeout_seconds=600.0,
+    subtitle_delay_target_seconds=10.0,
 )
 
 # 固まったワーカーを確かめるための、短い決め。
@@ -52,6 +54,7 @@ IMPATIENT = SessionPolicy(
     flush_timeout_seconds=1.0,
     finish_idle_seconds=1.0,
     audio_connect_timeout_seconds=600.0,
+    subtitle_delay_target_seconds=10.0,
     finish_write_timeout_seconds=0.5,
     stop_timeout_seconds=0.5,
 )
@@ -72,6 +75,7 @@ class FakeEngineLauncher:
         fake_for_attempt: Callable[[int], FakeEngineOptions] | None = None,
         client_class: type[InterpreterClient] = InterpreterClient,
         client_for_attempt: Callable[[int], InterpreterClient] | None = None,
+        silence_wait_seconds: float | None = None,
     ) -> None:
         """
         Args:
@@ -81,8 +85,14 @@ class FakeEngineLauncher:
             client_class: ワーカーのクライアントの型。振る舞いを変えたい子クラスを渡せる。
             client_for_attempt: 起動の回（1 から数える）を受け取り、クライアントを返す。
                 回ごとに、別のワーカー（壊れた出力を返すものなど）を使うために使う。
+            silence_wait_seconds: 無音を知らせるまでの秒数。省略すると調整値のまま。無音の待機を、
+                短い音声で確かめるために使う。
         """
         self._worker_settings = InterpreterSettings.from_tuning(settings.tuning)
+        if silence_wait_seconds is not None:
+            self._worker_settings = dataclasses.replace(
+                self._worker_settings, silence_wait_seconds=silence_wait_seconds
+            )
         self._fake_for_attempt = fake_for_attempt or (lambda attempt: FakeEngineOptions())
         self._client_class = client_class
         self._client_for_attempt = client_for_attempt

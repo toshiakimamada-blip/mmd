@@ -39,6 +39,7 @@ from ..jobs.summary_requests import SummaryRequests
 from ..logs.events import format_timestamp
 from ..meetings.errors import meeting_not_found
 from ..meetings.manager import MeetingManager
+from ..meetings.subtitle_status import SubtitleStatus
 from ..records.models import Meeting, MeetingRecord, QuestionSet, Subtitle, Summary
 
 router = APIRouter(tags=["meetings"])
@@ -223,6 +224,36 @@ async def list_subtitles(meeting_id: MeetingId, request: Request) -> SubtitleLis
     """
     subtitles = await _manager(request).list_subtitles(meeting_id)
     return SubtitleListResponse(subtitles=[to_subtitle_response(item) for item in subtitles])
+
+
+class LiveStatusResponse(BaseModel):
+    """進行中の会議の、「会議中」の画面が読む状況と、画面が判定に使う調整値。"""
+
+    # 字幕の状況。通知 subtitle_status.changed の status と同じ値。保存しない（アプリを起動し直すと
+    # 初期値へ戻る）。
+    subtitle_status: SubtitleStatus
+    # 会議の長さの警告を出す経過時間（秒）。調整値 meeting_length_warning_seconds。画面が、会議の
+    # 開始日時からの経過時間と比べて判定する。超えても、会議は止めない。
+    meeting_length_warning_seconds: int
+
+
+@router.get("/meetings/{meeting_id}/live-status", response_model=LiveStatusResponse)
+async def get_live_status(meeting_id: MeetingId, request: Request) -> LiveStatusResponse:
+    """進行中の会議の、いまの字幕の状況を返す。
+
+    「会議中」の画面が、開いた時点で呼ぶ。会議の開始の直後に出た状況の通知は、画面が購読する前に
+    届くことがあるため、通知を待たずに、現在の状況を読む。変化は、通知で受け取る。
+    あわせて、会議の長さの警告を出す経過時間（調整値）を返す。画面は、画面を開き直したときも、
+    経過時間から判定して警告を出す。
+
+    Raises:
+        BusinessAppError: その会議が進行中でないとき（MEETING_NOT_RUNNING、409）。
+    """
+    status = _manager(request).subtitle_status_of(meeting_id)
+    return LiveStatusResponse(
+        subtitle_status=status,
+        meeting_length_warning_seconds=request.app.state.settings.tuning.meeting_length_warning_seconds,
+    )
 
 
 class JobResponse(BaseModel):

@@ -19,7 +19,7 @@
 
 import asyncio
 import json
-from collections.abc import Mapping
+from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass, field
 from typing import Final
 
@@ -29,6 +29,10 @@ from starlette.websockets import WebSocket, WebSocketDisconnect, WebSocketState
 # 字幕は数秒に 1 件。入手の進み具合は 0.25 秒に 1 件。読まずに 1,000 件たまる画面は、
 # 止まっている。
 DEFAULT_QUEUE_LIMIT: Final = 1000
+
+# 新しく接続した画面へ、最初に送る通知を返す関数の型。通知の名前と項目の組を、送る順に返す。
+# 画面は、つなぎ直すたびに、この通知で現在の状況を知る（切れている間の変化を取りこぼさないため）。
+InitialNotices = Callable[[], Iterable[tuple[str, Mapping[str, object]]]]
 
 # 画面が自分で切ったあとに、こちらも閉じるときの符号。1000: 正常な終了。
 _CLOSE_NORMAL: Final = 1000
@@ -58,8 +62,20 @@ class _Screen:
 class NotificationHub:
     """通知部。開いている画面すべてへ、通知を同じ順で送る。"""
 
-    def __init__(self, *, queue_limit: int = DEFAULT_QUEUE_LIMIT) -> None:
+    def __init__(
+        self,
+        *,
+        queue_limit: int = DEFAULT_QUEUE_LIMIT,
+        initial_notices: InitialNotices | None = None,
+    ) -> None:
+        """
+        Args:
+            queue_limit: 画面 1 つあたりの、送り待ちの通知の上限。
+            initial_notices: 新しく接続した画面へ、最初に送る通知を返す関数（字幕の状況など）。
+                省略すると、最初の通知は送らない。イベントループの上で呼ぶ。
+        """
         self._queue_limit = queue_limit
+        self._initial_notices = initial_notices
         self._screens: set[_Screen] = set()
         self._closing = False
 
@@ -80,7 +96,7 @@ class NotificationHub:
         """
         if not self._screens:
             return
-        text = json.dumps({**payload, "type": name}, ensure_ascii=False, separators=(",", ":"))
+        text = _encode(name, payload)
         for screen in tuple(self._screens):
             try:
                 screen.queue.put_nowait(text)
@@ -94,6 +110,11 @@ class NotificationHub:
             await _close_quietly(websocket, _CLOSE_GOING_AWAY)
             return
         screen = _Screen(queue=asyncio.Queue(maxsize=self._queue_limit))
+        # 現在の状況を、待ち行列の先頭に置く。登録は、このあと待たずに行う。そのため、これ以降の
+        # 通知は、必ず現在の状況のあとに届く（現在の状況と、その後の変化が、前後しない）。
+        if self._initial_notices is not None:
+            for name, payload in self._initial_notices():
+                screen.queue.put_nowait(_encode(name, payload))
         self._screens.add(screen)
         receiver = asyncio.create_task(_discard_incoming(websocket), name="events-receive")
         sender = asyncio.create_task(self._send_loop(websocket, screen), name="events-send")
@@ -129,6 +150,11 @@ class NotificationHub:
         self._closing = True
         for screen in tuple(self._screens):
             screen.close_with(_CLOSE_GOING_AWAY)
+
+
+def _encode(name: str, payload: Mapping[str, object]) -> str:
+    """通知を、JSON の文字列にする。`type` の項目は、名前で上書きする。"""
+    return json.dumps({**payload, "type": name}, ensure_ascii=False, separators=(",", ":"))
 
 
 async def _discard_incoming(websocket: WebSocket) -> None:

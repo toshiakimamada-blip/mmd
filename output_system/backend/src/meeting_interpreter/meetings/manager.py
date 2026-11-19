@@ -38,6 +38,7 @@ from .errors import (
     meeting_delete_not_allowed,
     meeting_has_active_job,
     meeting_not_found,
+    meeting_not_running,
     model_not_ready,
 )
 from .inputs import normalize_title, parse_audio_source
@@ -51,6 +52,7 @@ from .session import (
     SessionPolicy,
     error_payload,
 )
+from .subtitle_status import SubtitleStatus
 from .transitions import Trigger, allows, resolve_transition
 from .workers import InterpreterLauncher
 
@@ -131,6 +133,17 @@ class MeetingManager:
     def active_session(self) -> MeetingSession | None:
         """進行中のセッション。無ければ None。"""
         return self._session
+
+    def subtitle_status_of(self, meeting_id: str) -> SubtitleStatus:
+        """進行中の会議の、いまの字幕の状況を返す。「会議中」の画面が、開いた時点で読む。
+
+        Raises:
+            BusinessAppError: その会議が進行中でないとき（MEETING_NOT_RUNNING）。
+        """
+        session = self._session
+        if session is None or session.meeting_id != meeting_id:
+            raise meeting_not_running(meeting_id)
+        return session.subtitle_status
 
     def subscribe_capture_events(self, listener: Callable[[str, CaptureEvent], None]) -> None:
         """音声の取り込みの知らせ（capture.stopped・capture.resumed）の受け取り先を足す。

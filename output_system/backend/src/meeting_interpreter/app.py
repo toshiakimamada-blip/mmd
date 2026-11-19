@@ -184,6 +184,13 @@ async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
         await database.close()
 
 
+def _initial_notices(app: FastAPI) -> list[tuple[str, dict[str, object]]]:
+    """新しく接続した画面へ、最初に送る通知。進行中の会議があれば、その字幕の状況を返す。"""
+    manager: MeetingManager | None = getattr(app.state, "meeting_manager", None)
+    session = None if manager is None else manager.active_session
+    return [] if session is None else [session.subtitle_status_notice()]
+
+
 def create_app(
     settings: Settings,
     *,
@@ -235,7 +242,8 @@ def create_app(
     )
     app.state.settings = settings
     # 通知部。AI モデルの準備状況も、会議の字幕も、この 1 つから画面へ送る。
-    notification_hub = NotificationHub()
+    # 新しく接続した画面へは、進行中の会議の字幕の状況を最初に送る。
+    notification_hub = NotificationHub(initial_notices=lambda: _initial_notices(app))
     app.state.notification_hub = notification_hub
     app.state.model_manager = model_manager or build_model_manager(
         settings, notifier=notification_hub

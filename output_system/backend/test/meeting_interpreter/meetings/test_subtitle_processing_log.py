@@ -7,17 +7,15 @@
 - 結合: 偽のエンジンで動く本物の別のプロセスと、本物の uvicorn で、会議を 1 回動かして確かめる
 """
 
-import asyncio
 import json
 import re
 import time
-from collections.abc import Awaitable, Callable, Iterator
+from collections.abc import Callable, Iterator
 from datetime import UTC, datetime, timedelta
 
 import pytest
 
 from meeting_fakes import (
-    FAST,
     AppHandle,
     FakeEngineLauncher,
     make_app,
@@ -25,22 +23,27 @@ from meeting_fakes import (
     speak,
     start_meeting,
 )
-from meeting_interpreter.interpreter.protocol import FakeEngineOptions, StageTimings
+from meeting_interpreter.interpreter.protocol import FakeEngineOptions
 from meeting_interpreter.interpreter.protocol import Subtitle as WorkerSubtitle
 from meeting_interpreter.meetings import session as session_module
 from meeting_interpreter.meetings.session import MeetingSession, elapsed_ms
-from meeting_interpreter.records.errors import RecordSaveError
-from meeting_interpreter.records.models import AudioSource, Meeting, MeetingStatus
-from meeting_interpreter.records.models import Subtitle as SavedSubtitle
 from meeting_interpreter.settings import Settings
+from session_fakes import (
+    ENGLISH,
+    JAPANESE,
+    STARTED_AT,
+    TITLE,
+    FakeStore,
+    FakeTime,
+    Recorder,
+    run_session,
+    worker_subtitle,
+)
 
 # 日時は UTC のミリ秒まで。例: 2026-10-20T01:23:45.678Z
 MOMENT = re.compile(r"\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d\.\d{3}Z")
 
 # 会議の内容にあたるもの。ログのどこにも現れてはならない。
-ENGLISH = "We agreed to ship the budget plan to Tanaka-san next Friday."
-JAPANESE = "予算案を来週の金曜日に田中さんへ送ることで合意しました。"
-TITLE = "極秘の人事会議ZZ"
 
 # 字幕の記録が持つ項目。これ以外の項目は出ない。
 SUBTITLE_LOG_KEYS = {
@@ -65,8 +68,6 @@ SUBTITLE_LOG_KEYS = {
     "first_subtitle_ms",
 }
 
-STARTED_AT = datetime(2026, 11, 18, 1, 0, 0, tzinfo=UTC)
-
 
 def log_lines(output: str) -> list[dict]:
     """標準出力の行のうち、アプリのログ（JSON 1 行）を読む。"""
@@ -79,119 +80,6 @@ def subtitle_logs(lines: list[dict]) -> list[dict]:
 
 
 # --- 単体: 時計を差し替えたセッション -----------------------------------------------------
-
-
-class FakeTime:
-    """進められる時計。壁時計（datetime）と単調増加時計（秒）を、いっしょに進める。"""
-
-    def __init__(self, now: datetime) -> None:
-        self.now = now
-        self.seconds = 1000.0
-
-    def advance(self, seconds: float, *, monotonic_seconds: float | None = None) -> None:
-        """壁時計を seconds 進める。単調増加時計は、指定が無ければ同じだけ、あればその分だけ進める。
-
-        壁時計が単調増加時計より速く進む環境（WSL2 など）を、2 つの値を変えて真似るために使う。
-        """
-        self.now += timedelta(seconds=seconds)
-        self.seconds += seconds if monotonic_seconds is None else monotonic_seconds
-
-
-class FakeStore:
-    """字幕を保存する偽の記録保存部。保存にかかる時間を、偽の時計を進めて表す。"""
-
-    def __init__(self, time_source: FakeTime, *, save_seconds: float = 0.25) -> None:
-        self._time = time_source
-        self._save_seconds = save_seconds
-        self.fail_next = False
-        self.saved: list[SavedSubtitle] = []
-
-    async def add_subtitle(
-        self,
-        meeting_id: str,
-        *,
-        original_text: str,
-        translated_text: str | None,
-        spoken_at: datetime,
-    ) -> SavedSubtitle:
-        if self.fail_next:
-            self.fail_next = False
-            raise RecordSaveError()
-        self._time.advance(self._save_seconds)
-        saved = SavedSubtitle(
-            meeting_id, len(self.saved) + 1, original_text, translated_text, spoken_at
-        )
-        self.saved.append(saved)
-        return saved
-
-
-class Recorder:
-    """通知の送り先の偽物。送られた通知を控える。"""
-
-    def __init__(self) -> None:
-        self.published: list[tuple[str, dict]] = []
-
-    def publish(self, name: str, payload) -> None:
-        self.published.append((name, dict(payload)))
-
-
-def worker_subtitle(
-    received_at: datetime,
-    *,
-    english: str = ENGLISH,
-    japanese: str | None = JAPANESE,
-    trace_id: str = "0123456789abcdef",
-) -> WorkerSubtitle:
-    """通訳ワーカーが返す字幕の見本。段の時間は 待ち 0.12・文字起こし 2.1・翻訳 0.31 秒。"""
-    return WorkerSubtitle(
-        english=english,
-        japanese=japanese,
-        received_at=received_at,
-        timings=StageTimings(wait_seconds=0.12, transcribe_seconds=2.1, translate_seconds=0.31),
-        audio_seconds=3.0,
-        trace_id=trace_id,
-    )
-
-
-def run_session(
-    time_source: FakeTime,
-    store: FakeStore,
-    scenario: Callable[[MeetingSession, Recorder], Awaitable[None]],
-    *,
-    started_monotonic: float | None = None,
-) -> Recorder:
-    """セッションを作り、scenario を動かす。通知の記録を返す。
-
-    Args:
-        started_monotonic: 会議を作った時点の単調増加時計の読み。省略すると、セッションを作った
-            時点。
-    """
-    recorder = Recorder()
-
-    async def run() -> None:
-        meeting = Meeting(
-            meeting_id="m-001",
-            title=TITLE,
-            started_at=STARTED_AT,
-            ended_at=None,
-            audio_source=AudioSource.SYSTEM_AUDIO,
-            status=MeetingStatus.INTERPRETING,
-            summary_failure_reason=None,
-        )
-        session = MeetingSession(
-            meeting,
-            store=store,  # type: ignore[arg-type]
-            publisher=recorder,
-            launcher=object(),  # type: ignore[arg-type]
-            policy=FAST,
-            clock=lambda: time_source.now,
-            monotonic=lambda: time_source.seconds,
-            started_monotonic=started_monotonic,
-        )
-        await scenario(session, recorder)
-
-    asyncio.run(run())
-    return recorder
 
 
 def handle_subtitles(

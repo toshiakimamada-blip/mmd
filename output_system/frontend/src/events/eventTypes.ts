@@ -8,12 +8,13 @@
  *
  * 通知の種類を足すには、AppEvent に型を足し、parseAppEvent の switch に読み替えを足す。
  * 通知部が送る通知の一覧は、output_system/docs/meetings.md の「通知」にある。
- * 使われない通知の型は、使う作業で足す。いまは subtitle.created・model.status_changed・
- * meeting.state_changed・job.status_changed・job.progress_changed。
+ * 使われない通知の型は、使う作業で足す。いまは subtitle.created・subtitle_status.changed・
+ * model.status_changed・meeting.state_changed・job.status_changed・job.progress_changed。
  */
 
 import { parseModelStatus, type ModelStatus } from '../models/modelStatus';
 import { isMeetingStatus, parseRecordJob, type MeetingStatus, type RecordJob } from '../records/recordTypes';
+import { isSubtitleStatus, type SubtitleStatus } from '../subtitles/subtitleStatus';
 import { parseSubtitle, type Subtitle } from '../subtitles/subtitleTypes';
 
 /** 字幕の保存が確定したときの通知。 */
@@ -22,6 +23,17 @@ export interface SubtitleCreatedEvent {
   /** 字幕が属する会議。画面は、表示している会議の通知だけを使う。 */
   readonly meetingId: string;
   readonly subtitle: Subtitle;
+}
+
+/**
+ * 字幕の状況（開始準備中・正常・遅れ・無音の待機・取り込み停止）が変わったときの通知。
+ * 新しく接続した画面へは、現在の状況が、最初に 1 件届く（つなぎ直したときも）。
+ */
+export interface SubtitleStatusChangedEvent {
+  readonly type: 'subtitle_status.changed';
+  /** 状況が変わった会議。画面は、表示している会議の通知だけを使う。 */
+  readonly meetingId: string;
+  readonly status: SubtitleStatus;
 }
 
 /** AI モデルの準備状況が変わったときの通知。項目は、準備状況の取得（GET /api/models/status）と同じ。 */
@@ -55,6 +67,7 @@ export interface JobProgressChangedEvent {
 /** 画面が受け取る通知。type で見分ける。 */
 export type AppEvent =
   | SubtitleCreatedEvent
+  | SubtitleStatusChangedEvent
   | ModelStatusChangedEvent
   | MeetingStateChangedEvent
   | JobStatusChangedEvent
@@ -90,6 +103,16 @@ export function parseAppEvent(text: string): AppEvent | null {
         return null;
       }
       return { type: 'subtitle.created', meetingId: record.meeting_id, subtitle };
+    }
+    case 'subtitle_status.changed': {
+      if (
+        typeof record.meeting_id !== 'string' ||
+        record.meeting_id === '' ||
+        !isSubtitleStatus(record.status)
+      ) {
+        return null;
+      }
+      return { type: 'subtitle_status.changed', meetingId: record.meeting_id, status: record.status };
     }
     case 'model.status_changed': {
       const status = parseModelStatus(record);

@@ -39,7 +39,7 @@ output_system/
 │   │   ├── models/           # モデル管理部。definition.py（定義の検証）、store.py（置き場・一致の確認）、download.py（唯一の外向きの通信）、hosts.py（通信を許すホスト）、fetch.py（確認→入手の流れ）、manager.py（準備状況）、failure.py（失敗の原因）
 │   │   │   └── conversion/   # 翻訳モデルの変換。アプリサーバー側: service.py（管理部への口）・process.py（起動と見届け）・receipt.py（控えと判定）・layout.py・protocol.py。変換プロセス側: worker.py・network_guard.py・sandbox.py・safe_torch.py
 │   │   ├── meetings/         # 会議管理部。transitions.py（遷移規則の表）、manager.py（開始・終了の窓口、進行中は 1 件）、session.py（会議 1 件の音声・字幕・終了・中断・ワーカーの起動し直し）、inputs.py、errors.py、workers.py（ワーカーの起動の入口。テストは偽のエンジンを渡す）。使い方は docs/meetings.md
-│   │   ├── notify/hub.py     # 通知部（/ws/events）
+│   │   ├── notify/hub.py     # 通知部（/ws/events）。`initial_notices` で、新しく接続した画面へ最初に送る通知（進行中の会議の字幕の状況）を渡す
 │   │   └── api/{health,models,meetings,system,ws}.py  # GET /api/system/alerts（ディスクの空きの警告。records/disk_space.py の DiskSpaceMonitor が判定）、/api/health、/api/models/*、POST /api/meetings と /end と /summary、GET /api/meetings/{会議番号}/subtitles、/ws/audio/{会議番号} と /ws/events
 │   └── test/                 # src と同じ構造。test/container/ は起動したコンテナを相手にする（MMD_CONTAINER_URL のときだけ動く）。test/browser/ はブラウザーで手動で確かめる確認用のサーバー（pytest は集めない）。test/distribution_server.py（擬似の配布元、HTTPS）と test/model_fakes.py（小さな定義・偽の入手の部品）と test/interpreter_audio.py（合成音声・音声ファイルの読み込み）は共通の道具。test/measure/measure_interpreter.py は、本物のモデルで字幕の遅れとメモリを測る道具、test/measure/measure_generation.py は、生成ワーカーの作成時間とメモリを測る道具（どちらも pytest は集めない）。test/meeting_fakes.py は会議管理部のテストの道具（偽のエンジンの入口、本物の uvicorn を起動する running_app、記録の読み取り）。test/generation_fakes.py（偽の文章生成）と test/meeting_subtitles.py（英語の会議の字幕の見本。測定と動作確認用）も共通の道具。test/meeting_fakes.py の `make_app` は、会議の終了で要約を始める呼び出し（`on_meeting_ended`）を、既定では何もしないものにする（本番の組み立てで確かめるテストは `on_meeting_ended=None` と `generation_launcher=InProcessLauncher()` を渡す）。test/job_fakes.py は作成ジョブ管理部のテストの道具（同じプロセスで動かす偽の生成ワーカー `InProcessLauncher`、別のプロセスで動かす `ProcessLauncher`、ブロックの区切りで止める位置を決める `BlockGate`）
 ├── frontend/
@@ -47,7 +47,7 @@ output_system/
 │   ├── src/events/           # 通知の受信と再接続。EventConnection.ts（/ws/events への接続・つなぎ直し）、EventsProvider.tsx（useEvent・useReloadOnConnect。AppFrame が置く）、eventTypes.ts（通知の型と読み替え）。使い方は docs/events.md
 │   ├── src/{api,meetings,subtitles}/ # api: apiClient.ts（ApiError・requestJson）と meetingsApi.ts。meetings: liveMeeting.ts（「会議中」が受け取る会議）・経過時間。subtitles: 字幕の型・mergeSubtitles・useMeetingSubtitles・formatClockTime
 │   ├── src/screens/prepare/ + src/meetings/ + src/models/ # 「会議の準備」: PrepareForm（入力・二度押しの防止）・PrepareGuidance・ModelStatusPanel。meetings/: meetingInput.ts（検査）・startMeeting.ts（開始の流れ）・MeetingCaptureProvider.tsx（取り込みの預け先）・guidanceTexts.ts（案内の文言を集めた 1 か所）。models/: modelStatus.ts・useModelStatus.ts。docs/prepare-screen.md
-│   ├── src/screens/live/ + src/components/subtitles/ # 「会議中」の中身と字幕の行・一覧・追いかける領域（SubtitleRow は「会議の記録」でも使い回す）。docs/live-screen.md
+│   ├── src/screens/live/ + src/components/subtitles/ # 「会議中」の中身と字幕の行・一覧・追いかける領域（SubtitleRow は「会議の記録」でも使い回す）。docs/live-screen.md。字幕の状況は `SubtitleStatusFact.tsx`（文字・アイコン・色）、状況の保持は `src/meetings/useLiveStatus.ts`（開いた時点の取得 + 通知）
 │   ├── src/screens/record/ + src/records/ + src/components/questions/ # 「会議の記録」: MeetingRecordView（領域の組み立て）・RecordHeader・SummaryRegion/SummaryContent/SummaryProgress・QuestionRegion・SubtitleRegion。records/: recordTypes.ts（`GET /api/meetings/{会議番号}` の応答の検査と読み替え）・recordView.ts（状態別の表示と操作の表。純粋な関数）・useMeetingRecord.ts（読み込みと通知での更新）・useSummaryRequest.ts（要約の依頼）・summaryLines.ts・jobTexts.ts・formatDateTime.ts。QuestionSetList は「会議中」でも使い回す。取り出し（F-13）: records/recordMarkdown.ts（Markdown の文面）・markdownEscape.ts（記号の変換）・exportFileName.ts（ファイル名）・downloadTextFile.ts（Blob とアンカーでのダウンロード）・useRecordExport.ts（失敗のお知らせ）、screens/record/ExportGuide.tsx（案内）。docs/record-screen.md
 │   ├── src/screens/list/ + src/records/useMeetingList.ts + src/system/ # 「会議の一覧」: MeetingListBody（読み込み中・失敗・0 件・行の並び）・MeetingRow（行の項目と「開く」「削除」）・UsageFlow（使い方の流れ）。useMeetingList は読み込みと通知での更新。system/: useDiskSpaceWarning（開いた時点でディスクの空きを聞き、お知らせ帯に警告。一覧と準備が使う）・systemAlerts.ts（応答の読み替え）。api/systemApi.ts。docs/list-screen.md
 │   ├── scripts/              # ビルドした dist/ に外部の URL への参照が無いかの検査（npm run build の最後に走る）
@@ -174,6 +174,11 @@ output_system/
 - メモリは `/proc/<番号>/status` の `VmRSS`・`VmHWM`（MB は 1,048,576 バイト）。ワーカーは「アプリサーバーの子で、引数が `-m <WORKER_MODULE>` のもの」で見つける（番号を会議管理部・作成ジョブ管理部から受け渡さない。変換プロセスは番号を公開していないため）。**通訳ワーカーは終了処理のあと自分で終わるため、会議の終了の値は、終了処理を頼む直前（`_PumpIdle`）に取る**（閉じる時点では読めない）。ワーカーが起動できなかった・固まったときは、閉じる時点の値を出す。`psutil` は入れていない。コンテナ全体は cgroup の `memory.current`（ファイルのキャッシュを含む）
 - 集計コマンドは、字幕の遅れの判定から除く区間の規則を適用しない（出力の先頭に書く）。区間の規則の適用と作成時間の集計は Epic 8（Task 8.1.1・8.1.2）。95 パーセンタイルは最近順位法、10 秒を超えた件数は「10 秒より長い」
 
+- 字幕の状況（PBI #80）は、`meetings/subtitle_status.py` の `SubtitleStatusTracker`（時計も通知も持たない状態機械）が規則を 1 か所で持ち、`session.py` が値を渡して、変わったときだけ `subtitle_status.changed` を送る。規則と図は docs/meetings.md「字幕の状況」。遅れの値は処理ログと同じ `_subtitle_delay_ms`（単調増加時計）を 1 回だけ求めて、ログと状況の両方に使う
+- 遅れから戻る条件にはすき間を持たせる（待つ音声が 0 で、直近の字幕の遅れが目標以内）。無音の知らせを受けたときは、直近の字幕の遅れを忘れる（声が止まると次の字幕が来ず、遅れから戻れなくなるため）。遅れと無音の待機が重なるときは、遅れを優先（待つ音声がある間は字幕がこれから出る）。取り込み停止（`capture_stopped`）は、値だけを持ち、切り替えは PBI 4.3 が足す（`notify_capture` と `add_capture_listener` は既にある）
+- 声が戻った知らせ `SpeechResumed`（通訳ワーカー → 親）を足した。無音の知らせのあと最初の発話の区切りができた時点で 1 回送る（字幕を待たない。短い物音は区切りにならず送らない）。字幕が出ない区切り（幻覚の除外など）でも、無音の待機を終えられる
+- 「会議中」の画面は、開いた時点で `GET /api/meetings/{会議番号}/live-status`（字幕の状況と、会議の長さの警告の経過時間 = 調整値）を読み、変化は通知で受ける。通知を受けたあとの応答の状況は捨てる。つなぎ直しは、サーバーが接続のたびに最初に送る現在の状況（`NotificationHub(initial_notices=...)`）で直る。2 時間の警告は画面が判定し、`useWarning`（閉じられない）で会議の終了（画面を離れる）まで残す
+
 ## はまりポイント
 - `.gitignore` の `tools/`（gaido 管理）が `output_system/tools/` にも当たる。`!/output_system/tools/` で打ち消している
 - 環境変数 `COMPOSE_PROJECT_NAME` が設定済みのため、compose の `name:` は効かない。ボリュームは `name:` で固定名にしている
@@ -259,6 +264,11 @@ output_system/
 - `.gitignore` の `tools/` は `output_system/backend/test/tools/` にも当たる（`!/output_system/tools/` だけを打ち消している）。集計コマンドのテストは `backend/test/measurement_tools/` に置く
 - 全体のテストを走らせると、`test_job_manager_wait_reason.py::test_should_say_why_a_postponed_summary_waits` が 14 回に 1 回ほど落ちる（変更前の main のソースでも同じ。再実行で通る）。ほかのテストが起動した生成ワーカーが、pytest のプロセスの子として残ることがあり、メモリの記録の結合テストは、生成ワーカーの行が無いことを前提にしない
 
+- 無音の待機を実機で確かめるとき、会議の終了のあとに自動で始まる要約（約 1〜2 分）が走っていると、通訳ワーカーのモデルの読み込みが競合し、開始準備中が十数秒続いて、無音の待機を観測できない。直前の会議の要約が終わってから確かめる。開始準備中の画面は、通訳ワーカーを `kill -9` し、起動し直された新しいワーカーを `kill -STOP` で止めると、固定して撮れる（`kill -CONT` で戻る）
+- 実機の確認で調整値を小さくするには、リポジトリの外の上書きファイルの `environment`（マップ形式）に `MMD_TUNING_*` を書き、`docker compose -f docker-compose.yml -f <上書き> up -d` で起動し直す。下限: `subtitle_delay_target_seconds` は 1、`meeting_length_warning_seconds` は 60、`silence_wait_seconds` は 1
+- 画面のテストで時計をモックする（`vi.useFakeTimers`）と、`userEvent` の待ち時間が進まずタイムアウトする。操作は `fireEvent` を使う（`MeetingLiveLength.test.tsx`）
+- 会議のセッションを偽の時計・偽の記録保存部で動かす部品は `backend/test/session_fakes.py`（`FakeTime`・`FakeStore`・`Recorder`・`run_session`）。`SessionPolicy` を直接作るテストは、必須の項目（`subtitle_delay_target_seconds`）を足す（`meeting_fakes.py` の `FAST`・`IMPATIENT`）
+
 ## 実装済み機能
 - PBI #2: コンテナの起動、共通の枠と 4 画面の骨組み、`GET /api/health`、配信部、名前付きボリューム 2 つ、自動再起動
 - PBI #7: 設定の読み込み（環境変数と調整値）、3 種類のログ（標準出力・許可リスト）、共通のエラーの形（サーバーと画面）、お知らせ帯・7 つのエラー表示パターン・確認の表示の部品、対応していないブラウザーの案内
@@ -281,3 +291,4 @@ output_system/
 - PBI #127: 記録をクリップボードへコピーできる。「会議の記録」の要約・質問のまとまりごと・字幕のコピーのボタン、プレーンテキストの文面の組み立て、成功の表示（「コピーしました」）、書き込みを断られたときのお知らせ帯と文面の欄。出荷するコンテナを Chrome で確かめた（`docs/record-screen.md`）。「会議中」の質問のコピーは含まない（質問の領域は PBI 5.5）
 - PBI #130: 記録を Markdown のファイルで取り出せる。「会議の記録」の見出しの領域に「取り出す」（どの状態でも押せる）。押すと、読み込み済みの記録から画面が Markdown の文面（タイトル・開始日時・会議の長さ・要約の 4 項目・質問のまとまり・字幕）とファイル名（`20261019-1430_タイトル.md`）を組み立て、UTF-8（BOM なし）でダウンロードさせる。アプリサーバーへ要求を送らない。会議の内容の記号は、記法として働かない形へ変換する。ダウンロードを始められないときはお知らせ帯の `RECORD_EXPORT_FAILED`。画面の最後に取り出しの案内。要約作成中・要約失敗では、前の要約であることを 1 行で書く。全体の概要の改行は行末の 2 つの空白で残す。出荷するコンテナを Chrome で確かめた（`docs/record-screen.md`「記録の取り出し」）。バックエンドは変えていない
 - PBI #74: 字幕の遅れと会議開始の待ち時間を測り、集計できる。字幕ごとの処理ログ（遅れ・段ごとの時間・文字数・日時）、会議の開始・終了・中断と最初の字幕までの時間、会議の終了・中断と作成ジョブの終了の時点のプロセスごとのメモリの使用量（作成ジョブの終了時の記録は PBI 5.1 の Task 5.1.6 の後回し分）、集計コマンド `tools/summarize_processing_log.py`、利用者向けの先行測定の手順書 `docs/measure-early.md`。出荷するコンテナで確かめた（`docs/measurement.md`）。区間の規則の適用・作成時間の集計は含まない（Epic 8）
+- PBI #80: 字幕の状況（開始準備中・正常・遅れ・無音の待機・取り込み停止）をアプリサーバーが管理し、変化のたびに `subtitle_status.changed` で通知する。新しく接続した画面へは現在の状況を最初に送る。「会議中」の画面に状況を文字・アイコン・色で出し（`aria-live="polite"`）、遅れの間と、会議が 2 時間（調整値）を超えたとき（会議の終了まで残る）に、お知らせ帯へ警告を出す。通訳ワーカーに声が戻った知らせを足した。取り込み停止への切り替えは PBI 4.3

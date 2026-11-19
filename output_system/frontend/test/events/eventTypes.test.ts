@@ -164,3 +164,43 @@ describe('parseAppEvent', () => {
     expect(parseAppEvent(text)).toBeNull();
   });
 });
+
+
+/**
+ * 【モジュール】src/events/eventTypes（字幕の状況の通知）
+ * subtitle_status.changed の読み替え。
+ */
+describe('parseAppEvent (subtitle_status.changed)', () => {
+  /**
+   * 【テスト対象】parseAppEvent（subtitle_status.changed）
+   * 【テスト内容】5 つの状況それぞれの通知の本文を読む
+   * 【期待結果】会議番号と状況を持つ通知に読み替えられること
+   */
+  it.each(['starting', 'on_time', 'delayed', 'waiting_for_speech', 'capture_stopped'])(
+    'should read the status %s',
+    (status) => {
+      const text = JSON.stringify({ type: 'subtitle_status.changed', meeting_id: 'abc123', status });
+
+      expect(parseAppEvent(text)).toEqual({
+        type: 'subtitle_status.changed',
+        meetingId: 'abc123',
+        status,
+      });
+    },
+  );
+
+  /**
+   * 【テスト対象】parseAppEvent（subtitle_status.changed の形の検査）
+   * 【テスト内容】知らない状況・会議番号が無い・空の会議番号・状況の型が違う通知を読む
+   * 【期待結果】どれも null（読み捨てる。あとの版のアプリサーバーが足した状況でも、画面が止まらない）
+   */
+  it.each([
+    { type: 'subtitle_status.changed', meeting_id: 'abc123', status: 'unknown' },
+    { type: 'subtitle_status.changed', status: 'on_time' },
+    { type: 'subtitle_status.changed', meeting_id: '', status: 'on_time' },
+    { type: 'subtitle_status.changed', meeting_id: 'abc123', status: 3 },
+    { type: 'subtitle_status.changed', meeting_id: 'abc123' },
+  ])('should ignore a malformed notification %j', (body) => {
+    expect(parseAppEvent(JSON.stringify(body))).toBeNull();
+  });
+});

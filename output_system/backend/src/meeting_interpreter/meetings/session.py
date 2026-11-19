@@ -49,7 +49,7 @@ from typing import Final, Protocol
 
 from ..errors import AppError, describe_origin
 from ..interpreter.client import InterpreterClient
-from ..interpreter.protocol import Backlog, ErrorKind, Silence, Stopped, WorkerError
+from ..interpreter.protocol import Backlog, ErrorKind, Silence, SpeechResumed, Stopped, WorkerError
 from ..interpreter.protocol import Subtitle as WorkerSubtitle
 from ..logs import current_trace_id, log_error, log_processing, trace_scope
 from ..logs.events import format_timestamp
@@ -68,11 +68,13 @@ from ..records.store import RecordStore
 from ..tuning import Tuning
 from ..worker_client import WorkerExited
 from .errors import COMPONENT, audio_already_connected, interpreter_unavailable, meeting_not_running
+from .subtitle_status import SubtitleStatus, SubtitleStatusTracker
 from .transitions import Trigger, resolve_transition
 from .workers import InterpreterLauncher
 
 # 通知の名前（横断設計規約「命名の規則」: 対象.出来事、出来事は過去形）。
 SUBTITLE_CREATED: Final = "subtitle.created"
+SUBTITLE_STATUS_CHANGED: Final = "subtitle_status.changed"
 MEETING_STATE_CHANGED: Final = "meeting.state_changed"
 ERROR_OCCURRED: Final = "error.occurred"
 
@@ -140,6 +142,8 @@ class SessionPolicy:
     # 会議の開始から、音声の WebSocket が 1 本も張られないまま、この秒数がたったら、
     # 画面との接続が切れたとみなして、会議を中断にする。
     audio_connect_timeout_seconds: float
+    # 字幕の遅れの目標（秒）。字幕の遅れと、処理を待つ音声が、これを超えたら、状況を遅れにする。
+    subtitle_delay_target_seconds: float
     # 終了処理の依頼を書き始めるまで待つ秒数。
     finish_write_timeout_seconds: float = FINISH_WRITE_TIMEOUT_SECONDS
     # ワーカーを止めるとき、停止完了を待つ秒数。強制終了の猶予 1 秒が別に付く。
@@ -156,6 +160,7 @@ class SessionPolicy:
             flush_timeout_seconds=tuning.meeting_end_flush_timeout_seconds,
             finish_idle_seconds=tuning.meeting_end_finish_idle_seconds,
             audio_connect_timeout_seconds=tuning.audio_connect_timeout_seconds,
+            subtitle_delay_target_seconds=tuning.subtitle_delay_target_seconds,
         )
 
 
@@ -334,6 +339,8 @@ class MeetingSession:
         # 音声が届いた日時 → そのときの単調増加時計の読み。届いた順に並ぶ。字幕の遅れを、単調増加
         # 時計の差で求めるために使う（通訳ワーカーは、先頭の音声の届いた日時を、同じ値のまま返す）。
         self._arrival_monotonic: dict[datetime, float] = {}
+        # 字幕の状況（開始準備中・正常・遅れ…）。状況が変わるたびに、画面へ通知する。
+        self._subtitle_status = SubtitleStatusTracker(policy.subtitle_delay_target_seconds)
         self._memory_probe: MemoryProbe = memory_probe or ProcessMemoryProbe()
         # 会議を閉じる手順で、通訳ワーカーに終了処理を頼む直前に取ったメモリの使用量。
         self._memory_at_close: list[MemoryUsage] | None = None
@@ -381,6 +388,15 @@ class MeetingSession:
         """いま動いている通訳ワーカーのプロセス番号。動いていなければ None。"""
         handle = self._handle
         return None if handle is None or handle.torn_down else handle.client.pid
+
+    @property
+    def subtitle_status(self) -> SubtitleStatus:
+        """いまの字幕の状況。"""
+        return self._subtitle_status.status
+
+    def subtitle_status_notice(self) -> tuple[str, dict[str, object]]:
+        """いまの字幕の状況を、通知の名前と項目にして返す。新しく接続した画面へ最初に送る。"""
+        return SUBTITLE_STATUS_CHANGED, self._status_payload(self.subtitle_status)
 
     @property
     def is_closing(self) -> bool:
@@ -580,6 +596,8 @@ class MeetingSession:
                 self._give_up()
                 return
             log_processing("interpreter_restarting", meeting_id=self.meeting_id)
+            # 起動し直す間は、モデルを読み込み直す。前のワーカーの遅れは引き継がない。
+            self._announce_status(self._subtitle_status.worker_restarting())
             await asyncio.sleep(self._policy.restart_wait_seconds)
 
     def _give_up(self) -> None:
@@ -635,7 +653,12 @@ class MeetingSession:
                 await asyncio.sleep(self._policy.restart_wait_seconds)
                 continue
             self._ready_monotonic = time.monotonic()
+            self._mark_worker_ready()
             return self._attach(client)
+
+    def _mark_worker_ready(self) -> None:
+        """通訳ワーカーの準備が完了した。字幕の状況を、開始準備中から正常へ進める。"""
+        self._announce_status(self._subtitle_status.worker_ready())
 
     def _attach(self, client: InterpreterClient) -> _WorkerHandle:
         """起動したワーカーに、出力を読むスレッドと、音声を渡すタスクをつなぐ。"""
@@ -783,8 +806,16 @@ class MeetingSession:
                 return _Served.CLOSED
             case WorkerError():
                 self._log_worker_error(message)
-            case Silence() | Backlog():
-                pass  # 字幕の状況の更新（後続の作業）。
+            case Backlog():
+                # 処理を待つ音声が長いときは、字幕が出ていなくても遅れにする。
+                self._announce_status(
+                    self._subtitle_status.backlog_reported(message.pending_audio_seconds)
+                )
+            case Silence():
+                # 音声は届いているが、声が無い状態が続いている。会議は続け、字幕は作らない。
+                self._announce_status(self._subtitle_status.silence_detected())
+            case SpeechResumed():
+                self._announce_status(self._subtitle_status.speech_resumed())
         return None
 
     def _log_worker_crash(self, kind: str) -> None:
@@ -868,13 +899,26 @@ class MeetingSession:
         # 時間の長さ（遅れ・保存と通知）は、同じ時点の単調増加時計の読みで求める。
         sent_at = self._clock()
         sent_monotonic = self._monotonic()
+        delay_ms = self._subtitle_delay_ms(subtitle, sent_at, sent_monotonic)
         self._log_subtitle_sent(
             subtitle,
             saved,
             sent_at=sent_at,
+            delay_ms=delay_ms,
             sent_monotonic=sent_monotonic,
             save_notify_seconds=sent_monotonic - save_started,
         )
+        # 字幕の遅れは、処理ログと同じ値（単調増加時計の差）。目標を超えたら、状況を遅れにする。
+        self._announce_status(self._subtitle_status.subtitle_delivered(delay_ms / 1000))
+
+    def _announce_status(self, changed: SubtitleStatus | None) -> None:
+        """字幕の状況が変わったとき（changed が None でないとき）だけ、画面へ通知する。"""
+        if changed is not None:
+            self._publish(SUBTITLE_STATUS_CHANGED, self._status_payload(changed))
+
+    def _status_payload(self, status: SubtitleStatus) -> dict[str, object]:
+        """字幕の状況の通知の項目。会議番号と状況の値だけを運ぶ。"""
+        return {"meeting_id": self.meeting_id, "status": status.value}
 
     def _forget_arrivals_before(self, received_at: datetime) -> None:
         """この字幕より前に届いた音声の対応を捨てる。
@@ -909,6 +953,7 @@ class MeetingSession:
         saved: SavedSubtitle,
         *,
         sent_at: datetime,
+        delay_ms: float,
         sent_monotonic: float,
         save_notify_seconds: float,
     ) -> None:
@@ -939,7 +984,7 @@ class MeetingSession:
             "subtitle_sent",
             meeting_id=self.meeting_id,
             trace_id=subtitle.trace_id,
-            duration_ms=round(self._subtitle_delay_ms(subtitle, sent_at, sent_monotonic), 1),
+            duration_ms=round(delay_ms, 1),
             received_at=_iso(subtitle.received_at),
             sent_at=_iso(sent_at),
             audio_ms=_rounded_ms(subtitle.audio_seconds),
