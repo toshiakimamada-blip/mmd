@@ -279,7 +279,8 @@ describe('NoticeBand choice', () => {
 
   /**
    * 【テスト対象】選択を求めるお知らせ（キーボードだけで選ぶ）
-   * 【テスト内容】マウスを使わず、Tab で 2 つ目のボタンへ移り、Enter で選ぶ
+   * 【テスト内容】マウスを使わず、お知らせが出た時点で 1 つ目のボタンにあるフォーカスから、Tab で
+   *             2 つ目のボタンへ移り、Enter で選ぶ
    * 【期待結果】選んだ側の処理だけが 1 回呼ばれ、お知らせが消えること
    */
   it('should let the keyboard choose the second option and then disappear', async () => {
@@ -297,7 +298,7 @@ describe('NoticeBand choice', () => {
       ],
     });
 
-    await user.tab();
+    expect(screen.getByRole('button', { name: '取り込みをやり直す' })).toHaveFocus();
     await user.tab();
     expect(screen.getByRole('button', { name: '会議を終了する' })).toHaveFocus();
     await user.keyboard('{Enter}');
@@ -436,4 +437,61 @@ describe('useNoticeActions', () => {
     expect(() => render(<Outside />)).toThrow(/NoticeProvider/);
     consoleError.mockRestore();
   });
+
+  /**
+   * 【テスト対象】選択を求めるお知らせ（フォーカスの移動）
+   * 【テスト内容】選択を求めるお知らせを出す。キーボードは触らない
+   * 【期待結果】1 つ目のボタンにフォーカスが移ること。Tab を押さずに、Enter で 1 つ目を選べる。
+   *             キーボードだけで操作する利用者が、お知らせへたどり着けるようにするため
+   */
+  it('should move the focus to the first option when it appears', async () => {
+    const user = userEvent.setup();
+    const retry = vi.fn();
+    const { post } = renderBand();
+
+    post({
+      kind: 'choice',
+      id: 'c1',
+      error: SYSTEM_ERROR,
+      options: [
+        { label: '取り込みをやり直す', onSelect: retry },
+        { label: '会議を終了する', onSelect: () => {} },
+      ],
+    });
+
+    expect(screen.getByRole('button', { name: '取り込みをやり直す' })).toHaveFocus();
+    await user.keyboard('{Enter}');
+    expect(retry).toHaveBeenCalledTimes(1);
+  });
+
+  /**
+   * 【テスト対象】選択を求めるお知らせ（同じお知らせの置き換え）と、ほかのお知らせ
+   * 【テスト内容】(1) 利用者が別の場所へフォーカスを移したあとで、同じ id のお知らせを内容だけ置き換える。
+   *             (2) 選択ではないエラーのお知らせを出す
+   * 【期待結果】(1) フォーカスを奪い返さないこと。(2) エラーのお知らせは、フォーカスを動かさないこと
+   */
+  it('should not steal the focus again on replace and should not move it for plain errors', async () => {
+    const { post } = renderBand(<button type="button">別のボタン</button>);
+
+    post({ kind: 'error', id: 'e1', error: BUSINESS_ERROR });
+    expect(screen.getByRole('button', { name: '別のボタン' })).not.toHaveFocus();
+    expect(screen.getByRole('button', { name: 'エラーを閉じる' })).not.toHaveFocus();
+
+    const choice = (message: string): Notice => ({
+      kind: 'choice',
+      id: 'c1',
+      error: { ...SYSTEM_ERROR, message },
+      options: [
+        { label: '取り込みをやり直す', onSelect: () => {} },
+        { label: '会議を終了する', onSelect: () => {} },
+      ],
+    });
+    post(choice('最初の文面'));
+    act(() => screen.getByRole('button', { name: '別のボタン' }).focus());
+    post(choice('置き換えた文面'));
+
+    expect(screen.getByText('置き換えた文面')).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: '別のボタン' })).toHaveFocus();
+  });
 });
+

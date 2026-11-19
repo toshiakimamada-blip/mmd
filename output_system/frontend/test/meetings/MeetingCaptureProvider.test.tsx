@@ -3,12 +3,21 @@ import { MemoryRouter, useNavigate } from 'react-router';
 import { describe, expect, it, vi } from 'vitest';
 
 import { type AudioCaptureSession } from '../../src/audio/audioCaptureSession';
+import { AudioCaptureError } from '../../src/audio/audioErrors';
 import { MeetingCaptureProvider, useMeetingCapture } from '../../src/meetings/MeetingCaptureProvider';
 
 /** 取り込み中の音声の偽物。止める・閉じるの呼び出しを数える。 */
-function fakeSession(overrides: Partial<{ stop: () => Promise<void> }> = {}) {
+function fakeSession(
+  overrides: Partial<{ stop: () => Promise<void>; restart: () => Promise<void> }> = {},
+) {
   const calls: string[] = [];
   const session = {
+    state: 'interrupted' as string,
+    restart: vi.fn(async () => {
+      calls.push('restart');
+      await overrides.restart?.();
+      session.state = 'capturing';
+    }),
     stop: vi.fn(() => {
       calls.push('stop');
       return overrides.stop?.() ?? Promise.resolve();
@@ -204,4 +213,71 @@ describe('MeetingCaptureProvider', () => {
     ).toThrow(/MeetingCaptureProvider/);
     error.mockRestore();
   });
+
+  /**
+   * 【テスト対象】MeetingCaptureProvider.restart（取り込みのやり直し）
+   * 【テスト内容】途中で止まった取り込みを預けて、やり直す
+   * 【期待結果】預かっている取り込みの restart を 1 回呼び、成功すること。取り込みは、止めも閉じもしないこと
+   *             （同じ接続のまま、続けて音声を送る）
+   */
+  it('should restart the held capture without stopping or closing it', async () => {
+    const { capture } = mount();
+    const { session, asSession } = fakeSession();
+    act(() => capture().hold('abc123', asSession));
+
+    await act(() => capture().restart());
+
+    expect(session.restart).toHaveBeenCalledTimes(1);
+    expect(session.stop).not.toHaveBeenCalled();
+    expect(session.close).not.toHaveBeenCalled();
+  });
+
+  /**
+   * 【テスト対象】MeetingCaptureProvider.restart（やり直しの失敗）
+   * 【テスト内容】取り込み直す確認で、利用者が共有を取りやめる（許可の拒否の失敗）
+   * 【期待結果】失敗（AUDIO_PERMISSION_DENIED）をそのまま呼び出し側へ投げること。預かりは続け、
+   *             もう一度やり直せること
+   */
+  it('should rethrow the failure of the restart and keep holding the capture', async () => {
+    const { capture } = mount();
+    const { session, asSession } = fakeSession({
+      restart: () => Promise.reject(new AudioCaptureError('AUDIO_PERMISSION_DENIED')),
+    });
+    act(() => capture().hold('abc123', asSession));
+
+    await expect(act(() => capture().restart())).rejects.toMatchObject({
+      code: 'AUDIO_PERMISSION_DENIED',
+    });
+    await expect(act(() => capture().restart())).rejects.toMatchObject({
+      code: 'AUDIO_PERMISSION_DENIED',
+    });
+
+    expect(session.restart).toHaveBeenCalledTimes(2);
+    expect(session.close).not.toHaveBeenCalled();
+  });
+
+  /**
+   * 【テスト対象】MeetingCaptureProvider.restart（預かっていない・取り込めていない）
+   * 【テスト内容】(1) 何も預けずにやり直す。(2) 預けた取り込みの restart が、何もせずに戻る
+   *             （接続が閉じていて、取り込みが続いていない）
+   * 【期待結果】どちらも AUDIO_CAPTURE_FAILED で失敗すること（成功と見間違えて、字幕が続くと思わせない）
+   */
+  it('should fail when nothing is held or the capture did not resume', async () => {
+    const { capture } = mount();
+    await expect(act(() => capture().restart())).rejects.toMatchObject({
+      code: 'AUDIO_CAPTURE_FAILED',
+    });
+
+    const { asSession, session } = fakeSession();
+    session.restart.mockImplementation(() => {
+      session.state = 'closed';
+      return Promise.resolve();
+    });
+    act(() => capture().hold('abc123', asSession));
+
+    await expect(act(() => capture().restart())).rejects.toMatchObject({
+      code: 'AUDIO_CAPTURE_FAILED',
+    });
+  });
 });
+

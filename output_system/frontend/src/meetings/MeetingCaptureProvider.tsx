@@ -2,6 +2,7 @@ import { createContext, useCallback, useContext, useEffect, useMemo, useRef, typ
 import { useLocation } from 'react-router';
 
 import { type AudioCaptureSession } from '../audio/audioCaptureSession';
+import { AudioCaptureError } from '../audio/audioErrors';
 import { screenPaths } from '../routes';
 
 /** 預かっている取り込み。 */
@@ -25,6 +26,15 @@ export interface MeetingCapture {
    */
   readonly forget: (meetingId: string) => void;
   /**
+   * 預かっている取り込みを、開始時に選んだ音声の出どころでやり直す。途中で止まったとき（共有を止めた・
+   * マイクが外れた）に使う。ブラウザーの共有と許可の確認が、もう一度出る。同じ接続のまま、音声が続く。
+   *
+   * @throws AudioCaptureError 取り込み直せなかったとき。許可の拒否・マイクが無いなど（AUDIO_PERMISSION_DENIED
+   *   など）。何も預かっていない、または、やり直したあとも取り込みが続いていない（接続が閉じた）ときは
+   *   AUDIO_CAPTURE_FAILED。失敗しても預かりは続け、もう一度やり直せる
+   */
+  readonly restart: () => Promise<void>;
+  /**
    * 預かっている取り込みを止める。音声の取り込みをやめ、変換の途中の残りを送りきる。接続は閉じない。
    * 会議を終了する要求の前に呼ぶ。止められなくても例外にしない（会議の終了を妨げないため）。預かっていなければ何もしない。
    */
@@ -44,6 +54,7 @@ const CaptureContext = createContext<MeetingCapture | null>(null);
  * 画面の移動をまたいで取り込みを持つ置き場が要る。画面を切り替えても、枠は作り直されない。
  *
  * - 会議の開始の画面が hold で預ける
+ * - 「会議中」の画面が、取り込みが止まったとき（字幕の状況が取り込み停止）に、利用者の選択で restart を呼ぶ
  * - 「会議中」の画面が、会議の終了のとき、stop → 終了の要求 → release の順に呼ぶ。
  *   先に閉じると、アプリサーバーが音声の接続切れとみなして、会議を中断にする
  * - 預けた会議の「会議中」の画面から離れる（戻る操作など）と、取り込みの接続を閉じる。
@@ -70,6 +81,18 @@ export function MeetingCaptureProvider({ children }: { readonly children: ReactN
       forget: (meetingId) => {
         if (heldRef.current?.meetingId === meetingId) {
           heldRef.current = null;
+        }
+      },
+      restart: async () => {
+        const session = heldRef.current?.session;
+        if (session === undefined) {
+          throw new AudioCaptureError('AUDIO_CAPTURE_FAILED');
+        }
+        await session.restart();
+        // restart は、途中で止まった状態でなければ何もせず戻る。取り込みが続いていなければ、成功としない
+        // （字幕が続くと思わせない）。
+        if (session.state !== 'capturing') {
+          throw new AudioCaptureError('AUDIO_CAPTURE_FAILED');
         }
       },
       stop: async () => {

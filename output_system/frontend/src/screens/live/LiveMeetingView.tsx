@@ -13,9 +13,11 @@ import { meetingLengthWarning, SUBTITLE_DELAYED_WARNING } from '../../meetings/g
 import { type LiveMeeting } from '../../meetings/liveMeeting';
 import { useMeetingCapture } from '../../meetings/MeetingCaptureProvider';
 import { useElapsedMilliseconds } from '../../meetings/useElapsedMilliseconds';
+import { useCaptureStoppedChoice } from '../../meetings/useCaptureStoppedChoice';
 import { useLiveStatus } from '../../meetings/useLiveStatus';
 import { SCREENS, screenPaths } from '../../routes';
 import { useMeetingSubtitles } from '../../subtitles/useMeetingSubtitles';
+import { CaptureRestartGuidance } from './CaptureRestartGuidance';
 import { LiveGuidance } from './LiveGuidance';
 
 /** 会議の終了に失敗したときのお知らせの識別子。もう一度試すと、同じお知らせが置き換わる。 */
@@ -35,6 +37,9 @@ const MEETING_LENGTH_WARNING_ID = 'meeting-length';
  * - 経過時間が、アプリサーバーの調整値（既定 2 時間）を超えたら、お知らせ帯に警告を出す。会議は止めない。
  *   警告は、利用者が閉じられず、この画面を離れる（会議を終了する）まで残る。画面を開き直した場合も、
  *   経過時間から判定するため、すぐ出る
+ * - 取り込み停止（音声の共有やマイクが止まった）の間は、お知らせ帯に「取り込みをやり直す」と「会議を終了する」の
+ *   選択を出す（meetings/useCaptureStoppedChoice.ts）。やり直しに失敗したら、取り込みの手順を案内する。
+ *   それまでの字幕は、そのまま残る
  * - 字幕の領域: 話された順の字幕。最新の字幕まで自動で進む（過去へ戻っている間は進まない）
  * - 案内の領域
  * 質問の領域（質問を作る機能）は、この画面にはまだ無い。
@@ -73,8 +78,10 @@ export function LiveMeetingView({ meeting }: { readonly meeting: LiveMeeting }) 
    *   先に閉じると、アプリサーバーが音声の接続切れとみなして、会議を中断にする
    * - 履歴は置き換える。戻るボタンで、終わった会議の「会議中」へ戻らないため
    * - 失敗したら、お知らせ帯にエラーを出し、「会議中」にとどまる（もう一度試せる。止めた取り込みは、もう一度止めても害が無い）
+   *
+   * @returns 終了できたら true。失敗したら false（取り込み停止の選択が、選び直せるように出し直すために使う）
    */
-  const endNow = async () => {
+  const endNow = async (): Promise<boolean> => {
     setConfirming(false);
     setEnding(true);
     clear(END_FAILED_NOTICE_ID);
@@ -87,11 +94,21 @@ export function LiveMeetingView({ meeting }: { readonly meeting: LiveMeeting }) 
       }
       setEnding(false);
       post({ kind: 'error', id: END_FAILED_NOTICE_ID, error: toDisplayError(error.body) });
-      return;
+      return false;
     }
     capture.release();
     navigate(screenPaths.meetingRecord(meeting.meetingId), { replace: true });
+    return true;
   };
+
+  // 取り込みが止まったとき（取り込み停止）に、お知らせ帯へ、やり直しか終了かの選択を出す。
+  // 終了は、確認のダイアログを経ずに endNow を呼ぶ（選択が確認を兼ねる）。
+  const { restartFailed } = useCaptureStoppedChoice({
+    subtitleStatus,
+    audioSource: meeting.audioSource,
+    restart: capture.restart,
+    end: endNow,
+  });
 
   return (
     <section className="screen live" data-screen={SCREENS.meetingLive.code}>
@@ -131,6 +148,9 @@ export function LiveMeetingView({ meeting }: { readonly meeting: LiveMeeting }) 
           {ending ? '会議を終了しています。届いている音声を字幕にするため、数秒かかることがあります。' : null}
         </p>
       </div>
+
+      {/* 取り込みのやり直しに失敗したとき（取り込み停止のまま）だけ、取り込みの手順を案内する */}
+      {restartFailed ? <CaptureRestartGuidance source={meeting.audioSource} /> : null}
 
       {/* 字幕の領域 */}
       <section className="live__subtitles" aria-labelledby={subtitlesHeadingId}>

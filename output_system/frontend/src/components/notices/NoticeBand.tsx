@@ -1,3 +1,5 @@
+import { useEffect, useRef } from 'react';
+
 import { ErrorText, type ErrorTextContent } from './ErrorText';
 import { NoticeIcon } from './NoticeIcon';
 import {
@@ -36,6 +38,17 @@ function ProblemNotice({
   readonly notice: Exclude<Notice, { kind: 'warning' }>;
   readonly onClear: (id: string) => void;
 }) {
+  // 選択を求めるお知らせが出たとき、1 つ目のボタンへフォーカスを移す。選ぶまで先へ進めないお知らせで、
+  // キーボードだけで操作する利用者が、探さずに選べるようにするため。出たときだけ移し、内容が置き換わっても
+  // 奪い返さない（ほかのお知らせは、操作を止めないので、移さない）。
+  const firstChoice = useRef<HTMLButtonElement>(null);
+  const isChoice = notice.kind === 'choice';
+  useEffect(() => {
+    if (isChoice) {
+      firstChoice.current?.focus();
+    }
+  }, [isChoice]);
+
   const choose = (option: NoticeOption) => {
     // 選ぶとお知らせは消える。処理が例外を投げても、お知らせが残らないよう、先に消す。
     onClear(notice.id);
@@ -49,9 +62,10 @@ function ProblemNotice({
         <ErrorText error={notice.kind === 'offline' ? OFFLINE_TEXT : notice.error} />
         {notice.kind === 'choice' ? (
           <div className="notice__choices">
-            {notice.options.map((option) => (
+            {notice.options.map((option, index) => (
               <button
                 key={option.label}
+                ref={index === 0 ? firstChoice : undefined}
                 type="button"
                 className="notice__button notice__choice"
                 onClick={() => choose(option)}
