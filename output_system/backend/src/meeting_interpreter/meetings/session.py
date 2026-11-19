@@ -419,7 +419,8 @@ class MeetingSession:
     def add_capture_listener(self, listener: Callable[[str, CaptureEvent], None]) -> None:
         """音声の取り込みの知らせ（capture.stopped・capture.resumed）の受け取り先を足す。
 
-        字幕の状況の更新に使う（後続の作業）。受け取り先の失敗は、会議に影響させない。
+        字幕の状況の更新は、セッション自身が行う（notify_capture）。受け取り先は、それとは別の用途で使う。
+        受け取り先の失敗は、会議に影響させない。
         """
         self._capture_listeners.append(listener)
 
@@ -468,11 +469,22 @@ class MeetingSession:
             del self._arrival_monotonic[next(iter(self._arrival_monotonic))]
 
     def notify_capture(self, event: CaptureEvent) -> None:
-        """音声の取り込みの知らせを受け取り、受け取り先へ渡す。"""
+        """音声の取り込みの知らせを受け取り、字幕の状況を切り替えて、受け取り先へ渡す。
+
+        停止（capture.stopped）で取り込み停止にし、再開（capture.resumed）で遅れの判定に従う状況へ
+        戻す。会議の状態は通訳中のままで、通訳ワーカーも止めない（停止の前に届いた音声は、最後まで
+        字幕になる）。閉じる手順に入ったあとの知らせは、状況を変えない（終了が先。画面は記録へ移る）。
+        処理ログには、停止と再開を出す（会議の内容は入れない）。
+        """
         log_processing(
             "capture_stopped" if event is CaptureEvent.STOPPED else "capture_resumed",
             meeting_id=self.meeting_id,
         )
+        if self._close_reason is None:
+            if event is CaptureEvent.STOPPED:
+                self._announce_status(self._subtitle_status.capture_stopped())
+            else:
+                self._announce_status(self._subtitle_status.capture_resumed())
         for listener in tuple(self._capture_listeners):
             try:
                 listener(self.meeting_id, event)

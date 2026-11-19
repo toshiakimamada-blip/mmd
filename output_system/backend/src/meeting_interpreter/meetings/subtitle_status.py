@@ -16,6 +16,8 @@
     delayed ──直近の字幕の遅れが目標以内で、待つ音声が無い──▶ on_time
     on_time ──通訳ワーカーの無音の知らせ（声が無い状態が調整値の秒数続いた）──▶ waiting_for_speech
     waiting_for_speech ──声が戻った知らせ（最初の発話の区切りができた）──▶ on_time
+    どの状況からでも ──画面の取り込み停止の知らせ（capture.stopped）──▶ capture_stopped
+    capture_stopped ──画面の再開の知らせ（capture.resumed）──▶ 遅れの判定に従う（正常・遅れなど）
 
 - 「字幕の遅れ」は、字幕を画面へ送る時点の、単調増加時計の差（秒）。この部品は時計を持たず、求めた
   値を受け取る（壁時計の差を使わない）
@@ -28,7 +30,12 @@
   ままにする。無音の知らせを受けたときは、直近の字幕の遅れを忘れる（声が止まると新しい字幕が
   来ず、古い遅れでは、遅れから戻れなくなるため）
 - 音声が届かないとき（取り込みが止まっているとき）は、通訳ワーカーが声の有無を数えないので、
-  無音の待機にならない。取り込み停止は、別の知らせで扱う
+  無音の待機にならない。取り込み停止は、画面が音声の WebSocket で送る別の知らせで扱う
+- 取り込み停止は、ほかのどの状況よりも優先する。利用者が、取り込みをやり直すか、会議を終了するかを
+  選ぶ必要があるため。停止の間も、通訳ワーカーは止めず、停止の前に届いた音声は、最後まで字幕にする。
+  その間に届いた字幕の遅れ・処理を待つ音声・無音の知らせは、覚えておくだけで、状況は変えない。
+  再開したら、覚えておいた事実から、状況を決め直す
+- 取り込みの停止と再開は、通訳ワーカーの起動し直しとは別。起動し直しても、停止の状況は変えない
 - 通訳ワーカーを起動し直すときは、開始準備中へ戻し、前のワーカーの遅れを忘れる
 - 準備完了の前に届いた遅れの知らせは、覚えておき、準備完了の時点で反映する
 
@@ -71,6 +78,9 @@ class SubtitleStatusTracker:
         self._last_delay: float | None = None
         # 直近に知らされた、処理を待つ音声の長さ（秒）。
         self._backlog = 0.0
+        # 取り込み停止か。画面の停止の知らせで立ち、再開の知らせで下りる。
+        # 通訳ワーカーの起動し直しでは変えない。
+        self._capture_stopped = False
         self._status = SubtitleStatus.STARTING
 
     @property
@@ -137,6 +147,21 @@ class SubtitleStatusTracker:
         self._silent = False
         return self._settle()
 
+    # --- 音声の取り込み（画面の知らせ） -----------------------------------------------------
+
+    def capture_stopped(self) -> SubtitleStatus | None:
+        """画面が、音声の共有が止まったと知らせた。取り込み停止にする。
+
+        停止の前に届いた音声は、通訳ワーカーが最後まで字幕にする。その字幕の遅れは、覚えておく。
+        """
+        self._capture_stopped = True
+        return self._settle()
+
+    def capture_resumed(self) -> SubtitleStatus | None:
+        """画面が、取り込みをやり直せたと知らせた。覚えておいた事実から、状況を決め直す。"""
+        self._capture_stopped = False
+        return self._settle()
+
     # --- 内部 ---------------------------------------------------------------------------
 
     def _judge_delay(self) -> None:
@@ -160,6 +185,8 @@ class SubtitleStatusTracker:
 
     def _decide(self) -> SubtitleStatus:
         """持っている事実から、状況を決める。"""
+        if self._capture_stopped:
+            return SubtitleStatus.CAPTURE_STOPPED
         if not self._ready:
             return SubtitleStatus.STARTING
         if self._late:

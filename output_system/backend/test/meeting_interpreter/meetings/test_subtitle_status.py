@@ -325,3 +325,99 @@ class TestWaitingForSpeech:
 
         assert tracker.worker_restarting() is SubtitleStatus.STARTING
         assert tracker.worker_ready() is SubtitleStatus.ON_TIME
+
+
+class TestCaptureStopped:
+    """取り込み停止。音声の共有が止まっている間の状況（切り替えは、画面が送る知らせで行う）。"""
+
+    def test_should_become_capture_stopped_and_return_on_time_when_capture_resumes(self):
+        """
+        【テスト対象】SubtitleStatusTracker.capture_stopped / capture_resumed
+        【テスト内容】正常のとき、取り込みの停止を知らせ、もう一度知らせる。続けて再開を知らせ、もう一度知らせる
+        【期待結果】停止で取り込み停止（capture_stopped）、再開で正常（on_time）へ変わったと返すこと。
+                    同じ知らせの繰り返しは変化なし（None）で、通知が重ならないこと
+        """
+        tracker = ready_tracker()
+
+        assert tracker.capture_stopped() is SubtitleStatus.CAPTURE_STOPPED
+        assert tracker.capture_stopped() is None
+        assert tracker.status is SubtitleStatus.CAPTURE_STOPPED
+        assert tracker.capture_resumed() is SubtitleStatus.ON_TIME
+        assert tracker.capture_resumed() is None
+        assert tracker.status is SubtitleStatus.ON_TIME
+
+    def test_should_ignore_resume_when_capture_never_stopped(self):
+        """
+        【テスト対象】SubtitleStatusTracker.capture_resumed
+        【テスト内容】停止の知らせを受けていないのに、再開の知らせを受ける
+        【期待結果】変化なし（None）で、状況が変わらないこと
+        """
+        tracker = ready_tracker()
+
+        assert tracker.capture_resumed() is None
+        assert tracker.status is SubtitleStatus.ON_TIME
+
+    def test_should_stay_capture_stopped_while_the_worker_reports_other_events(self):
+        """
+        【テスト対象】取り込み停止の優先度
+        【テスト内容】取り込み停止の間に、残りの音声の字幕（遅れ 12 秒）・処理を待つ音声の知らせ・
+                    無音の知らせ・声が戻った知らせ・通訳ワーカーの起動し直しを受ける
+        【期待結果】どれも変化なし（None）で、取り込み停止のままであること（利用者の選択が先）
+        """
+        tracker = ready_tracker()
+        tracker.capture_stopped()
+
+        assert tracker.subtitle_delivered(12.0) is None
+        assert tracker.backlog_reported(15.0) is None
+        assert tracker.silence_detected() is None
+        assert tracker.speech_resumed() is None
+        assert tracker.worker_restarting() is None
+        assert tracker.status is SubtitleStatus.CAPTURE_STOPPED
+
+    def test_should_follow_the_delay_judgment_when_capture_resumes(self):
+        """
+        【テスト対象】再開したあとの状況（遅れの判定に従う）
+        【テスト内容】取り込み停止の間に、遅れ 12 秒の字幕が届いて遅れの判定になる。再開を知らせる。
+                    続けて、遅れが解消してから、もう一度停止と再開を行う
+        【期待結果】1 回目の再開は遅れ（delayed）へ戻ること。
+                    遅れが解消したあとの再開は正常（on_time）へ戻ること
+        """
+        tracker = ready_tracker()
+        tracker.capture_stopped()
+        tracker.subtitle_delivered(12.0)
+
+        assert tracker.capture_resumed() is SubtitleStatus.DELAYED
+
+        tracker.subtitle_delivered(2.0)
+        tracker.backlog_reported(0.0)
+        assert tracker.status is SubtitleStatus.ON_TIME
+        assert tracker.capture_stopped() is SubtitleStatus.CAPTURE_STOPPED
+        assert tracker.capture_resumed() is SubtitleStatus.ON_TIME
+
+    def test_should_return_to_waiting_for_speech_when_silence_was_reported_before_the_stop(self):
+        """
+        【テスト対象】再開したあとの状況（無音の待機）
+        【テスト内容】無音の待機のあとで取り込みが止まり、再開する
+        【期待結果】声が戻った知らせが無いため、無音の待機（waiting_for_speech）へ戻ること
+        """
+        tracker = ready_tracker()
+        tracker.silence_detected()
+        assert tracker.capture_stopped() is SubtitleStatus.CAPTURE_STOPPED
+
+        assert tracker.capture_resumed() is SubtitleStatus.WAITING_FOR_SPEECH
+
+    def test_should_stop_before_the_worker_is_ready_and_return_to_starting(self):
+        """
+        【テスト対象】開始準備中の取り込み停止
+        【テスト内容】通訳ワーカーの準備完了の前に、取り込みの停止を知らせる。準備完了を知らせてから、再開を知らせる
+        【期待結果】停止で取り込み停止へ変わり、準備完了では変わらないこと。再開では、準備完了のあとなので
+                    正常へ戻ること。準備完了の前に再開したときは、開始準備中へ戻ること
+        """
+        tracker = SubtitleStatusTracker(TARGET)
+        assert tracker.capture_stopped() is SubtitleStatus.CAPTURE_STOPPED
+        assert tracker.worker_ready() is None
+        assert tracker.capture_resumed() is SubtitleStatus.ON_TIME
+
+        early = SubtitleStatusTracker(TARGET)
+        early.capture_stopped()
+        assert early.capture_resumed() is SubtitleStatus.STARTING
