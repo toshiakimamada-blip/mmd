@@ -99,10 +99,14 @@ class SubtitleStatusTracker:
     def subtitle_delivered(self, delay_seconds: float) -> SubtitleStatus | None:
         """字幕を画面へ送った。
 
+        無音の待機の間に届いた字幕（無音の前に話された最後の発話）の遅れは、遅れの判定に使わない。
+        無音の知らせは声が戻るまで 1 回だけで、待つ音声も無いため、遅れにすると、声が戻って次の
+        字幕が届くまで、遅れから戻る契機が無くなる。無音の間は、待つ音声だけで判定する。
+
         Args:
             delay_seconds: 字幕の遅れ（秒）。先頭の音声が届いてから、画面へ送るまで。
         """
-        self._last_delay = delay_seconds
+        self._last_delay = None if self._silent else delay_seconds
         self._judge_delay()
         return self._settle()
 

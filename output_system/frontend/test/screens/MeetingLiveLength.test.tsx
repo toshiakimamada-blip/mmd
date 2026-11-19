@@ -210,18 +210,21 @@ describe('MeetingLiveScreen meeting length warning', () => {
 
   /**
    * 【ユーザーストーリー】
-   * 経過時間の上限を読めないとき（状況の取得が失敗した）は、警告を出さない。画面は使える
+   * 経過時間の上限を読めないとき（状況の取得が失敗した）も、既定の 2 時間で警告を出す。エラーは出さない
    *
-   * 【期待結果】2 時間を超えていても、警告もエラーも出ない
+   * 【期待結果】2 時間ちょうどでは出ず、2 時間を超えると警告が出る。エラー（role="alert"）は出ない
    */
-  it('should not warn when the limit cannot be read', async () => {
+  it('should warn with the default limit when the limit cannot be read', async () => {
     liveStatusFails = true;
-    setClock(8000);
+    setClock(7200);
 
     openLive();
     await advance(0);
-
     expect(screen.queryByText(/超えました/)).not.toBeInTheDocument();
+
+    await advance(1);
+
+    expect(screen.getByText(LENGTH_WARNING)).toBeInTheDocument();
     expect(screen.queryByRole('alert')).not.toBeInTheDocument();
   });
 

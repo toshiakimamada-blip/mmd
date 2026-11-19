@@ -96,7 +96,7 @@ export async function fetchSubtitles(meetingId: string): Promise<Subtitle[]> {
 }
 
 /** 進行中の会議の、「会議中」の画面が読む状況。 */
-export interface LiveStatus {
+export interface LiveStatusResponse {
   /** 字幕の状況。通知 subtitle_status.changed の status と同じ値。 */
   readonly subtitleStatus: SubtitleStatus;
   /** 会議の長さの警告を出す経過時間（秒）。アプリサーバーの調整値。画面が、経過時間と比べて判定する。 */
@@ -104,7 +104,7 @@ export interface LiveStatus {
 }
 
 /** 状況の取得の応答を、画面の型に読み替える。読めなければ例外（呼び出し側が想定外のエラーにする）。 */
-function parseLiveStatus(body: unknown): LiveStatus {
+function parseLiveStatus(body: unknown): LiveStatusResponse {
   const record = (body ?? {}) as { subtitle_status?: unknown; meeting_length_warning_seconds?: unknown };
   const seconds = record.meeting_length_warning_seconds;
   if (
@@ -126,7 +126,7 @@ function parseLiveStatus(body: unknown): LiveStatus {
  * @param meetingId 会議番号。URL の 1 つの区間として符号化する
  * @throws ApiError 会議が進行中でない（MEETING_NOT_RUNNING）・応答が読めない・アプリサーバーに届かなかったとき
  */
-export async function fetchLiveStatus(meetingId: string): Promise<LiveStatus> {
+export async function fetchLiveStatus(meetingId: string): Promise<LiveStatusResponse> {
   return requestJson(
     `/api/meetings/${encodeURIComponent(meetingId)}/live-status`,
     { method: 'GET', cache: 'no-store' },

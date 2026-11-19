@@ -5,13 +5,19 @@ import { fetchLiveStatus } from '../api/meetingsApi';
 import { useEvent } from '../events/EventsProvider';
 import { type SubtitleStatus } from '../subtitles/subtitleStatus';
 
+/**
+ * 会議の長さの警告を出す経過時間（秒）の既定値。要件の「2 時間」。状況を読めなかったときに使う
+ * （アプリサーバーの調整値 meeting_length_warning_seconds の既定値と同じ）。
+ */
+export const DEFAULT_LENGTH_WARNING_SECONDS = 2 * 60 * 60;
+
 /** 「会議中」の画面が持つ、会議の状況。 */
 export interface LiveStatus {
   /** 字幕の状況。 */
   readonly subtitleStatus: SubtitleStatus;
   /**
-   * 会議の長さの警告を出す経過時間（秒）。アプリサーバーの調整値。まだ読めていない、または読めなかった
-   * ときは null（警告を出さない）。
+   * 会議の長さの警告を出す経過時間（秒）。アプリサーバーの調整値。まだ読めていないときは null
+   * （警告を出さない）。読めなかったときは、既定値（DEFAULT_LENGTH_WARNING_SECONDS）。
    */
   readonly lengthWarningSeconds: number | null;
 }
@@ -28,7 +34,9 @@ export interface LiveStatus {
  * - アプリサーバーとの接続が切れて、つなぎ直したときは、サーバーが最初に送る現在の状況の通知で
  *   直る。切れている間に変わった状況も、これで追いつく
  * - 読み込みに失敗しても（進行中でない会議など）、エラーを出さない。状況は補助の表示で、字幕の表示と
- *   終了の操作を妨げない。アプリサーバーが返したエラー（ApiError）以外の例外は、握りつぶさず上へ出す
+ *   終了の操作を妨げない。経過時間の上限は、既定値（2 時間）で判定する（読めないために、会議の長さの
+ *   警告が出なくなることを避ける）。アプリサーバーが返したエラー（ApiError）以外の例外は、握りつぶさず
+ *   上へ出す
  *
  * @param meetingId 会議番号
  */
@@ -61,6 +69,9 @@ export function useLiveStatus(meetingId: string): LiveStatus {
       (error: unknown) => {
         if (!(error instanceof ApiError)) {
           throw error;
+        }
+        if (active) {
+          setLengthWarningSeconds(DEFAULT_LENGTH_WARNING_SECONDS);
         }
       },
     );
