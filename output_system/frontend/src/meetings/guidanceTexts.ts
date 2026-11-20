@@ -46,6 +46,33 @@ export const SOURCE_GUIDANCE: Readonly<Record<AudioSource, SourceGuidance>> = {
   },
 };
 
+/** 会議中に取り込みのやり直しに失敗したときの、手順の見出し。 */
+export const RESTART_GUIDANCE_HEADING = '取り込みをやり直す手順';
+
+/**
+ * 会議中に取り込みが止まり、やり直しにも失敗したときの、音声の出どころごとの手順（F-01・F-02）。
+ * 「会議の準備」の手順（SOURCE_GUIDANCE）と同じ確認で行う操作を、「取り込みをやり直す」ボタンから始まる
+ * 文にしたもの。ボタンの名前は、お知らせ帯の選択（RESTART_CAPTURE_LABEL）と同じにする。
+ */
+export const RESTART_GUIDANCE_STEPS: Readonly<Record<AudioSource, readonly string[]>> = {
+  system_audio: [
+    '「取り込みをやり直す」を押すと、ブラウザーが画面の共有の確認を出します。',
+    '共有する対象は、「画面全体」を選びます。ウィンドウやタブを選ぶと、会議の音声を取り込めないことがあります。',
+    '「音声を共有する」（ブラウザーによって、表示は少し異なります）をオンにします。オフのままでは、音声を取り込めません。',
+    '「共有」を押します。',
+  ],
+  microphone: [
+    'マイクを PC につなぎます。',
+    '「取り込みをやり直す」を押すと、ブラウザーがマイクの利用の許可を尋ねます。',
+    '「許可」を押します。',
+    '許可を断ったときは、アドレス欄の左にあるアイコンからマイクを許可し直して、もう一度「取り込みをやり直す」を押します。',
+  ],
+};
+
+/** 取り込み停止のお知らせの選択（ボタンの文字）。お知らせ帯と、手順の案内で同じ名前を使う。 */
+export const RESTART_CAPTURE_LABEL = '取り込みをやり直す';
+export const END_MEETING_LABEL = '会議を終了する';
+
 /** 音声の出どころを選ぶ前に、手順の代わりに出す文。 */
 export const SOURCE_GUIDANCE_PROMPT =
   '音声の出どころを選ぶと、取り込みの手順がここに表示されます。';

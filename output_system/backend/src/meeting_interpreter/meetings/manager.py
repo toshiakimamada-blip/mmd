@@ -148,7 +148,8 @@ class MeetingManager:
     def subscribe_capture_events(self, listener: Callable[[str, CaptureEvent], None]) -> None:
         """音声の取り込みの知らせ（capture.stopped・capture.resumed）の受け取り先を足す。
 
-        字幕の状況の更新に使う（後続の作業）。
+        字幕の状況の切り替えは、セッション自身が行う（MeetingSession.notify_capture）。この受け取り先は、
+        それとは別に、知らせを受けたいときに使う。
         """
         self._capture_listeners.append(listener)
 

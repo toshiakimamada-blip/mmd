@@ -19,7 +19,8 @@
 
 メッセージ
 
-    親から子（InputMessage）  開始（Start）／音声（Audio）／終了処理の依頼（Finish）／停止（Stop）
+    親から子（InputMessage）  開始（Start）／音声（Audio）／発話の確定の依頼（EndUtterance）／
+                              終了処理の依頼（Finish）／停止（Stop）
     子から親（OutputMessage） 準備完了（Ready）／字幕（Subtitle）／無音の知らせ（Silence）／
                               声が戻った知らせ（SpeechResumed）／遅れの見込み（Backlog）／
                               エラー（WorkerError）／停止完了（Stopped）
@@ -130,6 +131,16 @@ class Audio:
 
 
 @dataclass(frozen=True, slots=True)
+class EndUtterance:
+    """発話の確定の依頼。開いている発話の区切りを、無音を待たずに閉じて、字幕にする。
+
+    音声が途中で止まったとき（画面の取り込み停止）に、止まる前の声を、止まった時点で字幕にするために送る。
+    音声の列の中で、止まる前の音声のあとに送る。Finish と違い、ワーカーは終わらず、このあとも音声を
+    受け取る。開いている区切りが無ければ、何もしない。
+    """
+
+
+@dataclass(frozen=True, slots=True)
 class Finish:
     """終了処理の依頼。残りの音声をすべて字幕にして、停止完了を返し、終わる。"""
 
@@ -139,7 +150,7 @@ class Stop:
     """停止。残りの音声を字幕にせず、すぐ終わる。"""
 
 
-InputMessage = Start | Audio | Finish | Stop
+InputMessage = Start | Audio | EndUtterance | Finish | Stop
 
 
 @dataclass(frozen=True, slots=True)
@@ -318,6 +329,8 @@ def encode_input(message: InputMessage) -> bytes:
                     },
                 }
             )
+        case EndUtterance():
+            return json_frame({"type": "end_utterance"})
         case Finish():
             return json_frame({"type": "finish"})
         case Stop():
@@ -484,11 +497,17 @@ def decode_input(kind: int, payload: bytes) -> InputMessage:
             received_at=datetime_from_microseconds(microseconds, what="音声"),
         )
     data = _load_json(kind, payload)
-    message_type = _message_type(data, ("start", "finish", "stop"))
+    message_type = _message_type(data, ("start", "end_utterance", "finish", "stop"))
     if message_type == "start":
         return _decode_start(data)
     _Body({key: value for key, value in data.items() if key != "type"}, set(), what=message_type)
-    return Finish() if message_type == "finish" else Stop()
+    match message_type:
+        case "end_utterance":
+            return EndUtterance()
+        case "finish":
+            return Finish()
+        case _:
+            return Stop()
 
 
 def decode_output(kind: int, payload: bytes) -> OutputMessage:

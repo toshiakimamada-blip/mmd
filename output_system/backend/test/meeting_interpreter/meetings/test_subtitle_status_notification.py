@@ -8,6 +8,7 @@
   画面へ最初に届く現在の状況を確かめる
 """
 
+import json
 import os
 import signal
 import time
@@ -15,7 +16,7 @@ from collections.abc import Iterator
 
 import pytest
 
-from interpreter_audio import silence
+from interpreter_audio import silence, tone
 from meeting_fakes import (
     FAST,
     AppHandle,
@@ -30,7 +31,12 @@ from meeting_fakes import (
 from meeting_interpreter.interpreter.client import InterpreterClient
 from meeting_interpreter.interpreter.protocol import Backlog, Silence, SpeechResumed
 from meeting_interpreter.meetings import session as session_module
-from meeting_interpreter.meetings.session import SUBTITLE_STATUS_CHANGED, MeetingSession
+from meeting_interpreter.meetings.session import (
+    SUBTITLE_STATUS_CHANGED,
+    CaptureEvent,
+    CloseReason,
+    MeetingSession,
+)
 from meeting_interpreter.meetings.subtitle_status import SubtitleStatus
 from meeting_interpreter.records.models import MeetingStatus
 from meeting_interpreter.settings import Settings
@@ -265,6 +271,142 @@ def app_handle(settings: Settings) -> Iterator[AppHandle]:
             handle.close_all()
 
 
+class TestSessionCaptureNotification:
+    """単体: 画面が送る取り込みの知らせ（capture.stopped・capture.resumed）で、状況を切り替える。"""
+
+    def test_should_switch_to_capture_stopped_and_back_and_notify_each_change_once(self):
+        """
+        【テスト対象】MeetingSession.notify_capture と、字幕の状況の通知
+        【テスト内容】準備完了のあと、停止の知らせを 2 回、再開の知らせを 2 回受ける
+        【期待結果】通知の状況が on_time → capture_stopped → on_time の順に 1 件ずつ出ること
+                    （同じ知らせを重ねて受けても、通知は重ならない）。受け取り先（listener）へは、
+                    4 件とも渡ること
+        """
+        received: list[CaptureEvent] = []
+
+        async def scenario(session: MeetingSession, recorder: Recorder) -> None:
+            session.add_capture_listener(lambda _meeting_id, event: received.append(event))
+            session._mark_worker_ready()
+
+            session.notify_capture(CaptureEvent.STOPPED)
+            assert session.subtitle_status is SubtitleStatus.CAPTURE_STOPPED
+            session.notify_capture(CaptureEvent.STOPPED)
+            session.notify_capture(CaptureEvent.RESUMED)
+            assert session.subtitle_status is SubtitleStatus.ON_TIME
+            session.notify_capture(CaptureEvent.RESUMED)
+
+        time_source = FakeTime(STARTED_AT)
+        recorder = run_session(time_source, FakeStore(time_source), scenario)
+
+        assert statuses(recorder) == ["on_time", "capture_stopped", "on_time"]
+        assert all(payload["meeting_id"] == "m-001" for _, payload in status_notices(recorder))
+        assert received == [
+            CaptureEvent.STOPPED,
+            CaptureEvent.STOPPED,
+            CaptureEvent.RESUMED,
+            CaptureEvent.RESUMED,
+        ]
+
+    def test_should_keep_capture_stopped_while_the_remaining_audio_becomes_subtitles(self):
+        """
+        【テスト対象】取り込み停止の間に届く字幕
+        【テスト内容】取り込みが止まったあとで、止まる前に届いていた音声の字幕（遅れ 12 秒）を
+                    画面へ送る
+        【期待結果】字幕は保存されて通知されること。状況は取り込み停止のままで、遅れの通知は出ないこと。
+                    再開すると、遅れの判定に従って、遅れ（delayed）になること
+        """
+
+        async def scenario(session: MeetingSession, recorder: Recorder) -> None:
+            session._mark_worker_ready()
+            session.push_audio(b"\x00" * 3200)
+            arrival = time_source.now
+            session.notify_capture(CaptureEvent.STOPPED)
+            time_source.advance(11.75)
+            await session._handle_subtitle(worker_subtitle(arrival))
+            assert session.subtitle_status is SubtitleStatus.CAPTURE_STOPPED
+            session.notify_capture(CaptureEvent.RESUMED)
+
+        time_source = FakeTime(STARTED_AT)
+        store = FakeStore(time_source)
+        recorder = run_session(time_source, store, scenario)
+
+        assert len(store.saved) == 1
+        assert "subtitle.created" in [name for name, _ in recorder.published]
+        assert statuses(recorder) == ["on_time", "capture_stopped", "delayed"]
+
+    def test_should_not_change_the_status_after_the_meeting_started_closing(self):
+        """
+        【テスト対象】閉じる手順に入った会議への、取り込みの知らせ
+        【テスト内容】終了の要求を出したあとで、停止の知らせを受ける（終了の操作と共有の停止が重なった場合）
+        【期待結果】状況は変わらず、取り込み停止の通知も出ないこと（終了が優先。画面は記録へ移る）。
+                    受け取り先へは、知らせが渡ること
+        """
+        received: list[CaptureEvent] = []
+
+        async def scenario(session: MeetingSession, recorder: Recorder) -> None:
+            session.add_capture_listener(lambda _meeting_id, event: received.append(event))
+            session._mark_worker_ready()
+            session._request_close(CloseReason.END)
+            assert session.is_closing
+
+            session.notify_capture(CaptureEvent.STOPPED)
+
+            assert session.subtitle_status is SubtitleStatus.ON_TIME
+
+        time_source = FakeTime(STARTED_AT)
+        recorder = run_session(time_source, FakeStore(time_source), scenario)
+
+        assert statuses(recorder) == ["on_time"]
+        assert received == [CaptureEvent.STOPPED]
+
+
+class TestSessionUtteranceBreak:
+    """単体: capture.stopped で、通訳ワーカーへ「発話の確定」を、音声の列の中で順番どおりに頼む。"""
+
+    def test_should_queue_the_utterance_break_after_the_audio_that_arrived_before_the_stop(self):
+        """
+        【テスト対象】MeetingSession.notify_capture と、通訳ワーカーへ渡す音声の列
+        【テスト内容】音声を 2 つ届け、停止の知らせを受ける。そのあとで、再開の知らせと音声を受ける
+        【期待結果】停止の知らせの位置に、発話の確定が 1 つだけ並ぶこと（届いた音声の後ろ。
+                            再開のあとの
+                    音声の前）。再開の知らせは、発話の確定を足さない
+        """
+
+        async def scenario(session: MeetingSession, recorder: Recorder) -> None:
+            session.push_audio(b"\x01\x00" * 160)
+            session.push_audio(b"\x02\x00" * 160)
+            session.notify_capture(CaptureEvent.STOPPED)
+            session.notify_capture(CaptureEvent.RESUMED)
+            session.push_audio(b"\x03\x00" * 160)
+
+            kinds = [
+                "break" if item is session_module.AUDIO_BREAK else "audio"
+                for item in session._audio
+            ]
+            assert kinds == ["audio", "audio", "break", "audio"]
+
+        time_source = FakeTime(STARTED_AT)
+        run_session(time_source, FakeStore(time_source), scenario)
+
+    def test_should_not_queue_an_utterance_break_after_the_meeting_started_closing(self):
+        """
+        【テスト対象】閉じる手順に入った会議への、停止の知らせ
+        【テスト内容】終了の要求を出したあとで、停止の知らせを受ける
+        【期待結果】発話の確定を足さないこと（終了の処理が、残りの音声を最後の区切りにするため）
+        """
+
+        async def scenario(session: MeetingSession, recorder: Recorder) -> None:
+            session.push_audio(b"\x01\x00" * 160)
+            session._request_close(CloseReason.END)
+
+            session.notify_capture(CaptureEvent.STOPPED)
+
+            assert session_module.AUDIO_BREAK not in list(session._audio)
+
+        time_source = FakeTime(STARTED_AT)
+        run_session(time_source, FakeStore(time_source), scenario)
+
+
 def current_status(handle: AppHandle) -> SubtitleStatus | None:
     """進行中の会議の字幕の状況。会議が無ければ None。"""
     session = handle.app.state.meeting_manager.active_session
@@ -434,3 +576,272 @@ class TestWaitingForSpeechOverTheWire:
             time.sleep(2.5)
 
         assert [item["status"] for item in events.of_type(SUBTITLE_STATUS_CHANGED)] == ["on_time"]
+
+
+class TestCaptureStoppedOverTheWire:
+    """結合: 本物の通訳ワーカー（偽のエンジン）と本物のアプリサーバーで、取り込み停止を確かめる。"""
+
+    def test_should_turn_the_remaining_audio_into_subtitles_after_capture_stopped(self, app_handle):
+        """
+        【テスト対象】capture.stopped を受けたときの、字幕の状況と、残りの音声の字幕化
+        【テスト内容】会議を開始し、声を 1 秒送ってすぐに capture.stopped を送る
+                    （字幕になる前に止まる）。
+                    通訳ワーカーのプロセス番号を、前後で比べる
+        【期待結果】状況の通知が on_time → capture_stopped の順に出ること。止まる前に送った音声は、
+                    字幕が 1 件できること。会議は通訳中のままで、通訳ワーカーは同じプロセスの
+                    ままであること
+        """
+        events = app_handle.events()
+        meeting_id = start_meeting(app_handle)
+        pid = wait_for_worker(app_handle)
+        events.wait_for_count(SUBTITLE_STATUS_CHANGED, 1)
+
+        with app_handle.audio(meeting_id) as audio:
+            speak(audio, 1.0)
+            audio.send(json.dumps({"type": "capture.stopped"}))
+            events.wait_for_count(SUBTITLE_STATUS_CHANGED, 2)
+            events.wait_for_count("subtitle.created", 1)
+
+            assert [item["status"] for item in events.of_type(SUBTITLE_STATUS_CHANGED)] == [
+                "on_time",
+                "capture_stopped",
+            ]
+            assert current_status(app_handle) is SubtitleStatus.CAPTURE_STOPPED
+            session = app_handle.app.state.meeting_manager.active_session
+            assert session is not None and session.meeting.status is MeetingStatus.INTERPRETING
+            assert session.worker_pid == pid
+
+    def test_should_return_to_on_time_and_continue_the_same_meeting_when_capture_resumes(
+        self, app_handle
+    ):
+        """
+        【テスト対象】capture.resumed を受けたときの、字幕の状況と、同じ会議での字幕の続き
+        【テスト内容】会議を開始し、声を送り、capture.stopped のあとに capture.resumed を送る。
+                    続けて、同じ接続で、もう一度声を送る
+        【期待結果】状況の通知が on_time → capture_stopped → on_time の順に出ること。
+                    字幕が 2 件になり、
+                    どちらも同じ会議番号の通知であること
+        """
+        events = app_handle.events()
+        meeting_id = start_meeting(app_handle)
+        events.wait_for_count(SUBTITLE_STATUS_CHANGED, 1)
+
+        with app_handle.audio(meeting_id) as audio:
+            speak(audio, 1.0)
+            events.wait_for_count("subtitle.created", 1)
+            audio.send(json.dumps({"type": "capture.stopped"}))
+            events.wait_for_count(SUBTITLE_STATUS_CHANGED, 2)
+            audio.send(json.dumps({"type": "capture.resumed"}))
+            events.wait_for_count(SUBTITLE_STATUS_CHANGED, 3)
+            speak(audio, 1.0)
+            events.wait_for_count("subtitle.created", 2)
+
+        assert [item["status"] for item in events.of_type(SUBTITLE_STATUS_CHANGED)] == [
+            "on_time",
+            "capture_stopped",
+            "on_time",
+        ]
+        assert {item["meeting_id"] for item in events.of_type("subtitle.created")} == {meeting_id}
+
+    def test_should_accept_the_end_request_while_capture_is_stopped(self, app_handle):
+        """
+        【テスト対象】取り込み停止の間の、会議の終了の受け付け
+        【テスト内容】会議を開始し、声を送って字幕にし、capture.stopped を送る。
+                    続けて、終了の API を呼ぶ
+        【期待結果】終了の API が成功し、会議の記録の状態が、字幕があるため要約作成中になること
+                    （取り込み停止の間も、会議の状態は通訳中で、終了を受け付ける）
+        """
+        events = app_handle.events()
+        meeting_id = start_meeting(app_handle)
+        events.wait_for_count(SUBTITLE_STATUS_CHANGED, 1)
+
+        with app_handle.audio(meeting_id) as audio:
+            speak(audio, 1.0)
+            events.wait_for_count("subtitle.created", 1)
+            audio.send(json.dumps({"type": "capture.stopped"}))
+            events.wait_for_count(SUBTITLE_STATUS_CHANGED, 2)
+            assert current_status(app_handle) is SubtitleStatus.CAPTURE_STOPPED
+
+            status, body = app_handle.post(f"/api/meetings/{meeting_id}/end")
+
+        assert status == 200, body
+        assert body["status"] in {MeetingStatus.SUMMARIZING.value, MeetingStatus.COMPLETED.value}
+        assert body["status"] != MeetingStatus.INTERPRETING.value
+
+    def test_should_tell_a_newly_connected_screen_that_capture_is_stopped(self, app_handle):
+        """
+        【テスト対象】取り込み停止の間に新しく接続した画面への、現在の状況の通知
+        【テスト内容】会議を開始し、capture.stopped を送ったあとで、通知の接続（/ws/events）を
+                    新しく開く
+        【期待結果】新しい接続へ最初に届く字幕の状況の通知が、取り込み停止であること
+        """
+        first = app_handle.events()
+        meeting_id = start_meeting(app_handle)
+        first.wait_for_count(SUBTITLE_STATUS_CHANGED, 1)
+
+        with app_handle.audio(meeting_id) as audio:
+            audio.send(json.dumps({"type": "capture.stopped"}))
+            first.wait_for_count(SUBTITLE_STATUS_CHANGED, 2)
+
+            second = app_handle.events()
+            second.wait_for_count(SUBTITLE_STATUS_CHANGED, 1)
+
+            assert second.of_type(SUBTITLE_STATUS_CHANGED)[0]["status"] == "capture_stopped"
+
+    def test_should_write_processing_logs_for_the_stop_and_the_resume_without_content(
+        self, app_handle, capfd
+    ):
+        """
+        【テスト対象】取り込み停止と再開の処理ログ
+        【テスト内容】会議を開始し、capture.stopped と capture.resumed を送る
+        【期待結果】処理ログに capture_stopped と capture_resumed が、この順で、会議番号つきで
+                    出ること。
+                    会議のタイトルや字幕の本文は、ログに出ないこと
+        """
+        events = app_handle.events()
+        meeting_id = start_meeting(app_handle, title="極秘の人事会議ZZ")
+        events.wait_for_count(SUBTITLE_STATUS_CHANGED, 1)
+
+        with app_handle.audio(meeting_id) as audio:
+            audio.send(json.dumps({"type": "capture.stopped"}))
+            events.wait_for_count(SUBTITLE_STATUS_CHANGED, 2)
+            audio.send(json.dumps({"type": "capture.resumed"}))
+            events.wait_for_count(SUBTITLE_STATUS_CHANGED, 3)
+
+        output = ""
+        deadline = time.monotonic() + 10
+        types: list[str] = []
+        while time.monotonic() < deadline:
+            captured = capfd.readouterr()
+            output += captured.out + captured.err
+            lines = [
+                json.loads(line) for line in output.splitlines() if line.startswith('{"timestamp"')
+            ]
+            types = [
+                line["process_type"]
+                for line in lines
+                if line.get("log_type") == "processing" and line.get("meeting_id") == meeting_id
+            ]
+            if "capture_resumed" in types:
+                break
+            time.sleep(0.05)
+
+        assert [t for t in types if t.startswith("capture_")] == [
+            "capture_stopped",
+            "capture_resumed",
+        ]
+        assert "極秘の人事会議ZZ" not in output
+
+
+class TestVoiceStoppedMidUtteranceOverTheWire:
+    """結合: 発話の途中で共有が止まったとき、停止の時点で字幕になること（再開を待たない）。
+
+    声のあとに無音を付けずに capture.stopped を送る。無音を付けると、
+    停止の前に区切りが確定してしまい、
+    停止で区切りを確定させる動きを確かめられない。
+    """
+
+    def test_should_make_a_subtitle_at_the_stop_without_waiting_for_the_resume(self, app_handle):
+        """
+        【テスト対象】capture.stopped を受けたときの、通訳ワーカーの区切りの確定
+        【テスト内容】会議を開始し、声（1.0 秒）だけを送り、すぐに capture.stopped を送る。
+                            再開は送らない
+        【期待結果】再開も終了も待たずに、字幕が 1 件できること。状況は取り込み停止のまま、
+                            会議は通訳中で、
+                    通訳ワーカーは同じプロセスのままであること
+        """
+        events = app_handle.events()
+        meeting_id = start_meeting(app_handle)
+        pid = wait_for_worker(app_handle)
+        events.wait_for_count(SUBTITLE_STATUS_CHANGED, 1)
+
+        with app_handle.audio(meeting_id) as audio:
+            for frame in frames(tone(1.0)):
+                audio.send(frame)
+            audio.send(json.dumps({"type": "capture.stopped"}))
+
+            events.wait_for_count("subtitle.created", 1, timeout=10)
+
+            assert current_status(app_handle) is SubtitleStatus.CAPTURE_STOPPED
+            session = app_handle.app.state.meeting_manager.active_session
+            assert session is not None and session.meeting.status is MeetingStatus.INTERPRETING
+            assert session.worker_pid == pid
+
+    def test_should_keep_the_subtitles_in_order_across_the_stop_and_the_resume(self, app_handle):
+        """
+        【テスト対象】停止で確定した発話と、再開後の発話
+        【テスト内容】声だけを送って停止し、字幕ができたあとに再開して、もう一度声と無音を送る
+        【期待結果】字幕が 2 件になり、順番が 1、2 になること。再開後の字幕は、
+                            停止の前の声と混ざらない
+                    （停止の前の声は、1 件目で終わっている）
+        """
+        events = app_handle.events()
+        meeting_id = start_meeting(app_handle)
+        events.wait_for_count(SUBTITLE_STATUS_CHANGED, 1)
+
+        with app_handle.audio(meeting_id) as audio:
+            for frame in frames(tone(1.0)):
+                audio.send(frame)
+            audio.send(json.dumps({"type": "capture.stopped"}))
+            events.wait_for_count("subtitle.created", 1, timeout=10)
+            audio.send(json.dumps({"type": "capture.resumed"}))
+            speak(audio, 1.0)
+            events.wait_for_count("subtitle.created", 2, timeout=10)
+
+        created = events.of_type("subtitle.created")
+        assert [item["sequence"] for item in created] == [1, 2]
+
+    def test_should_make_the_queued_voice_a_subtitle_when_the_stop_comes_before_the_worker_is_ready(
+        self, slow_app_handle
+    ):
+        """
+        【テスト対象】通訳ワーカーの準備完了の前に届いた、声と停止の知らせ
+        【テスト内容】起動に時間がかかる通訳ワーカーで会議を開始し、準備完了の前に、声（1.0 秒）と
+                    capture.stopped を送る
+        【期待結果】準備完了のあとに、ためた声が字幕になること（発話の確定は、声のあとに、順番どおり
+                    ワーカーへ渡る）。状況は取り込み停止のまま
+        """
+        events = slow_app_handle.events()
+        meeting_id = start_meeting(slow_app_handle)
+
+        with slow_app_handle.audio(meeting_id) as audio:
+            for frame in frames(tone(1.0)):
+                audio.send(frame)
+            audio.send(json.dumps({"type": "capture.stopped"}))
+
+            events.wait_for_count("subtitle.created", 1, timeout=20)
+
+            assert current_status(slow_app_handle) is SubtitleStatus.CAPTURE_STOPPED
+
+    def test_should_continue_with_a_restarted_worker_after_a_stop(self, app_handle):
+        """
+        【テスト対象】取り込み停止の間に通訳ワーカーが異常終了したときの、起動し直しと再開
+        【テスト内容】声だけを送って停止し、字幕ができたあとで、通訳ワーカーを強制終了する。
+                    起動し直ったら、再開の知らせを送り、声と無音を送る
+        【期待結果】字幕がもう 1 件できること。会議は通訳中のまま続き、
+                            通訳ワーカーのプロセスは別になること
+        """
+        events = app_handle.events()
+        meeting_id = start_meeting(app_handle)
+        pid = wait_for_worker(app_handle)
+        events.wait_for_count(SUBTITLE_STATUS_CHANGED, 1)
+
+        with app_handle.audio(meeting_id) as audio:
+            for frame in frames(tone(1.0)):
+                audio.send(frame)
+            audio.send(json.dumps({"type": "capture.stopped"}))
+            events.wait_for_count("subtitle.created", 1, timeout=10)
+
+            os.killpg(pid, signal.SIGKILL)
+            deadline = time.monotonic() + 30
+            session = app_handle.app.state.meeting_manager.active_session
+            assert session is not None
+            while (session.worker_pid in (None, pid)) and time.monotonic() < deadline:
+                time.sleep(0.1)
+            assert session.worker_pid not in (None, pid)
+
+            audio.send(json.dumps({"type": "capture.resumed"}))
+            speak(audio, 1.0)
+            events.wait_for_count("subtitle.created", 2, timeout=30)
+
+            assert session.meeting.status is MeetingStatus.INTERPRETING

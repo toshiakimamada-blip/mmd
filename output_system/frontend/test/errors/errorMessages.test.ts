@@ -1,7 +1,12 @@
 import { describe, expect, it } from 'vitest';
 
 import { AUDIO_ERROR_CODES } from '../../src/audio/audioErrors';
-import { ERROR_WORDINGS, GENERIC_WORDINGS, toDisplayError } from '../../src/errors/errorMessages';
+import {
+  ERROR_WORDINGS,
+  GENERIC_WORDINGS,
+  toDisplayError,
+  toDisplayErrorFromCode,
+} from '../../src/errors/errorMessages';
 import { ERROR_CATEGORIES, isErrorCode, type AppErrorBody } from '../../src/errors/errorTypes';
 
 /**
@@ -310,6 +315,23 @@ describe('ERROR_WORDINGS for audio capture', () => {
     for (const code of AUDIO_ERROR_CODES) {
       expect(Object.keys(ERROR_WORDINGS), code).toContain(code);
     }
+  });
+});
+
+describe('ERROR_WORDINGS for a stopped capture', () => {
+  /**
+   * 【テスト対象】ERROR_WORDINGS（会議中に取り込みが止まったときのコード AUDIO_CAPTURE_STOPPED）
+   * 【テスト内容】システムエラーとして、画面に出す形に変換する
+   * 【期待結果】専用の文言を持つこと（汎用の文言ではない）。次に行う操作として、やり直しと終了の
+   *             2 つの選択を示すこと。会議の内容は含まないこと
+   */
+  it('should have a dedicated wording that points to the two choices', () => {
+    const error = toDisplayErrorFromCode('system_error', 'AUDIO_CAPTURE_STOPPED');
+
+    expect(error.message).not.toBe(GENERIC_WORDINGS.system_error.message);
+    expect(error.action).toContain('取り込みをやり直す');
+    expect(error.action).toContain('会議を終了する');
+    expect(error.category).toBe('system_error');
   });
 });
 

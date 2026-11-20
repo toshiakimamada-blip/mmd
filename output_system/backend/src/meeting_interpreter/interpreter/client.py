@@ -25,6 +25,7 @@ from typing import Final
 from ..worker_client import WorkerClient, WorkerExited, WorkerStartError
 from .protocol import (
     Audio,
+    EndUtterance,
     Finish,
     OutputMessage,
     Ready,
@@ -89,6 +90,17 @@ class InterpreterClient(WorkerClient[OutputMessage]):
             OSError: ワーカーが終わっていて、送れないとき。
         """
         self._write(encode_input(Audio(pcm=pcm, received_at=received_at)))
+
+    def end_utterance(self) -> None:
+        """発話の確定を依頼する。ワーカーは、開いている区切りを、無音を待たずに字幕にする。
+
+        音声が途中で止まったとき（画面の取り込み停止）に、止まる前の音声を送り終えたあとで呼ぶ。
+        終了処理（finish）と違い、ワーカーは続き、このあとも音声を送れる。
+
+        Raises:
+            OSError: ワーカーが終わっていて、送れないとき。
+        """
+        self._write(encode_input(EndUtterance()))
 
     def finish(self, *, timeout_seconds: float | None = None) -> None:
         """終了処理を依頼する。ワーカーは、残りの音声を字幕にして、停止完了を返し、終わる。

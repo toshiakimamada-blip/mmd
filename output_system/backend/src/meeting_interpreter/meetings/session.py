@@ -210,6 +210,19 @@ class _PumpFailed:
 _Event = _FromWorker | _CloseRequested | _PumpIdle | _PumpFailed
 
 
+@dataclass(frozen=True, slots=True)
+class _AudioBreak:
+    """通訳ワーカーへ渡す音声の列の中の、「ここで発話を確定する」という印。
+
+    音声の取り込みが止まったとき（capture.stopped）に、止まる前の音声の後ろへ置く。音声と同じ列に置くため、
+    止まる前の音声がすべてワーカーへ渡ったあとに、確定の依頼が渡る（順番が入れ替わらない）。
+    """
+
+
+# 発話の確定の印。1 つだけ作って使い回す（中身は無い）。
+AUDIO_BREAK: Final = _AudioBreak()
+
+
 class _Phase(StrEnum):
     """_serve の段階。"""
 
@@ -350,7 +363,8 @@ class MeetingSession:
         self._interpreter_stopped_notified = False
 
         self._events: asyncio.Queue[_Event] = asyncio.Queue()
-        self._audio: collections.deque[tuple[bytes, datetime]] = collections.deque()
+        # 通訳ワーカーへ渡す前の音声（届いた順）。取り込みが止まったときは、発話の確定の印が入る。
+        self._audio: collections.deque[tuple[bytes, datetime] | _AudioBreak] = collections.deque()
         self._audio_ready = asyncio.Event()
         self._accepting = True
         self._audio_connected = False
@@ -419,7 +433,8 @@ class MeetingSession:
     def add_capture_listener(self, listener: Callable[[str, CaptureEvent], None]) -> None:
         """音声の取り込みの知らせ（capture.stopped・capture.resumed）の受け取り先を足す。
 
-        字幕の状況の更新に使う（後続の作業）。受け取り先の失敗は、会議に影響させない。
+        字幕の状況の更新は、セッション自身が行う（notify_capture）。受け取り先は、それとは別の用途で使う。
+        受け取り先の失敗は、会議に影響させない。
         """
         self._capture_listeners.append(listener)
 
@@ -468,11 +483,28 @@ class MeetingSession:
             del self._arrival_monotonic[next(iter(self._arrival_monotonic))]
 
     def notify_capture(self, event: CaptureEvent) -> None:
-        """音声の取り込みの知らせを受け取り、受け取り先へ渡す。"""
+        """音声の取り込みの知らせを受け取り、字幕の状況を切り替えて、受け取り先へ渡す。
+
+        停止（capture.stopped）で取り込み停止にし、再開（capture.resumed）で遅れの判定に従う状況へ
+        戻す。会議の状態は通訳中のままで、通訳ワーカーも止めない。
+        停止の前に届いた音声は、最後まで字幕になる。発話の途中（最後の声から、区切りを確定する無音が
+        流れる前）で止まったときも、再開を待たずに字幕にするため、通訳ワーカーへ発話の確定を頼む。
+        確定の依頼は、音声と同じ列に置く（止まる前の音声が、先にワーカーへ渡る）。
+        閉じる手順に入ったあとの知らせは、状況を変えず、確定も頼まない（終了が先。残りの音声は、
+        終了の処理が最後の区切りにする。画面は記録へ移る）。
+        処理ログには、停止と再開を出す（会議の内容は入れない）。
+        """
         log_processing(
             "capture_stopped" if event is CaptureEvent.STOPPED else "capture_resumed",
             meeting_id=self.meeting_id,
         )
+        if self._close_reason is None:
+            if event is CaptureEvent.STOPPED:
+                self._audio.append(AUDIO_BREAK)
+                self._audio_ready.set()
+                self._announce_status(self._subtitle_status.capture_stopped())
+            else:
+                self._announce_status(self._subtitle_status.capture_resumed())
         for listener in tuple(self._capture_listeners):
             try:
                 listener(self.meeting_id, event)
@@ -704,10 +736,16 @@ class MeetingSession:
         try:
             while True:
                 while self._audio:
-                    pcm, received_at = self._audio[0]
-                    await loop.run_in_executor(
-                        handle.writer, handle.client.send_audio, pcm, received_at
-                    )
+                    item = self._audio[0]
+                    if isinstance(item, _AudioBreak):
+                        # 止まる前の音声は、すべて渡したあと。開いている発話を、
+                        # 無音を待たずに閉じさせる。
+                        await loop.run_in_executor(handle.writer, handle.client.end_utterance)
+                    else:
+                        pcm, received_at = item
+                        await loop.run_in_executor(
+                            handle.writer, handle.client.send_audio, pcm, received_at
+                        )
                     self._audio.popleft()
                 if self._close_reason is not None:
                     self._events.put_nowait(_PumpIdle(handle.generation))
