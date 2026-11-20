@@ -53,15 +53,19 @@ export function useLiveStatus(meetingId: string): LiveStatus {
   const [captureStopCount, setCaptureStopCount] = useState(0);
   // 通知を受けたか。受けたあとの読み込みの応答は、通知より古いため、字幕の状況には使わない。
   const notified = useRef(false);
+  // 直前に受けた字幕の状況。つなぎ直したときにサーバーが送り直す、同じ取り込み停止を数えないために持つ。
+  const lastStatus = useRef<SubtitleStatus | null>(null);
 
   useEvent('subtitle_status.changed', (event) => {
     if (event.meetingId === meetingId) {
       notified.current = true;
       setSubtitleStatus(event.status);
-      if (event.status === 'capture_stopped') {
-        // 更新関数で数える。同じ描画にまとまる通知も、数え落とさない。
+      // 新しく止まったときだけ数える。サーバーは同じ状況を重ねて通知しないため、取り込み停止が続けて
+      // 届くのは、つなぎ直したときの送り直しだけ。更新関数で数え、同じ描画にまとまる通知も数え落とさない。
+      if (event.status === 'capture_stopped' && lastStatus.current !== 'capture_stopped') {
         setCaptureStopCount((count) => count + 1);
       }
+      lastStatus.current = event.status;
     }
   });
 
@@ -76,6 +80,7 @@ export function useLiveStatus(meetingId: string): LiveStatus {
         setLengthWarningSeconds(live.meetingLengthWarningSeconds);
         if (!notified.current) {
           setSubtitleStatus(live.subtitleStatus);
+          lastStatus.current = live.subtitleStatus;
         }
       },
       (error: unknown) => {

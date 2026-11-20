@@ -582,6 +582,28 @@ describe('MeetingLiveScreen capture stopped choice', () => {
 
   /**
    * 【ユーザーストーリー】
+   * 取り込み停止のまま、アプリサーバーとの接続をつなぎ直した。サーバーが送り直す同じ取り込み停止を、
+   * 新しい停止として扱わない
+   *
+   * 【期待結果】やり直しの失敗の理由と手順の案内が残り、選択のお知らせは 1 つのまま
+   */
+  it('should not treat the status sent again on reconnect as a new stop', async () => {
+    const user = userEvent.setup();
+    await openLive();
+    stopCapture();
+    fake.restart.mockImplementationOnce(() => Promise.reject(new AudioCaptureError('AUDIO_MIC_NOT_FOUND')));
+    await user.click(screen.getByRole('button', { name: '取り込みをやり直す' }));
+    expect(await screen.findByRole('region', { name: '取り込みをやり直す手順' })).toBeInTheDocument();
+
+    act(() => FakeEventSocket.last.receive(statusChanged('capture_stopped')));
+
+    expect(screen.getByRole('region', { name: '取り込みをやり直す手順' })).toBeInTheDocument();
+    expect(within(choiceNotice()!).getByText('AUDIO_MIC_NOT_FOUND')).toBeInTheDocument();
+    expect(document.querySelectorAll('[data-notice-kind="choice"]')).toHaveLength(1);
+  });
+
+  /**
+   * 【ユーザーストーリー】
    * 「会議を終了する」を選んだあと、終了の処理が終わるまで、選択も終了のボタンも押せない
    *
    * 【期待結果】
