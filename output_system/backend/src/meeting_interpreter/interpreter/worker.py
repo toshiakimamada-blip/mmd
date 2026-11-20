@@ -109,6 +109,14 @@ class InterpreterWorker:
         """音声を受け取り、できた区切りを待ち行列へ入れる。文字起こしと翻訳は待たない。"""
         self._dispatch(self._segmenter.feed(audio.pcm, audio.received_at))
 
+    def end_utterance(self) -> None:
+        """発話の確定。開いている発話の区切りを、無音を待たずに閉じて、待ち行列へ入れる。
+
+        音声が途中で止まったとき（画面の取り込み停止）に、止まる前の声を、止まった時点で字幕にする。
+        終了処理（finish）と違い、ワーカーは続き、このあとも音声を受け取る。
+        """
+        self._dispatch(self._segmenter.end_utterance())
+
     def finish(self) -> None:
         """終了処理。残りの音声を最後の区切りにして待ち行列へ入れる。
 

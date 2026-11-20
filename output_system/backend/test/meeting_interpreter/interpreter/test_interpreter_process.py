@@ -181,6 +181,27 @@ class TestLifecycle:
         assert client.wait_exit(timeout_seconds=10) == 0
         assert pid is not None and process_group_members(pid) == []
 
+    def test_should_make_a_subtitle_of_the_open_voice_when_asked_to_end_the_utterance(self, client):
+        """
+        【テスト対象】InterpreterClient.end_utterance
+        【テスト内容】無音を付けずに声（1.5 秒）を送り、発話の確定を依頼する。そのあと、
+                            もう一度、声と無音を送る
+        【期待結果】確定で字幕が 1 件返り、ワーカーは動き続けること（停止完了は返らない）。
+                    続けて送った音声も、もう 1 件の字幕になる。プロセスは同じまま
+        """
+        client.start(fake_start(), timeout_seconds=START_TIMEOUT)
+        pid = client.pid
+        client.send_audio(tone(1.5), START)
+
+        client.end_utterance()
+        first = read_until(client, (Subtitle,))
+        client.send_audio(silence(0.5) + tone(1.0) + silence(1.0), START + timedelta(seconds=60))
+        second = read_until(client, (Subtitle,))
+
+        assert [type(message) for message in first] == [Subtitle]
+        assert [type(message) for message in second] == [Subtitle]
+        assert client.pid == pid
+
     def test_should_stop_at_once_without_making_subtitles_of_the_remaining_audio(self, client):
         """
         【テスト対象】InterpreterClient.stop

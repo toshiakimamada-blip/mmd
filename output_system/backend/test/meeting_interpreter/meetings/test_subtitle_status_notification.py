@@ -16,7 +16,7 @@ from collections.abc import Iterator
 
 import pytest
 
-from interpreter_audio import silence
+from interpreter_audio import silence, tone
 from meeting_fakes import (
     FAST,
     AppHandle,
@@ -360,6 +360,53 @@ class TestSessionCaptureNotification:
         assert received == [CaptureEvent.STOPPED]
 
 
+class TestSessionUtteranceBreak:
+    """単体: capture.stopped で、通訳ワーカーへ「発話の確定」を、音声の列の中で順番どおりに頼む。"""
+
+    def test_should_queue_the_utterance_break_after_the_audio_that_arrived_before_the_stop(self):
+        """
+        【テスト対象】MeetingSession.notify_capture と、通訳ワーカーへ渡す音声の列
+        【テスト内容】音声を 2 つ届け、停止の知らせを受ける。そのあとで、再開の知らせと音声を受ける
+        【期待結果】停止の知らせの位置に、発話の確定が 1 つだけ並ぶこと（届いた音声の後ろ。
+                            再開のあとの
+                    音声の前）。再開の知らせは、発話の確定を足さない
+        """
+
+        async def scenario(session: MeetingSession, recorder: Recorder) -> None:
+            session.push_audio(b"\x01\x00" * 160)
+            session.push_audio(b"\x02\x00" * 160)
+            session.notify_capture(CaptureEvent.STOPPED)
+            session.notify_capture(CaptureEvent.RESUMED)
+            session.push_audio(b"\x03\x00" * 160)
+
+            kinds = [
+                "break" if item is session_module.AUDIO_BREAK else "audio"
+                for item in session._audio
+            ]
+            assert kinds == ["audio", "audio", "break", "audio"]
+
+        time_source = FakeTime(STARTED_AT)
+        run_session(time_source, FakeStore(time_source), scenario)
+
+    def test_should_not_queue_an_utterance_break_after_the_meeting_started_closing(self):
+        """
+        【テスト対象】閉じる手順に入った会議への、停止の知らせ
+        【テスト内容】終了の要求を出したあとで、停止の知らせを受ける
+        【期待結果】発話の確定を足さないこと（終了の処理が、残りの音声を最後の区切りにするため）
+        """
+
+        async def scenario(session: MeetingSession, recorder: Recorder) -> None:
+            session.push_audio(b"\x01\x00" * 160)
+            session._request_close(CloseReason.END)
+
+            session.notify_capture(CaptureEvent.STOPPED)
+
+            assert session_module.AUDIO_BREAK not in list(session._audio)
+
+        time_source = FakeTime(STARTED_AT)
+        run_session(time_source, FakeStore(time_source), scenario)
+
+
 def current_status(handle: AppHandle) -> SubtitleStatus | None:
     """進行中の会議の字幕の状況。会議が無ければ None。"""
     session = handle.app.state.meeting_manager.active_session
@@ -684,3 +731,117 @@ class TestCaptureStoppedOverTheWire:
             "capture_resumed",
         ]
         assert "極秘の人事会議ZZ" not in output
+
+
+class TestVoiceStoppedMidUtteranceOverTheWire:
+    """結合: 発話の途中で共有が止まったとき、停止の時点で字幕になること（再開を待たない）。
+
+    声のあとに無音を付けずに capture.stopped を送る。無音を付けると、
+    停止の前に区切りが確定してしまい、
+    停止で区切りを確定させる動きを確かめられない。
+    """
+
+    def test_should_make_a_subtitle_at_the_stop_without_waiting_for_the_resume(self, app_handle):
+        """
+        【テスト対象】capture.stopped を受けたときの、通訳ワーカーの区切りの確定
+        【テスト内容】会議を開始し、声（1.0 秒）だけを送り、すぐに capture.stopped を送る。
+                            再開は送らない
+        【期待結果】再開も終了も待たずに、字幕が 1 件できること。状況は取り込み停止のまま、
+                            会議は通訳中で、
+                    通訳ワーカーは同じプロセスのままであること
+        """
+        events = app_handle.events()
+        meeting_id = start_meeting(app_handle)
+        pid = wait_for_worker(app_handle)
+        events.wait_for_count(SUBTITLE_STATUS_CHANGED, 1)
+
+        with app_handle.audio(meeting_id) as audio:
+            for frame in frames(tone(1.0)):
+                audio.send(frame)
+            audio.send(json.dumps({"type": "capture.stopped"}))
+
+            events.wait_for_count("subtitle.created", 1, timeout=10)
+
+            assert current_status(app_handle) is SubtitleStatus.CAPTURE_STOPPED
+            session = app_handle.app.state.meeting_manager.active_session
+            assert session is not None and session.meeting.status is MeetingStatus.INTERPRETING
+            assert session.worker_pid == pid
+
+    def test_should_keep_the_subtitles_in_order_across_the_stop_and_the_resume(self, app_handle):
+        """
+        【テスト対象】停止で確定した発話と、再開後の発話
+        【テスト内容】声だけを送って停止し、字幕ができたあとに再開して、もう一度声と無音を送る
+        【期待結果】字幕が 2 件になり、順番が 1、2 になること。再開後の字幕は、
+                            停止の前の声と混ざらない
+                    （停止の前の声は、1 件目で終わっている）
+        """
+        events = app_handle.events()
+        meeting_id = start_meeting(app_handle)
+        events.wait_for_count(SUBTITLE_STATUS_CHANGED, 1)
+
+        with app_handle.audio(meeting_id) as audio:
+            for frame in frames(tone(1.0)):
+                audio.send(frame)
+            audio.send(json.dumps({"type": "capture.stopped"}))
+            events.wait_for_count("subtitle.created", 1, timeout=10)
+            audio.send(json.dumps({"type": "capture.resumed"}))
+            speak(audio, 1.0)
+            events.wait_for_count("subtitle.created", 2, timeout=10)
+
+        created = events.of_type("subtitle.created")
+        assert [item["sequence"] for item in created] == [1, 2]
+
+    def test_should_make_the_queued_voice_a_subtitle_when_the_stop_comes_before_the_worker_is_ready(
+        self, slow_app_handle
+    ):
+        """
+        【テスト対象】通訳ワーカーの準備完了の前に届いた、声と停止の知らせ
+        【テスト内容】起動に時間がかかる通訳ワーカーで会議を開始し、準備完了の前に、声（1.0 秒）と
+                    capture.stopped を送る
+        【期待結果】準備完了のあとに、ためた声が字幕になること（発話の確定は、声のあとに、順番どおり
+                    ワーカーへ渡る）。状況は取り込み停止のまま
+        """
+        events = slow_app_handle.events()
+        meeting_id = start_meeting(slow_app_handle)
+
+        with slow_app_handle.audio(meeting_id) as audio:
+            for frame in frames(tone(1.0)):
+                audio.send(frame)
+            audio.send(json.dumps({"type": "capture.stopped"}))
+
+            events.wait_for_count("subtitle.created", 1, timeout=20)
+
+            assert current_status(slow_app_handle) is SubtitleStatus.CAPTURE_STOPPED
+
+    def test_should_continue_with_a_restarted_worker_after_a_stop(self, app_handle):
+        """
+        【テスト対象】取り込み停止の間に通訳ワーカーが異常終了したときの、起動し直しと再開
+        【テスト内容】声だけを送って停止し、字幕ができたあとで、通訳ワーカーを強制終了する。
+                    起動し直ったら、再開の知らせを送り、声と無音を送る
+        【期待結果】字幕がもう 1 件できること。会議は通訳中のまま続き、
+                            通訳ワーカーのプロセスは別になること
+        """
+        events = app_handle.events()
+        meeting_id = start_meeting(app_handle)
+        pid = wait_for_worker(app_handle)
+        events.wait_for_count(SUBTITLE_STATUS_CHANGED, 1)
+
+        with app_handle.audio(meeting_id) as audio:
+            for frame in frames(tone(1.0)):
+                audio.send(frame)
+            audio.send(json.dumps({"type": "capture.stopped"}))
+            events.wait_for_count("subtitle.created", 1, timeout=10)
+
+            os.killpg(pid, signal.SIGKILL)
+            deadline = time.monotonic() + 30
+            session = app_handle.app.state.meeting_manager.active_session
+            assert session is not None
+            while (session.worker_pid in (None, pid)) and time.monotonic() < deadline:
+                time.sleep(0.1)
+            assert session.worker_pid not in (None, pid)
+
+            audio.send(json.dumps({"type": "capture.resumed"}))
+            speak(audio, 1.0)
+            events.wait_for_count("subtitle.created", 2, timeout=30)
+
+            assert session.meeting.status is MeetingStatus.INTERPRETING

@@ -181,6 +181,32 @@ class UtteranceSegmenter:
         self._arrivals.clear()
         return events
 
+    def end_utterance(self) -> list[SegmenterEvent]:
+        """音声が途中で止まったとき、開いている発話を確定する。このあとも、音声を受け取れる。
+
+        flush は終了処理（このあとの音声は無い）。こちらは、取り込みが止まって、やり直しで音声が続く
+        かもしれないときに使う。無音の窓が続くのを待たずに、発話の途中の音声を、窓に満たない端数も
+        含めて、1 つの区切りとして出す。声が短すぎれば、捨てる（flush と同じ）。
+
+        止まっていた間の音声は無いため、止まる前の音声は、次の区切りへつなげない。先頭の余白と、
+        窓に満たない端数を捨て、声の検出の状態を発話の外へ戻す。標本番号は、端数の分を処理済みに
+        数え、届いた日時の対応を、あとから届く音声とずらさない。無音の数え方（無音の知らせ）は
+        変えない。
+        """
+        events: list[SegmenterEvent] = []
+        tail = bytes(self._pending[: len(self._pending) // BYTES_PER_SAMPLE * BYTES_PER_SAMPLE])
+        if self._windows is not None:
+            if tail:
+                self._windows.append((self._processed_samples, tail))
+            events.extend(self._close(trim_tail=False))
+        self._processed_samples += len(tail) // BYTES_PER_SAMPLE
+        self._received_bytes = self._processed_samples * BYTES_PER_SAMPLE
+        self._pending.clear()
+        self._pre_roll.clear()
+        self._in_speech = False
+        self._forget_old_arrivals()
+        return events
+
     # --- 内部 -----------------------------------------------------------------------
 
     def _process(self, chunk: bytes) -> list[SegmenterEvent]:

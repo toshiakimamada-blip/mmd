@@ -213,6 +213,124 @@ class TestFlush:
         assert segmenter.held_audio_seconds <= (PRE_ROLL_WINDOWS + 1) * WINDOW_SECONDS
 
 
+class TestEndUtterance:
+    """発話の確定。音声が途中で止まったときに、開いている区切りを閉じる（このあとも音声を受け取れる）。"""
+
+    def test_should_output_the_open_utterance_without_waiting_for_trailing_silence(self):
+        """
+        【テスト対象】UtteranceSegmenter.end_utterance
+        【テスト内容】無音を付けずに声（音 1.5 秒。
+                            最後の声から 0.5 秒の無音が流れていない）を流して止まり、
+                    発話の確定をする
+        【期待結果】流している間は区切りが出ず、確定で 1 つの区切りが出ること。
+                            先頭の音声が届いた日時を持つこと
+        """
+        segmenter = make_segmenter()
+        arrived = START + timedelta(seconds=3)
+
+        during = segmenter.feed(silence(0.5) + tone(1.5), arrived)
+        at_stop = segmenter.end_utterance()
+
+        assert utterances(during) == []
+        found = utterances(at_stop)
+        assert len(found) == 1
+        assert 1.5 <= found[0].audio_seconds <= 2.2
+        assert found[0].received_at == arrived
+
+    def test_should_output_the_open_utterance_when_the_voice_stopped_within_the_end_silence(self):
+        """
+        【テスト対象】UtteranceSegmenter.end_utterance
+        【テスト内容】声のあとに、確定の無音（0.5 秒）に満たない 0.3 秒の無音が流れて止まり、
+                            確定をする
+        【期待結果】声の区切りが 1 つ出ること（無音の窓まで含めて閉じる）
+        """
+        segmenter = make_segmenter()
+
+        during = segmenter.feed(tone(1.5) + silence(0.3), START)
+        found = utterances(segmenter.end_utterance())
+
+        assert utterances(during) == []
+        assert len(found) == 1
+        assert found[0].audio_seconds >= 1.5
+
+    def test_should_do_nothing_when_no_utterance_is_open(self):
+        """
+        【テスト対象】UtteranceSegmenter.end_utterance
+        【テスト内容】(1) 何も流さずに確定する。(2) 区切りが確定済みで、無音の中にいるときに確定する
+        【期待結果】どちらも出来事が出ないこと（すでに区切った音声を、重ねて出さない）
+        """
+        segmenter = make_segmenter()
+        assert segmenter.end_utterance() == []
+
+        found = utterances(segmenter.feed(tone(1.0) + silence(1.0), START))
+        assert len(found) == 1
+        assert segmenter.end_utterance() == []
+
+    def test_should_drop_a_voice_that_is_too_short_to_be_an_utterance(self):
+        """
+        【テスト対象】UtteranceSegmenter.end_utterance
+        【テスト内容】咳のように短い音（0.1 秒）を流して止まり、確定をする
+        【期待結果】区切りが出ないこと（終了処理と同じ。短すぎる声は捨てる）
+        """
+        segmenter = make_segmenter()
+        segmenter.feed(silence(0.5) + tone(0.1), START)
+
+        assert utterances(segmenter.end_utterance()) == []
+
+    def test_should_keep_accepting_audio_and_start_a_new_utterance_after_ending(self):
+        """
+        【テスト対象】UtteranceSegmenter.end_utterance のあとの音声
+        【テスト内容】声の途中で確定する。60 秒あとに届いた音声（無音 0.5 秒、音 1.0 秒、
+                            無音 1.0 秒）を流す
+        【期待結果】新しい区切りが 1 つ出ること。区切りは、
+                            確定の前の音声を含まず（長さは新しい音の分）、
+                    先頭の音声が届いた日時は、あとから届いた音声のものであること
+                    （止まっていた時間を、字幕の遅れに入れない）
+        """
+        segmenter = make_segmenter()
+        segmenter.feed(silence(0.5) + tone(1.5), START)
+        assert len(utterances(segmenter.end_utterance())) == 1
+        resumed = START + timedelta(seconds=60)
+
+        found = utterances(segmenter.feed(silence(0.5) + tone(1.0) + silence(1.0), resumed))
+
+        assert len(found) == 1
+        assert 1.0 <= found[0].audio_seconds <= 1.6
+        assert found[0].received_at >= resumed
+
+    def test_should_not_prefix_the_stale_margin_to_the_utterance_after_resuming(self):
+        """
+        【テスト対象】UtteranceSegmenter.end_utterance（先頭の余白）
+        【テスト内容】無音の中で確定し（先頭の余白に、止まる前の無音が残っている状態）、
+                            60 秒あとに届いた声を流す
+        【期待結果】区切りの先頭の音声が届いた日時が、あとから届いた音声のものであること
+                    （止まる前の余白を、次の区切りの先頭へつなげない）
+        """
+        segmenter = make_segmenter()
+        segmenter.feed(silence(1.0), START)
+        segmenter.end_utterance()
+        resumed = START + timedelta(seconds=60)
+
+        found = utterances(segmenter.feed(tone(1.0) + silence(1.0), resumed))
+
+        assert len(found) == 1
+        assert found[0].received_at == resumed
+
+    def test_should_keep_no_audio_after_ending(self):
+        """
+        【テスト対象】UtteranceSegmenter.end_utterance（音声の破棄）
+        【テスト内容】窓に満たない端数を含む音声（1.5 秒 + 10 ミリ秒）を流して、確定する
+        【期待結果】保持している音声が 0 秒であること（出した区切りの音声と端数を、
+                            部品が持ち続けない）
+        """
+        segmenter = make_segmenter()
+        segmenter.feed(tone(1.5) + b"\x01\x00" * 160, START)
+
+        segmenter.end_utterance()
+
+        assert segmenter.held_audio_seconds == 0.0
+
+
 class TestArrivalTime:
     """区切りの先頭の音声がサーバーに届いた日時を、区切りに付ける。"""
 

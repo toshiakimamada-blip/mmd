@@ -16,6 +16,7 @@ from meeting_interpreter.interpreter.protocol import (
     KIND_JSON,
     Audio,
     Backlog,
+    EndUtterance,
     ErrorKind,
     FakeEngineOptions,
     Finish,
@@ -92,6 +93,7 @@ INPUT_MESSAGES = [
     Audio(pcm=b"", received_at=MOMENT),
     Audio(pcm=b"\x01", received_at=MOMENT),
     Finish(),
+    EndUtterance(),
     Stop(),
 ]
 
@@ -268,6 +270,18 @@ class TestRejectInvalidInput:
             decode_output(*_json_frame({"type": "silence"}))
         with pytest.raises(ProtocolError):
             decode_output(*_json_frame({"type": "silence", "silent_seconds": 1.0, "x": 1}))
+
+    def test_should_reject_extra_items_in_an_end_utterance_message(self):
+        """
+        【テスト対象】decode_input（end_utterance）
+        【テスト内容】項目を持たない end_utterance に、余分な項目がついたメッセージを読む。
+                    逆の向きに、end_utterance を読ませる
+        【期待結果】どちらも ProtocolError（親から子へだけ送れる、項目の無いメッセージ）
+        """
+        with pytest.raises(ProtocolError):
+            decode_input(*_json_frame({"type": "end_utterance", "extra": 1}))
+        with pytest.raises(ProtocolError):
+            decode_output(*_split(encode_input(EndUtterance())))
 
     def test_should_reject_extra_items_in_a_speech_resumed_message(self):
         """

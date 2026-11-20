@@ -25,6 +25,7 @@ OS の仕組みは、UNIX ドメイン以外のソケットと、32 ビットの
 - 知らせのスレッド: 処理を待つ音声の長さを、一定の間隔で親へ知らせる
 
 停止の手順
+- 発話の確定の依頼（EndUtterance）: 停止ではない。開いている区切りを閉じて字幕にし、ワーカーは続く
 - 終了処理の依頼（Finish）: 待ち行列が空になるまで字幕にして、停止完了を返し、終わる
 - 停止（Stop）: 待ち行列を捨て、停止完了を返して、すぐ終わる
 - 親が標準入力を閉じた（親が消えた）: 何も返さず、終わる
@@ -46,6 +47,7 @@ from ..worker_ipc import FrameReader, ProtocolError, inherited_log_level, peak_m
 from ..worker_ipc import OutputWriter as SharedOutputWriter
 from .protocol import (
     Audio,
+    EndUtterance,
     ErrorKind,
     Finish,
     Ready,
@@ -232,6 +234,8 @@ def _read_messages(
 
         if isinstance(message, Audio):
             worker.accept_audio(message)
+        elif isinstance(message, EndUtterance):
+            worker.end_utterance()
         elif isinstance(message, Finish):
             worker.finish()
             processing.join()  # 待ち行列が空になるまで処理する。

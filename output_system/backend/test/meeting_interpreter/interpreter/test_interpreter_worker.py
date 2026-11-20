@@ -167,6 +167,68 @@ class TestSubtitles:
         assert len(subtitles(sent)) == 1
 
 
+class TestEndUtterance:
+    """発話の確定。音声が途中で止まったとき、開いている区切りを、待たずに字幕にする。"""
+
+    def test_should_make_a_subtitle_of_the_open_voice_without_waiting_for_silence(self):
+        """
+        【テスト対象】InterpreterWorker.end_utterance
+        【テスト内容】無音を付けずに声（1.5 秒）を渡して止まり、発話の確定をする
+        【期待結果】渡している間は字幕が出ず、確定で字幕が 1 件出ること（終了処理ではない）。
+                    ワーカーは終わらず、続けて渡した音声が、もう 1 つの字幕になること
+        """
+        worker, sent = make_worker()
+
+        worker.accept_audio(Audio(pcm=tone(1.5), received_at=START))
+        settle(worker)
+        assert subtitles(sent) == []
+        worker.end_utterance()
+        settle(worker)
+        assert len(subtitles(sent)) == 1
+
+        later = START + timedelta(seconds=60)
+        worker.accept_audio(Audio(pcm=silence(0.5) + tone(1.0) + silence(1.0), received_at=later))
+        settle(worker)
+
+        assert len(subtitles(sent)) == 2
+        assert subtitles(sent)[1].received_at >= later
+
+    def test_should_send_nothing_when_no_voice_is_open(self):
+        """
+        【テスト対象】InterpreterWorker.end_utterance
+        【テスト内容】何も渡さずに確定する。区切りが確定済みの音声のあとに、もう一度確定する
+        【期待結果】字幕が増えないこと（確定済みの音声を、重ねて字幕にしない）
+        """
+        worker, sent = make_worker()
+        worker.end_utterance()
+        settle(worker)
+        assert subtitles(sent) == []
+
+        say(worker, 1.0)
+        worker.end_utterance()
+        settle(worker)
+
+        assert len(subtitles(sent)) == 1
+
+    def test_should_send_speech_resumed_before_the_utterance_that_ends_a_silence(self):
+        """
+        【テスト対象】InterpreterWorker.end_utterance と声が戻った知らせ
+        【テスト内容】無音の知らせ（10 秒）を出したあとで、声を渡して止まり、発話の確定をする
+        【期待結果】声が戻った知らせが 1 回出ること（確定でできた区切りも、
+                            通常の区切りと同じに扱う）
+        """
+        worker, sent = make_worker()
+        worker.accept_audio(Audio(pcm=silence(11.0), received_at=START))
+        worker.accept_audio(Audio(pcm=tone(1.5), received_at=START + timedelta(seconds=11)))
+
+        worker.end_utterance()
+
+        assert [type(m).__name__ for m in sent if not isinstance(m, Subtitle)] == [
+            "Silence",
+            "SpeechResumed",
+        ]
+
+
 class TestFailures:
     """失敗しても、会議を続ける。"""
 
