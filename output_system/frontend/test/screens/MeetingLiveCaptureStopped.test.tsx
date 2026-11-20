@@ -1,4 +1,4 @@
-import { act, cleanup, render, screen, within } from '@testing-library/react';
+import { act, cleanup, render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { useEffect } from 'react';
 import { Outlet, RouterProvider, createMemoryRouter } from 'react-router';
@@ -94,6 +94,17 @@ function Holder({ capture }: { readonly capture: FakeCapture }) {
     held.hold('abc123', capture.session);
   }, [held, capture]);
   return null;
+}
+
+/** 解決・拒否の時点を、テストが決められる Promise。 */
+function deferred<T = void>() {
+  let resolve: (value: T) => void = () => undefined;
+  let reject: (reason: unknown) => void = () => undefined;
+  const promise = new Promise<T>((res, rej) => {
+    resolve = res;
+    reject = rej;
+  });
+  return { promise, resolve, reject };
 }
 
 /** 終了のあとに移る先（会議の記録）の目印。 */
@@ -289,10 +300,11 @@ describe('MeetingLiveScreen capture stopped choice', () => {
 
     await user.click(screen.getByRole('button', { name: '取り込みをやり直す' }));
 
+    // 失敗の結果は、少し遅れて届く。理由つきの選択が出し直されるまで待つ。
+    expect(await screen.findByText('AUDIO_PERMISSION_DENIED')).toBeInTheDocument();
     expect(statusText()).toContain('取り込み停止');
     const notice = choiceNotice();
     expect(notice).not.toBeNull();
-    expect(within(notice!).getByText('AUDIO_PERMISSION_DENIED')).toBeInTheDocument();
     expect(screen.getByRole('button', { name: '取り込みをやり直す' })).toHaveFocus();
     const steps = screen.getByRole('region', { name: '取り込みをやり直す手順' });
     expect(within(steps).getByText(/画面全体/)).toBeInTheDocument();
@@ -319,7 +331,7 @@ describe('MeetingLiveScreen capture stopped choice', () => {
 
     await user.click(screen.getByRole('button', { name: '取り込みをやり直す' }));
 
-    const steps = screen.getByRole('region', { name: '取り込みをやり直す手順' });
+    const steps = await screen.findByRole('region', { name: '取り込みをやり直す手順' });
     expect(within(steps).getByText(/マイクを PC につなぎます/)).toBeInTheDocument();
     expect(within(steps).queryByText(/画面全体/)).not.toBeInTheDocument();
     expect(within(choiceNotice()!).getByText('AUDIO_MIC_NOT_FOUND')).toBeInTheDocument();
@@ -370,8 +382,9 @@ describe('MeetingLiveScreen capture stopped choice', () => {
 
     await user.click(within(choiceNotice()!).getByRole('button', { name: '会議を終了する' }));
 
+    // 終了の失敗の応答のあと、描画を 1 回挟んで、選択が出し直される。応答が届くまで待つ。
+    await waitFor(() => expect(choiceNotice()).not.toBeNull());
     expect(screen.queryByText('会議の記録の画面')).not.toBeInTheDocument();
-    expect(choiceNotice()).not.toBeNull();
     expect(screen.getAllByRole('alert').length).toBeGreaterThanOrEqual(2);
 
     answerEnd = () => Promise.resolve(jsonResponse({ ...wireMeeting(), status: 'summarizing' }));
@@ -418,5 +431,251 @@ describe('MeetingLiveScreen capture stopped choice', () => {
     await user.click(screen.getByRole('button', { name: '終了する' }));
     expect(await screen.findByText('会議の記録の画面')).toBeInTheDocument();
     expect(choiceNotice()).toBeNull();
+  });
+
+  /**
+   * 【ユーザーストーリー】
+   * やり直しの確認（ブラウザーの共有の選択）を開いたまま、画面を離れた。そのあとで失敗が返っても、
+   * 離れた画面のためのお知らせを出さない
+   *
+   * 【期待結果】
+   * - 画面を離れたあとに、やり直しが失敗（AUDIO_PERMISSION_DENIED）しても、選択のお知らせは出ない
+   * - 例外にならない
+   */
+  it('should not offer the choice again when a restart fails after the screen was left', async () => {
+    const user = userEvent.setup();
+    const router = await openLive();
+    stopCapture();
+    const pending = deferred();
+    fake.restart.mockImplementationOnce(() => pending.promise);
+    await user.click(screen.getByRole('button', { name: '取り込みをやり直す' }));
+    expect(choiceNotice()).toBeNull();
+
+    await act(async () => {
+      await router.navigate('/meetings/abc123');
+    });
+    expect(await screen.findByText('会議の記録の画面')).toBeInTheDocument();
+    await act(async () => pending.reject(new AudioCaptureError('AUDIO_PERMISSION_DENIED')));
+
+    expect(choiceNotice()).toBeNull();
+    expect(screen.queryByRole('region', { name: '取り込みをやり直す手順' })).not.toBeInTheDocument();
+  });
+
+  /**
+   * 【ユーザーストーリー】
+   * 取り込みをやり直した直後に、共有をもう一度止めた。再開と停止の通知が続けて届き、1 回の描画にまとまっても、
+   * 取り込みをやり直す選択が、もう一度出る
+   *
+   * 【期待結果】
+   * - 通知を同じ act の中で続けて届ける（正常 → 取り込み停止。状況の値は、取り込み停止のまま変わらない）
+   * - 選択のお知らせが出し直され、フォーカスが 1 つ目のボタンにある
+   */
+  it('should offer the choice again when the capture stops again within the same render', async () => {
+    const user = userEvent.setup();
+    await openLive();
+    stopCapture();
+    await user.click(screen.getByRole('button', { name: '取り込みをやり直す' }));
+    expect(choiceNotice()).toBeNull();
+
+    act(() => {
+      FakeEventSocket.last.receive(statusChanged('on_time'));
+      FakeEventSocket.last.receive(statusChanged('capture_stopped'));
+    });
+
+    expect(statusText()).toContain('取り込み停止');
+    expect(choiceNotice()).not.toBeNull();
+    expect(screen.getByRole('button', { name: '取り込みをやり直す' })).toHaveFocus();
+  });
+
+  /**
+   * 【ユーザーストーリー】
+   * 停止 → やり直し → 停止 → やり直し → 停止を、続けて繰り返す（通知は 1 件ずつ、描画を挟んで届く）
+   *
+   * 【期待結果】停止のたびに、選択が 1 つだけ出る（重ならない）。再開すると、消える
+   */
+  it('should offer exactly one choice for each of the repeated stops', async () => {
+    const user = userEvent.setup();
+    await openLive();
+
+    for (let round = 0; round < 3; round += 1) {
+      stopCapture();
+      expect(document.querySelectorAll('[data-notice-kind="choice"]')).toHaveLength(1);
+      await user.click(screen.getByRole('button', { name: '取り込みをやり直す' }));
+      expect(choiceNotice()).toBeNull();
+      act(() => FakeEventSocket.last.receive(statusChanged('on_time')));
+    }
+
+    expect(fake.calls).toEqual(['restart', 'restart', 'restart']);
+  });
+
+  /**
+   * 【ユーザーストーリー】
+   * やり直しが 2 回続けて失敗した（1 回目は取りやめ、2 回目は音声の共有をオンにしていない）。
+   * 失敗のたびに、最新の理由が出て、選択は 1 つだけ。手順の案内も 1 つだけ
+   *
+   * 【期待結果】
+   * - 2 回目の失敗のあと、お知らせの理由は AUDIO_NO_AUDIO_SHARED（1 回目の理由は残らない）
+   * - 選択のお知らせは 1 つ、手順の案内も 1 つ。フォーカスは 1 つ目のボタン
+   * - 3 回目で成功すると、お知らせも手順も消える
+   */
+  it('should show the latest reason once when the restart fails twice in a row', async () => {
+    const user = userEvent.setup();
+    await openLive();
+    stopCapture();
+    fake.restart
+      .mockImplementationOnce(() => Promise.reject(new AudioCaptureError('AUDIO_PERMISSION_DENIED')))
+      .mockImplementationOnce(() => Promise.reject(new AudioCaptureError('AUDIO_NO_AUDIO_SHARED')));
+
+    await user.click(screen.getByRole('button', { name: '取り込みをやり直す' }));
+    expect(await screen.findByText('AUDIO_PERMISSION_DENIED')).toBeInTheDocument();
+    await user.click(screen.getByRole('button', { name: '取り込みをやり直す' }));
+
+    expect(await screen.findByText('AUDIO_NO_AUDIO_SHARED')).toBeInTheDocument();
+    expect(screen.queryByText('AUDIO_PERMISSION_DENIED')).not.toBeInTheDocument();
+    expect(document.querySelectorAll('[data-notice-kind="choice"]')).toHaveLength(1);
+    expect(screen.getAllByRole('region', { name: '取り込みをやり直す手順' })).toHaveLength(1);
+    expect(screen.getByRole('button', { name: '取り込みをやり直す' })).toHaveFocus();
+
+    await user.click(screen.getByRole('button', { name: '取り込みをやり直す' }));
+
+    expect(choiceNotice()).toBeNull();
+    expect(screen.queryByRole('region', { name: '取り込みをやり直す手順' })).not.toBeInTheDocument();
+  });
+
+  /**
+   * 【ユーザーストーリー】
+   * やり直しに失敗したあと、取り込みが戻らないまま状況が変わり（別の経路で再開）、また止まった。
+   * 前の失敗の手順は出さず、止まったことのお知らせだけを出す
+   *
+   * 【期待結果】
+   * - 状況が正常へ戻ると、手順の案内が消える
+   * - 次に取り込み停止になったとき、手順の案内は出ず、お知らせのコードは AUDIO_CAPTURE_STOPPED
+   * - 再開と停止の通知が 1 回の描画にまとまった場合も、同じ
+   */
+  it('should forget a failed restart when the capture stops again later', async () => {
+    const user = userEvent.setup();
+    await openLive();
+    stopCapture();
+    fake.restart.mockImplementationOnce(() => Promise.reject(new AudioCaptureError('AUDIO_MIC_NOT_FOUND')));
+    await user.click(screen.getByRole('button', { name: '取り込みをやり直す' }));
+    expect(await screen.findByRole('region', { name: '取り込みをやり直す手順' })).toBeInTheDocument();
+
+    act(() => FakeEventSocket.last.receive(statusChanged('on_time')));
+    expect(screen.queryByRole('region', { name: '取り込みをやり直す手順' })).not.toBeInTheDocument();
+    stopCapture();
+
+    expect(screen.queryByRole('region', { name: '取り込みをやり直す手順' })).not.toBeInTheDocument();
+    expect(within(choiceNotice()!).getByText('AUDIO_CAPTURE_STOPPED')).toBeInTheDocument();
+
+    // 失敗 → 再開と停止が 1 回の描画にまとまる、の場合
+    fake.restart.mockImplementationOnce(() => Promise.reject(new AudioCaptureError('AUDIO_MIC_NOT_FOUND')));
+    await user.click(screen.getByRole('button', { name: '取り込みをやり直す' }));
+    expect(await screen.findByRole('region', { name: '取り込みをやり直す手順' })).toBeInTheDocument();
+    act(() => {
+      FakeEventSocket.last.receive(statusChanged('on_time'));
+      FakeEventSocket.last.receive(statusChanged('capture_stopped'));
+    });
+
+    expect(screen.queryByRole('region', { name: '取り込みをやり直す手順' })).not.toBeInTheDocument();
+    expect(within(choiceNotice()!).getByText('AUDIO_CAPTURE_STOPPED')).toBeInTheDocument();
+  });
+
+  /**
+   * 【ユーザーストーリー】
+   * 「会議を終了する」を選んだあと、終了の処理が終わるまで、選択も終了のボタンも押せない
+   *
+   * 【期待結果】
+   * - 終了の処理中は、選択のお知らせが消え、状況の領域の「会議を終了する」は押せない。終了の依頼は 1 回
+   * - 「会議を終了しています」の案内が出る
+   * - 失敗して戻ると、選択が出し直され、終了のボタンも押せるようになる。2 回目の終了で依頼は合計 2 回
+   */
+  it('should hide the choice and disable ending while the end request is running', async () => {
+    const user = userEvent.setup();
+    await openLive();
+    stopCapture();
+    const pending = deferred<Response>();
+    answerEnd = () => pending.promise;
+
+    await user.click(within(choiceNotice()!).getByRole('button', { name: '会議を終了する' }));
+
+    expect(choiceNotice()).toBeNull();
+    expect(document.querySelector<HTMLButtonElement>('.live__end')).toBeDisabled();
+    expect(screen.getByText(/会議を終了しています/)).toBeInTheDocument();
+    expect(endRequests).toBe(1);
+
+    await act(async () =>
+      pending.resolve(
+        jsonResponse(
+          { category: 'system_error', code: 'SYSTEM_UNEXPECTED_ERROR', message: 'm', action: 'a' },
+          500,
+        ),
+      ),
+    );
+
+    expect(choiceNotice()).not.toBeNull();
+    expect(document.querySelector<HTMLButtonElement>('.live__end')).toBeEnabled();
+    answerEnd = () => Promise.resolve(jsonResponse({ ...wireMeeting(), status: 'summarizing' }));
+    await user.click(within(choiceNotice()!).getByRole('button', { name: '会議を終了する' }));
+
+    expect(await screen.findByText('会議の記録の画面')).toBeInTheDocument();
+    expect(endRequests).toBe(2);
+  });
+
+  /**
+   * 【ユーザーストーリー】
+   * 選択を選ぶと、選んだボタンが消える。キーボードの利用者のフォーカスは、文書の先頭へ落ちず、
+   * 状況の領域の見出し（会議のタイトル）へ移る
+   *
+   * 【期待結果】
+   * - 「取り込みをやり直す」を選んだあと、フォーカスは会議のタイトルの見出しにある
+   * - タイトルの見出しは、Tab の順には入らない（tabindex=-1）
+   */
+  it('should move the focus to the title after a choice is made', async () => {
+    const user = userEvent.setup();
+    await openLive();
+    stopCapture();
+    expect(screen.getByRole('button', { name: '取り込みをやり直す' })).toHaveFocus();
+
+    await user.keyboard('{Enter}');
+
+    const title = screen.getByRole('heading', { name: '週次の定例' });
+    expect(title).toHaveFocus();
+    expect(title).toHaveAttribute('tabindex', '-1');
+    expect(document.body).not.toHaveFocus();
+  });
+
+  /**
+   * 【ユーザーストーリー】
+   * 取り込み停止の間に、状況の領域の「会議を終了する」から、確認で「終了する」を選んだ。
+   * 終了の処理が終わるまで、お知らせの選択は押せない（終了の依頼が、並行して 2 回走らない）
+   *
+   * 【期待結果】
+   * - 終了の処理中は、選択のお知らせが消えている。終了の依頼は 1 回
+   * - 失敗して戻ると、選択が出し直され、選べる
+   */
+  it('should hide the choice while an end started from the confirmation is running', async () => {
+    const user = userEvent.setup();
+    await openLive();
+    stopCapture();
+    const pending = deferred<Response>();
+    answerEnd = () => pending.promise;
+
+    await user.click(document.querySelector<HTMLElement>('.live__end')!);
+    await user.click(screen.getByRole('button', { name: '終了する' }));
+
+    expect(choiceNotice()).toBeNull();
+    expect(endRequests).toBe(1);
+
+    await act(async () =>
+      pending.resolve(
+        jsonResponse(
+          { category: 'system_error', code: 'SYSTEM_UNEXPECTED_ERROR', message: 'm', action: 'a' },
+          500,
+        ),
+      ),
+    );
+
+    expect(choiceNotice()).not.toBeNull();
+    expect(endRequests).toBe(1);
   });
 });

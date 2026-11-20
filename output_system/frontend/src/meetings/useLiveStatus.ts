@@ -20,6 +20,12 @@ export interface LiveStatus {
    * （警告を出さない）。読めなかったときは、既定値（DEFAULT_LENGTH_WARNING_SECONDS）。
    */
   readonly lengthWarningSeconds: number | null;
+  /**
+   * 取り込み停止の通知（字幕の状況が capture_stopped になった通知）を受けた回数。
+   * 再開と停止の通知が続けて届き、1 回の描画にまとまると、状況の値は変わらない（取り込み停止のまま）。
+   * 値の変化では気づけない「止まり直し」を、この回数の変化で見分ける。
+   */
+  readonly captureStopCount: number;
 }
 
 /**
@@ -28,7 +34,8 @@ export interface LiveStatus {
  * - 開いた時点で、現在の状況を読む（会議の開始の直後に出た通知は、画面が購読する前に届くため）。
  *   応答が届くまでは、字幕の状況は開始準備中（会議の開始の直後は、通訳ワーカーが AI モデルを
  *   読み込んでいる）、経過時間の上限は null
- * - 通知 subtitle_status.changed で、字幕の状況を置き換える。ほかの会議の通知は使わない
+ * - 通知 subtitle_status.changed で、字幕の状況を置き換える。ほかの会議の通知は使わない。
+ *   取り込み停止の通知を受けた回数も数える（止まり直しを、状況の値の変化に頼らず見分けるため）
  * - 通知を 1 件でも受けたあとに届いた読み込みの応答の状況は、捨てる（応答のほうが古い値のため）。
  *   経過時間の上限は、通知では変わらないので、応答のものをそのまま使う
  * - アプリサーバーとの接続が切れて、つなぎ直したときは、サーバーが最初に送る現在の状況の通知で
@@ -43,6 +50,7 @@ export interface LiveStatus {
 export function useLiveStatus(meetingId: string): LiveStatus {
   const [subtitleStatus, setSubtitleStatus] = useState<SubtitleStatus>('starting');
   const [lengthWarningSeconds, setLengthWarningSeconds] = useState<number | null>(null);
+  const [captureStopCount, setCaptureStopCount] = useState(0);
   // 通知を受けたか。受けたあとの読み込みの応答は、通知より古いため、字幕の状況には使わない。
   const notified = useRef(false);
 
@@ -50,6 +58,10 @@ export function useLiveStatus(meetingId: string): LiveStatus {
     if (event.meetingId === meetingId) {
       notified.current = true;
       setSubtitleStatus(event.status);
+      if (event.status === 'capture_stopped') {
+        // 更新関数で数える。同じ描画にまとまる通知も、数え落とさない。
+        setCaptureStopCount((count) => count + 1);
+      }
     }
   });
 
@@ -80,5 +92,5 @@ export function useLiveStatus(meetingId: string): LiveStatus {
     };
   }, [meetingId]);
 
-  return { subtitleStatus, lengthWarningSeconds };
+  return { subtitleStatus, lengthWarningSeconds, captureStopCount };
 }

@@ -1,4 +1,4 @@
-import { useId, useState } from 'react';
+import { useId, useRef, useState } from 'react';
 import { useNavigate } from 'react-router';
 
 import { ApiError } from '../../api/apiClient';
@@ -55,7 +55,7 @@ export function LiveMeetingView({ meeting }: { readonly meeting: LiveMeeting }) 
   const capture = useMeetingCapture();
   const elapsed = useElapsedMilliseconds(meeting.startedAt);
   const subtitles = useMeetingSubtitles(meeting.meetingId);
-  const { subtitleStatus, lengthWarningSeconds } = useLiveStatus(meeting.meetingId);
+  const { subtitleStatus, lengthWarningSeconds, captureStopCount } = useLiveStatus(meeting.meetingId);
   const subtitlesHeadingId = useId();
   // 字幕が遅れている間だけ、お知らせ帯に警告を出す。遅れが解消すると、警告も消える。
   useWarning(SUBTITLE_DELAYED_WARNING_ID, subtitleStatus === 'delayed', SUBTITLE_DELAYED_WARNING);
@@ -70,6 +70,11 @@ export function LiveMeetingView({ meeting }: { readonly meeting: LiveMeeting }) 
   const [confirming, setConfirming] = useState(false);
   // 終了を依頼して、応答を待っているか。待つ間はボタンを押せなくする（二度押しで二重に依頼しない）。
   const [ending, setEnding] = useState(false);
+  // 終了の処理が動いているか（同期で読める印）。state は描画のあとに変わるため、続けて呼ばれても
+  // 2 回目を動かさないために、別に持つ。
+  const endingRef = useRef(false);
+  // 状況の領域の見出し。取り込み停止の選択を選んだあと、消えたボタンの代わりにフォーカスを受ける。
+  const titleRef = useRef<HTMLHeadingElement>(null);
 
   /**
    * 終了の確認で「終了する」を選んだときの処理。音声の取り込みを止め、終了を依頼し、済んだら音声の接続を閉じて
@@ -79,9 +84,14 @@ export function LiveMeetingView({ meeting }: { readonly meeting: LiveMeeting }) 
    * - 履歴は置き換える。戻るボタンで、終わった会議の「会議中」へ戻らないため
    * - 失敗したら、お知らせ帯にエラーを出し、「会議中」にとどまる（もう一度試せる。止めた取り込みは、もう一度止めても害が無い）
    *
-   * @returns 終了できたら true。失敗したら false（取り込み停止の選択が、選び直せるように出し直すために使う）
+   * - すでに終了の処理が動いているときは、何もしない（取り込み停止の選択と、終了の確認の、どちらから
+   *   呼ばれても、終了の依頼は 1 回だけ）
    */
-  const endNow = async (): Promise<boolean> => {
+  const endNow = async (): Promise<void> => {
+    if (endingRef.current) {
+      return;
+    }
+    endingRef.current = true;
     setConfirming(false);
     setEnding(true);
     clear(END_FAILED_NOTICE_ID);
@@ -92,22 +102,25 @@ export function LiveMeetingView({ meeting }: { readonly meeting: LiveMeeting }) 
       if (!(error instanceof ApiError)) {
         throw error;
       }
+      endingRef.current = false;
       setEnding(false);
       post({ kind: 'error', id: END_FAILED_NOTICE_ID, error: toDisplayError(error.body) });
-      return false;
+      return;
     }
     capture.release();
     navigate(screenPaths.meetingRecord(meeting.meetingId), { replace: true });
-    return true;
   };
 
   // 取り込みが止まったとき（取り込み停止）に、お知らせ帯へ、やり直しか終了かの選択を出す。
-  // 終了は、確認のダイアログを経ずに endNow を呼ぶ（選択が確認を兼ねる）。
+  // 終了は、確認のダイアログを経ずに endNow を呼ぶ（選択が確認を兼ねる）。終了の処理の間は、選択を消す。
   const { restartFailed } = useCaptureStoppedChoice({
     subtitleStatus,
+    stopCount: captureStopCount,
     audioSource: meeting.audioSource,
+    ending,
     restart: capture.restart,
     end: endNow,
+    returnFocus: () => titleRef.current?.focus(),
   });
 
   return (
@@ -117,7 +130,10 @@ export function LiveMeetingView({ meeting }: { readonly meeting: LiveMeeting }) 
       {/* 状況の領域 */}
       <div className="live__status">
         <div className="live__headline">
-          <h3 className="live__title">{meeting.title}</h3>
+          {/* tabIndex={-1}: Tab の順には入れず、選択を選んだあとのフォーカスだけを受ける */}
+          <h3 className="live__title" ref={titleRef} tabIndex={-1}>
+            {meeting.title}
+          </h3>
           <button
             type="button"
             className="live__end"
