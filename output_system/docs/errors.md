@@ -211,6 +211,18 @@ FastAPI が自動で返す応答も、共通の形に変えています。
 - 音声の WebSocket の接続を断る 3 つ（`MEETING_NOT_FOUND`・`MEETING_NOT_RUNNING`・`MEETING_AUDIO_ALREADY_CONNECTED`）は、接続を受け付ける前に起こすため、画面には HTTP の 403 として見えます。エラーコードは、サーバーのエラーログにだけ出ます。
 - エラーの通知（`error.occurred`）は、`/ws/events` で届きます。項目は `meeting_id`・`category`・`code`・`message`・`action` です。画面は、`code` から画面側の文言を引きます。
 
+### 字幕の処理（SUBTITLE_*）
+
+会議中の字幕の処理が失敗したときの、会議管理部（`backend/src/meeting_interpreter/meetings/`）の通知です。HTTP の応答ではなく、`error.occurred` の通知で届きます。分類はシステムエラーです。会議は続けます。文言に、会議の内容とプログラムの例外の文面は入れません。
+
+| コード | 分類 | 何が起きたか |
+|---|---|---|
+| `SUBTITLE_TRANSCRIPTION_FAILED` | システムエラー（通知で届く） | 発話の区切り 1 つの文字起こしに失敗し、その区切りを飛ばした。同じ失敗が続いても、通知は調整値 `error_notice_interval_seconds` の間隔につき 1 件にまとめる |
+
+- 画面は、「会議中」のお知らせ帯に、エラーとして出します（`frontend/src/meetings/useSubtitleErrorNotices.ts`）。次に行う操作は、「会議はそのまま続けられます。字幕が出ない状態が続くときは、会議を終了して、新しい会議を開始してください」です。
+- 翻訳の失敗は、エラーにしません。日本語訳が空の字幕として保存して通知します（エラーログ `SUBTITLE_TRANSLATION_FAILED` だけを残します）。
+- コードを足すときは、`useSubtitleErrorNotices.ts` の `SUBTITLE_ERROR_CODES` にも足します。足し忘れは、フロントエンドのテストが検出します。
+
 ### 要約の作成の依頼（SUMMARY_NO_CONTENT）
 
 `POST /api/meetings/{会議番号}/summary`（要約を作る・作り直す）が返すエラーです。

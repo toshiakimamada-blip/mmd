@@ -132,3 +132,19 @@ def interpreter_unavailable(meeting_id: str | None = None) -> SystemAppError:
         component=COMPONENT,
         meeting_id=meeting_id,
     )
+
+
+def subtitle_transcription_failed(meeting_id: str | None = None) -> SystemAppError:
+    """発話の区切りの文字起こしに失敗し、その区切りを飛ばした（会議は続く）。
+
+    画面のお知らせ帯へ、通知（error.occurred）で届ける。飛ばした区切りの内容と、失敗した例外の文面は、
+    文言にも通知にも入れない。
+    """
+    return SystemAppError(
+        "SUBTITLE_TRANSCRIPTION_FAILED",
+        "音声の一部を文字にできなかったため、その部分の字幕を飛ばしました。",
+        "会議はそのまま続けられます。字幕が出ない状態が続くときは、会議を終了して、"
+        f"新しい会議を開始してください。{_REPORT_IF_NOT_FIXED}",
+        component=COMPONENT,
+        meeting_id=meeting_id,
+    )

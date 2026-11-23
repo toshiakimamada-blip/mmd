@@ -51,7 +51,12 @@ export function isErrorCode(value: unknown): value is string {
   return typeof value === 'string' && ERROR_CODE_PATTERN.test(value);
 }
 
-function isCategory(value: unknown): value is ErrorCategory {
+/**
+ * 値が、エラーの分類（入力エラー・業務エラー・システムエラー）かを返す。
+ *
+ * @param value 検査する値
+ */
+export function isErrorCategory(value: unknown): value is ErrorCategory {
   return typeof value === 'string' && (ERROR_CATEGORIES as readonly string[]).includes(value);
 }
 
@@ -70,7 +75,7 @@ export function isAppErrorBody(value: unknown): value is AppErrorBody {
   }
   const candidate = value as Record<string, unknown>;
   return (
-    isCategory(candidate.category) &&
+    isErrorCategory(candidate.category) &&
     isErrorCode(candidate.code) &&
     isNonEmptyString(candidate.message) &&
     isNonEmptyString(candidate.action)

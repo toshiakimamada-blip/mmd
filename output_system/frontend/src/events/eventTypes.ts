@@ -9,9 +9,10 @@
  * 通知の種類を足すには、AppEvent に型を足し、parseAppEvent の switch に読み替えを足す。
  * 通知部が送る通知の一覧は、output_system/docs/meetings.md の「通知」にある。
  * 使われない通知の型は、使う作業で足す。いまは subtitle.created・subtitle_status.changed・
- * model.status_changed・meeting.state_changed・job.status_changed・job.progress_changed。
+ * model.status_changed・meeting.state_changed・job.status_changed・job.progress_changed・error.occurred。
  */
 
+import { isErrorCategory, isErrorCode, type ErrorCategory } from '../errors/errorTypes';
 import { parseModelStatus, type ModelStatus } from '../models/modelStatus';
 import { isMeetingStatus, parseRecordJob, type MeetingStatus, type RecordJob } from '../records/recordTypes';
 import { isSubtitleStatus, type SubtitleStatus } from '../subtitles/subtitleStatus';
@@ -64,6 +65,22 @@ export interface JobProgressChangedEvent {
   readonly job: RecordJob;
 }
 
+/**
+ * エラーが起きたときの通知。字幕の処理の失敗（文字起こし・保存）、通訳ワーカーの停止などで届く。
+ *
+ * サーバーが書いた文面（message と action）は、持たない。例外の文面や会議の内容が混ざる余地を断つため、
+ * 画面は、エラーコードから画面側の一覧（errorMessages.ts）で文言を引く。
+ */
+export interface ErrorOccurredEvent {
+  readonly type: 'error.occurred';
+  /** エラーが起きた会議。画面は、表示している会議の通知だけを使う。 */
+  readonly meetingId: string;
+  /** エラーの分類。 */
+  readonly category: ErrorCategory;
+  /** エラーコード（領域_出来事）。 */
+  readonly code: string;
+}
+
 /** 画面が受け取る通知。type で見分ける。 */
 export type AppEvent =
   | SubtitleCreatedEvent
@@ -71,7 +88,8 @@ export type AppEvent =
   | ModelStatusChangedEvent
   | MeetingStateChangedEvent
   | JobStatusChangedEvent
-  | JobProgressChangedEvent;
+  | JobProgressChangedEvent
+  | ErrorOccurredEvent;
 
 /** 通知の種類の名前（subtitle.created など）。 */
 export type AppEventType = AppEvent['type'];
@@ -131,6 +149,22 @@ export function parseAppEvent(text: string): AppEvent | null {
         return null;
       }
       return { type: record.type, meetingId: record.meeting_id, job };
+    }
+    case 'error.occurred': {
+      if (
+        typeof record.meeting_id !== 'string' ||
+        record.meeting_id === '' ||
+        !isErrorCategory(record.category) ||
+        !isErrorCode(record.code)
+      ) {
+        return null;
+      }
+      return {
+        type: 'error.occurred',
+        meetingId: record.meeting_id,
+        category: record.category,
+        code: record.code,
+      };
     }
     default:
       return null;

@@ -166,6 +166,11 @@ export const ERROR_WORDINGS: Readonly<Record<string, ErrorWording>> = Object.fre
     message: '字幕を作る処理が止まり、起動し直せなかったため、会議を中断しました。',
     action: `それまでの字幕は保存されています。会議の記録から要約を作れます。新しい会議を開始する前に、${REPORT_IF_NOT_FIXED}`,
   },
+  // --- 字幕の処理の失敗（会議管理部が通知で返す。会議は続く。文言はサーバーの meetings/errors.py と同じ内容） ---
+  SUBTITLE_TRANSCRIPTION_FAILED: {
+    message: '音声の一部を文字にできなかったため、その部分の字幕を飛ばしました。',
+    action: `会議はそのまま続けられます。字幕が出ない状態が続くときは、会議を終了して、新しい会議を開始してください。${REPORT_IF_NOT_FIXED}`,
+  },
   // --- 要約と質問の作成の失敗（作成ジョブ管理部。文言はサーバーの jobs/errors.py と同じ内容） ---
   SUMMARY_GENERATION_FAILED: {
     message: '要約を作れませんでした。',
