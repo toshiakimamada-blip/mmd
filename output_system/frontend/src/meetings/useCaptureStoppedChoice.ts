@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 
-import { toAudioCaptureError } from '../audio/audioErrors';
+import { AudioConnectionClosedError, toAudioCaptureError } from '../audio/audioErrors';
 import { type AudioSource } from '../audio/audioSource';
 import { useNoticeActions } from '../components/notices';
 import { toDisplayErrorFromCode, type DisplayError } from '../errors/errorMessages';
@@ -27,8 +27,17 @@ export interface CaptureStoppedChoiceOptions {
   readonly audioSource: AudioSource;
   /** 会議の終了を依頼して、答えを待っているか。待つ間は、選択を消す（押せないようにする）。 */
   readonly ending: boolean;
-  /** 取り込みをやり直す。取り込み直せなかったときは、AudioCaptureError で失敗する。 */
+  /**
+   * 取り込みをやり直す。取り込み直せなかったときは、AudioCaptureError で失敗する。音声を送る接続が閉じて
+   * いたときは、AudioConnectionClosedError で失敗する。
+   */
   readonly restart: () => Promise<void>;
+  /**
+   * やり直しで、音声を送る接続が閉じていると分かったときに呼ぶ。接続が閉じた会議は中断になっているため、
+   * 選択を出し直さず、取り込みの手順も案内しない。中断の扱い（お知らせと「会議の記録」へ移ること）は、
+   * 呼び出し先が行う。
+   */
+  readonly connectionClosed: () => void;
   /**
    * 確認なしで会議を終了する。失敗したときのお知らせは、呼び出し先が出す。
    * 終了の依頼の間、呼び出し側は ending を true にする。
@@ -54,7 +63,9 @@ export interface CaptureStoppedChoice {
  *
  * - 取り込みをやり直す: 開始時の音声の出どころで、ブラウザーの共有と許可の確認を出し、同じ会議で取り込みを
  *   続ける。成功すると、アプリサーバーが再開を通知して、状況が戻る。失敗したら、取り込み停止のまま、
- *   失敗の理由を添えて選択を出し直し（もう一度選べる）、restartFailed を true にする
+ *   失敗の理由を添えて選択を出し直し（もう一度選べる）、restartFailed を true にする。
+ *   音声を送る接続が閉じていて失敗したときは、取り込みの失敗として扱わず、connectionClosed を呼ぶ
+ *   （会議は中断になっていて、やり直しても続けられないため。選択を出し直さない）
  * - 会議を終了する: 終了の確認を出さずに、終了する（この選択が、確認を兼ねる）。終了の依頼の間（ending）は
  *   選択を消し、失敗して ending が戻ったら、取り込み停止のままなので、選択を出し直す
  * - 状況が取り込み停止から戻った、または画面を離れたときは、お知らせと、やり直しの失敗の記録を片づける
@@ -99,6 +110,11 @@ export function useCaptureStoppedChoice(options: CaptureStoppedChoiceOptions): C
           setRestartFailed(false);
         } catch (failure) {
           if (!showingRef.current) {
+            return;
+          }
+          if (failure instanceof AudioConnectionClosedError) {
+            // 接続が閉じた会議は、中断になっている。取り込みの失敗の案内（許可・共有の手順）を出さない。
+            latest.current.connectionClosed();
             return;
           }
           // 取り込み停止にとどまる。失敗の理由を添えて、もう一度選べるようにする。

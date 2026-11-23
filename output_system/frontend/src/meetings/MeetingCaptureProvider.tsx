@@ -2,7 +2,7 @@ import { createContext, useCallback, useContext, useEffect, useMemo, useRef, typ
 import { useLocation } from 'react-router';
 
 import { type AudioCaptureSession } from '../audio/audioCaptureSession';
-import { AudioCaptureError } from '../audio/audioErrors';
+import { AudioCaptureError, AudioConnectionClosedError } from '../audio/audioErrors';
 import { screenPaths } from '../routes';
 
 /** 預かっている取り込み。 */
@@ -29,9 +29,11 @@ export interface MeetingCapture {
    * 預かっている取り込みを、開始時に選んだ音声の出どころでやり直す。途中で止まったとき（共有を止めた・
    * マイクが外れた）に使う。ブラウザーの共有と許可の確認が、もう一度出る。同じ接続のまま、音声が続く。
    *
+   * @throws AudioConnectionClosedError 音声を送る接続が閉じていて、取り込み直せないとき。何も預かっていない
+   *   （接続が切れて、預かりをやめた）、または、やり直しの前か確認の間に接続が閉じた。会議は中断になっている
    * @throws AudioCaptureError 取り込み直せなかったとき。許可の拒否・マイクが無いなど（AUDIO_PERMISSION_DENIED
-   *   など）。何も預かっていない、または、やり直したあとも取り込みが続いていない（接続が閉じた）ときは
-   *   AUDIO_CAPTURE_FAILED。失敗しても預かりは続け、もう一度やり直せる
+   *   など）。接続は開いているのに、やり直したあとも取り込みが続いていないときは AUDIO_CAPTURE_FAILED。
+   *   失敗しても預かりは続け、もう一度やり直せる
    */
   readonly restart: () => Promise<void>;
   /**
@@ -86,11 +88,15 @@ export function MeetingCaptureProvider({ children }: { readonly children: ReactN
       restart: async () => {
         const session = heldRef.current?.session;
         if (session === undefined) {
-          throw new AudioCaptureError('AUDIO_CAPTURE_FAILED');
+          // 接続が切れて、預かりをやめた（forget）。取り込みの失敗ではない。
+          throw new AudioConnectionClosedError();
         }
         await session.restart();
         // restart は、途中で止まった状態でなければ何もせず戻る。取り込みが続いていなければ、成功としない
-        // （字幕が続くと思わせない）。
+        // （字幕が続くと思わせない）。接続が閉じていたなら、取り込みの失敗と分けて知らせる。
+        if (session.state === 'closed') {
+          throw new AudioConnectionClosedError();
+        }
         if (session.state !== 'capturing') {
           throw new AudioCaptureError('AUDIO_CAPTURE_FAILED');
         }

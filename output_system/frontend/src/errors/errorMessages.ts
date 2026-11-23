@@ -166,6 +166,13 @@ export const ERROR_WORDINGS: Readonly<Record<string, ErrorWording>> = Object.fre
     message: '字幕を作る処理が止まり、起動し直せなかったため、会議を中断しました。',
     action: `それまでの字幕は保存されています。会議の記録から要約を作れます。新しい会議を開始する前に、${REPORT_IF_NOT_FIXED}`,
   },
+  // 会議中に、理由のエラーを受けずに会議の中断に気づいたとき（音声を送る接続が切れた、アプリが止まった）。
+  // 「会議中」の画面が決める。サーバーは返さない（meetings/useMeetingInterruption.ts）
+  MEETING_CONNECTION_LOST: {
+    message: 'アプリとの接続が切れたため、会議を中断しました。',
+    action:
+      'それまでの字幕は保存されています。会議の記録から要約を作れます。通訳を続けるときは、新しい会議を開始してください。続けて起きる場合は、このエラーコードを開発を担う AI へ伝えてください。',
+  },
   // --- 字幕の処理の失敗（会議管理部が通知で返す。会議は続く。文言はサーバーの meetings/errors.py と同じ内容） ---
   SUBTITLE_TRANSCRIPTION_FAILED: {
     message: '音声の一部を文字にできなかったため、その部分の字幕を飛ばしました。',

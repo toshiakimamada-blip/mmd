@@ -85,3 +85,17 @@ export function toAudioCaptureError(failure: unknown, source: AudioSource): Audi
   }
   return new AudioCaptureError('AUDIO_CAPTURE_FAILED', { cause: failure });
 }
+
+/**
+ * 音声を送る接続が閉じていて、取り込みをやり直せない。
+ *
+ * 接続が閉じた会議は、アプリサーバーが中断にしている（画面との接続が切れた会議は中断になる。会議の終了や中断が
+ * 済むと、サーバーも接続を閉じる）。取り込みの失敗（AudioCaptureError）とは分ける。許可や共有の手順では
+ * 直らないため、取り込みの手順を案内せず、会議の中断として扱う。
+ */
+export class AudioConnectionClosedError extends Error {
+  constructor() {
+    super('音声を送る接続が閉じています');
+    this.name = 'AudioConnectionClosedError';
+  }
+}

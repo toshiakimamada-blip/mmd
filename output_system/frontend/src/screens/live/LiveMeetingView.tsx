@@ -15,6 +15,7 @@ import { useMeetingCapture } from '../../meetings/MeetingCaptureProvider';
 import { useElapsedMilliseconds } from '../../meetings/useElapsedMilliseconds';
 import { useCaptureStoppedChoice } from '../../meetings/useCaptureStoppedChoice';
 import { useLiveStatus } from '../../meetings/useLiveStatus';
+import { useMeetingInterruption } from '../../meetings/useMeetingInterruption';
 import { useSubtitleErrorNotices } from '../../meetings/useSubtitleErrorNotices';
 import { SCREENS, screenPaths } from '../../routes';
 import { useMeetingSubtitles } from '../../subtitles/useMeetingSubtitles';
@@ -43,6 +44,9 @@ const MEETING_LENGTH_WARNING_ID = 'meeting-length';
  *   それまでの字幕は、そのまま残る
  * - 字幕の処理のエラー（音声の一部を文字にできなかった、など）は、お知らせ帯に出す。会議は続く
  *   （meetings/useSubtitleErrorNotices.ts）
+ * - アプリサーバーの側で会議が中断になったら（通訳ワーカーを起動し直せない、音声を送る接続が切れた、
+ *   アプリが止まった）、お知らせ帯に中断の理由を出して、「会議の記録」へ移る（meetings/useMeetingInterruption.ts）。
+ *   取り込み停止の選択は、画面とともに消える
  * - 字幕の領域: 話された順の字幕。最新の字幕まで自動で進む（過去へ戻っている間は進まない）
  * - 案内の領域
  * 質問の領域（質問を作る機能）は、この画面にはまだ無い。
@@ -80,20 +84,39 @@ export function LiveMeetingView({ meeting }: { readonly meeting: LiveMeeting }) 
   const endingRef = useRef(false);
   // 状況の領域の見出し。取り込み停止の選択を選んだあと、消えたボタンの代わりにフォーカスを受ける。
   const titleRef = useRef<HTMLHeadingElement>(null);
+  // 「会議の記録」へ移ったか（会議の終了、または中断で）。移るのは 1 回だけ。
+  const leftRef = useRef(false);
+
+  /**
+   * 取り込みの接続を閉じて手放し、この会議の「会議の記録」へ移る。会議の終了と中断の、どちらからも使う。
+   * - 履歴は置き換える。戻るボタンで、終わった会議の「会議中」へ戻らないため
+   * - 2 回目からは何もしない（終了の応答を待つ間に中断に気づいた、などで重なっても、1 回だけ移る）
+   */
+  const leaveToRecord = (): void => {
+    if (leftRef.current) {
+      return;
+    }
+    leftRef.current = true;
+    capture.release();
+    navigate(screenPaths.meetingRecord(meeting.meetingId), { replace: true });
+  };
+
+  // アプリサーバーの側で会議が中断になったら、お知らせ帯に理由を出して、「会議の記録」へ移る。
+  const { connectionClosed } = useMeetingInterruption(meeting.meetingId, leaveToRecord);
 
   /**
    * 終了の確認で「終了する」を選んだときの処理。音声の取り込みを止め、終了を依頼し、済んだら音声の接続を閉じて
-   * 「会議の記録」へ移る。
+   * 「会議の記録」へ移る（leaveToRecord）。
    * - 取り込みは、終了の依頼の前に止める（残りの音声を送りきる）。接続は、依頼のあとに閉じる。
    *   先に閉じると、アプリサーバーが音声の接続切れとみなして、会議を中断にする
-   * - 履歴は置き換える。戻るボタンで、終わった会議の「会議中」へ戻らないため
    * - 失敗したら、お知らせ帯にエラーを出し、「会議中」にとどまる（もう一度試せる。止めた取り込みは、もう一度止めても害が無い）
+   * - 応答を待つ間に、会議の中断で「会議の記録」へ移っていたら、終了の失敗は出さない
    *
-   * - すでに終了の処理が動いているときは、何もしない（取り込み停止の選択と、終了の確認の、どちらから
-   *   呼ばれても、終了の依頼は 1 回だけ）
+   * - すでに終了の処理が動いているとき、または画面を離れたあとは、何もしない（取り込み停止の選択と、
+   *   終了の確認の、どちらから呼ばれても、終了の依頼は 1 回だけ）
    */
   const endNow = async (): Promise<void> => {
-    if (endingRef.current) {
+    if (endingRef.current || leftRef.current) {
       return;
     }
     endingRef.current = true;
@@ -107,13 +130,15 @@ export function LiveMeetingView({ meeting }: { readonly meeting: LiveMeeting }) 
       if (!(error instanceof ApiError)) {
         throw error;
       }
+      if (leftRef.current) {
+        return;
+      }
       endingRef.current = false;
       setEnding(false);
       post({ kind: 'error', id: END_FAILED_NOTICE_ID, error: toDisplayError(error.body) });
       return;
     }
-    capture.release();
-    navigate(screenPaths.meetingRecord(meeting.meetingId), { replace: true });
+    leaveToRecord();
   };
 
   // 取り込みが止まったとき（取り込み停止）に、お知らせ帯へ、やり直しか終了かの選択を出す。
@@ -124,6 +149,7 @@ export function LiveMeetingView({ meeting }: { readonly meeting: LiveMeeting }) 
     audioSource: meeting.audioSource,
     ending,
     restart: capture.restart,
+    connectionClosed,
     end: endNow,
     returnFocus: () => titleRef.current?.focus(),
   });
