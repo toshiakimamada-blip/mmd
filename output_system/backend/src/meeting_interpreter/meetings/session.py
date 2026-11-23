@@ -1185,6 +1185,12 @@ class MeetingSession:
         self._notify_interpreter_stopped()
 
         self._meeting = meeting
+        # 中断の理由（エラー）は、状態の変化より先に知らせる。「会議中」の画面は、状態の変化
+        # （中断）を受けると「会議の記録」へ移るため、移る前に理由を受け取れるようにする。
+        if reason is CloseReason.WORKER_FAILED:
+            failure = interpreter_unavailable(self.meeting_id)
+            log_error(failure.body.code, COMPONENT, meeting_id=self.meeting_id)
+            self._publish_error(failure)
         self._publish(
             MEETING_STATE_CHANGED,
             {
@@ -1193,10 +1199,6 @@ class MeetingSession:
                 "ended_at": _iso(ended_at),
             },
         )
-        if reason is CloseReason.WORKER_FAILED:
-            failure = interpreter_unavailable(self.meeting_id)
-            log_error(failure.body.code, COMPONENT, meeting_id=self.meeting_id)
-            self._publish_error(failure)
         self._result.set_result(meeting)
         if (
             reason is CloseReason.END

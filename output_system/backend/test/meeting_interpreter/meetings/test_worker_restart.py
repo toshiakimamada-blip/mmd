@@ -347,6 +347,43 @@ class TestWhenTheWorkerCannotBeRestarted:
         assert launcher.starts >= 3
         assert status == 201
 
+    def test_should_notify_the_reason_before_the_interruption(self, settings):
+        """
+        【テスト対象】起動し直せない場合の、通知の順番
+        【テスト内容】どの起動も失敗する状況で、会議を開始し、中断の通知とエラーの通知を待つ
+        【期待結果】この会議の error.occurred（SYSTEM_INTERPRETER_UNAVAILABLE）が、会議の状態の変化
+                    （中断）より先に届くこと。「会議中」の画面は、状態の変化で「会議の記録」へ移るため、
+                    中断の理由を、移る前に受け取れるようにする
+        """
+        launcher = FakeEngineLauncher(
+            settings, fake_for_attempt=lambda n: FakeEngineOptions(load_fails=True)
+        )
+
+        def interruption_notices(items: list[dict]) -> list[tuple[str, str]]:
+            return [
+                (item["type"], item.get("code") or item["status"])
+                for item in items
+                if item["type"] == "error.occurred"
+                or (item["type"] == "meeting.state_changed" and item["status"] == "interrupted")
+            ]
+
+        with running_app(make_app(settings, launcher)) as handle:
+            try:
+                events = handle.events()
+                meeting_id = start_meeting(handle)
+                received = events.wait_for(
+                    lambda items: len(interruption_notices(items)) >= 2,
+                    what="エラーの通知と、中断の通知",
+                )
+            finally:
+                handle.close_all()
+
+        assert all(item["meeting_id"] == meeting_id for item in received if "meeting_id" in item)
+        assert interruption_notices(received) == [
+            ("error.occurred", "SYSTEM_INTERPRETER_UNAVAILABLE"),
+            ("meeting.state_changed", "interrupted"),
+        ]
+
     def test_should_restart_again_when_a_worker_that_ran_long_enough_stops(self, settings):
         """
         【テスト対象】失敗の数え直し（安定して動いたワーカー）
