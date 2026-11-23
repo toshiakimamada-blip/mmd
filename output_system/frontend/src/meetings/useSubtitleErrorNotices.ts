@@ -9,13 +9,18 @@ import { useEvent } from '../events/EventsProvider';
  * 会議は続いている。お知らせは、何が起きたかと次に行う操作を伝えるだけで、画面の操作を止めない。
  *
  * - SUBTITLE_TRANSCRIPTION_FAILED: 発話の区切りの文字起こしに失敗し、その部分の字幕を飛ばした
+ * - SUBTITLE_SAVE_FAILED: 字幕 1 件の保存に失敗し、その字幕を画面に出さなかった（サーバーは、
+ *   保存が確定した字幕だけを通知する。失敗した字幕は、一覧に載らない）
  *
  * 一覧に無いコードの通知は、この部品では表示しない。会議の終了の保存の失敗（RECORD_SAVE_FAILED。
  * 終了の応答のエラーとして、画面が別に出す）や、通訳ワーカーの停止、要約・質問の作成の失敗は、それぞれの
  * 仕組みが表示する。同じ出来事のお知らせを、重ねて出さないため。
  * コードを足すときは、errorMessages.ts の文言も足す（テストが、SUBTITLE_ のコードの抜けを検出する）。
  */
-export const SUBTITLE_ERROR_CODES: readonly string[] = ['SUBTITLE_TRANSCRIPTION_FAILED'];
+export const SUBTITLE_ERROR_CODES: readonly string[] = [
+  'SUBTITLE_TRANSCRIPTION_FAILED',
+  'SUBTITLE_SAVE_FAILED',
+];
 
 /** コードごとのお知らせの識別子。同じコードの通知が続いても、お知らせは増えず、内容が置き換わる。 */
 function noticeIdFor(code: string): string {

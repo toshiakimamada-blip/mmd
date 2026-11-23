@@ -135,6 +135,42 @@ describe('MeetingLiveScreen subtitle processing errors', () => {
 
   /**
    * 【ユーザーストーリー】
+   * 会議中に、字幕を保存できなかったとき、お知らせ帯に、何が起きたかと次に行う操作が出る。
+   * 失敗した字幕は画面に出ない。会議は続き、そのあとの字幕は、保存できたものとして出る
+   *
+   * 【期待結果】
+   * - お知らせ帯に、エラーのお知らせが 1 つ出て、エラーコード SUBTITLE_SAVE_FAILED と、
+   *   字幕を画面に出さなかったこと・ディスクの空きを確かめる案内が書かれている
+   * - サーバーが通知に書いた文面（データベースの例外や会議の内容を含みうる）は、画面のどこにも出ない
+   * - 保存できなかった字幕は、一覧に無い。そのあとの字幕（順番 1）は、一覧に出る
+   * - 文字起こしの失敗のお知らせと、保存の失敗のお知らせは、別々に出る（互いを置き換えない）
+   */
+  it('should show the save failure in the notice band and keep showing the subtitles that were saved', async () => {
+    await openLive();
+    receive(errorOccurred('SUBTITLE_TRANSCRIPTION_FAILED'));
+
+    receive(errorOccurred('SUBTITLE_SAVE_FAILED'));
+
+    const notices = errorNotices();
+    expect(notices).toHaveLength(2);
+    const notice = within(notices[1]);
+    expect(notice.getByText('SUBTITLE_SAVE_FAILED')).toBeInTheDocument();
+    expect(
+      notice.getByText('字幕を保存できなかったため、その字幕を画面に出しませんでした。'),
+    ).toBeInTheDocument();
+    expect(notice.getByText(/ディスクの空きを確かめてください/)).toBeInTheDocument();
+    expect(screen.queryByText(new RegExp(SERVER_WORDING))).not.toBeInTheDocument();
+    expect(screen.queryByText('Lost sentence')).not.toBeInTheDocument();
+
+    // 保存できた字幕だけが、サーバーから通知される。失敗した字幕の通知は、届かない。
+    receive(subtitleCreated(1, 'Saved sentence'));
+    expect(await screen.findByText('Saved sentence')).toBeInTheDocument();
+    expect(screen.queryByText('Lost sentence')).not.toBeInTheDocument();
+    expect(errorNotices()).toHaveLength(2);
+  });
+
+  /**
+   * 【ユーザーストーリー】
    * 同じエラーが何度も届いても、お知らせ帯にお知らせが増えない
    *
    * 【期待結果】同じコードの通知を 3 回受けても、エラーのお知らせは 1 つのまま

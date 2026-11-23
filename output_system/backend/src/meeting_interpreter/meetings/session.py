@@ -73,6 +73,7 @@ from .errors import (
     audio_already_connected,
     interpreter_unavailable,
     meeting_not_running,
+    subtitle_save_failed,
     subtitle_transcription_failed,
 )
 from .subtitle_status import SubtitleStatus, SubtitleStatusTracker
@@ -928,8 +929,11 @@ class MeetingSession:
     async def _handle_subtitle(self, subtitle: WorkerSubtitle) -> None:
         """字幕 1 件を保存し、保存が確定してから画面へ通知する。
 
-        保存に失敗した字幕は、通知しない（画面に出た字幕が、必ず記録に残る）。
-        エラーを通知して、会議は続ける。通知したあとで、処理ログ（subtitle_sent）を 1 件出す。
+        保存に失敗した字幕は、通知しない（画面に出た字幕が、必ず記録に残る）。失敗した字幕は確定して
+        いないため、順番を使わない（記録保存部が、確定の取り消しで守る）。次の字幕が、同じ順番を使う。
+        エラー（SUBTITLE_SAVE_FAILED）を通知して、会議は続ける。続けて失敗しても、通知は間隔につき
+        1 件にまとめる。エラーログは、失敗のたびに出す。保存に成功した字幕は、通知したあとで、
+        処理ログ（subtitle_sent）を 1 件出す。
         """
         self._forget_arrivals_before(subtitle.received_at)
         save_started = self._monotonic()
@@ -941,7 +945,7 @@ class MeetingSession:
                 spoken_at=subtitle.received_at,
             )
         except RecordError as error:
-            self._publish_error(error)
+            self._on_subtitle_save_failed(subtitle, error)
             return
         self._subtitle_count = saved.sequence
         self._publish(
@@ -969,6 +973,28 @@ class MeetingSession:
         )
         # 字幕の遅れは、処理ログと同じ値（単調増加時計の差）。目標を超えたら、状況を遅れにする。
         self._announce_status(self._subtitle_status.subtitle_delivered(delay_ms / 1000))
+
+    def _on_subtitle_save_failed(self, subtitle: WorkerSubtitle, error: RecordError) -> None:
+        """字幕 1 件の保存に失敗した。画面へエラーを知らせる。字幕は通知せず、会議は続ける。
+
+        保存の失敗は、原因（ディスクがいっぱい、ロック、値が決めた形に合わない、など）によらず、同じ
+        エラー（SUBTITLE_SAVE_FAILED）で知らせる。画面に出すエラーコードを、エラーログからも見つけられる
+        ように、同じコードのエラーログを、失敗した字幕の処理の識別子つきで出す（記録保存部も、データ
+        ベースの失敗の種類と場所を別に 1 件出している）。通知は、続けて失敗しても、間隔につき 1 件に
+        まとめる。エラーログは、通知を止めた失敗も含めて、失敗のたびに出す。
+
+        字幕の本文と、データベースの例外の文面は、通知にもログにも出さない。
+        """
+        _, location = describe_origin(error)
+        log_error(
+            "SUBTITLE_SAVE_FAILED",
+            COMPONENT,
+            meeting_id=self.meeting_id,
+            trace_id=subtitle.trace_id,
+            exception_type=type(error).__name__,
+            location=location,
+        )
+        self._publish_error_once_per_interval(subtitle_save_failed(self.meeting_id))
 
     def _announce_status(self, changed: SubtitleStatus | None) -> None:
         """字幕の状況が変わったとき（changed が None でないとき）だけ、画面へ通知する。"""

@@ -148,3 +148,20 @@ def subtitle_transcription_failed(meeting_id: str | None = None) -> SystemAppErr
         component=COMPONENT,
         meeting_id=meeting_id,
     )
+
+
+def subtitle_save_failed(meeting_id: str | None = None) -> SystemAppError:
+    """字幕 1 件の保存に失敗し、その字幕を画面へ送らなかった（会議は続く）。
+
+    画面のお知らせ帯へ、通知（error.occurred）で届ける。失敗の原因（ディスクがいっぱい、ロック、
+    値が決めた形に合わない、など）によらず、同じ文言にする。保存できなかった字幕の内容と、
+    データベースの例外の文面は、文言にも通知にも入れない。
+    """
+    return SystemAppError(
+        "SUBTITLE_SAVE_FAILED",
+        "字幕を保存できなかったため、その字幕を画面に出しませんでした。",
+        "会議はそのまま続けられます。ディスクの空きを確かめてください。"
+        f"空きが少ないときは、ほかのファイルを消して空きを作ってください。{_REPORT_IF_NOT_FIXED}",
+        component=COMPONENT,
+        meeting_id=meeting_id,
+    )
