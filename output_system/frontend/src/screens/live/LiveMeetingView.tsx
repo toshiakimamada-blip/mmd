@@ -15,6 +15,7 @@ import { useMeetingCapture } from '../../meetings/MeetingCaptureProvider';
 import { useElapsedMilliseconds } from '../../meetings/useElapsedMilliseconds';
 import { useCaptureStoppedChoice } from '../../meetings/useCaptureStoppedChoice';
 import { useLiveStatus } from '../../meetings/useLiveStatus';
+import { useSubtitleErrorNotices } from '../../meetings/useSubtitleErrorNotices';
 import { SCREENS, screenPaths } from '../../routes';
 import { useMeetingSubtitles } from '../../subtitles/useMeetingSubtitles';
 import { CaptureRestartGuidance } from './CaptureRestartGuidance';
@@ -40,6 +41,8 @@ const MEETING_LENGTH_WARNING_ID = 'meeting-length';
  * - 取り込み停止（音声の共有やマイクが止まった）の間は、お知らせ帯に「取り込みをやり直す」と「会議を終了する」の
  *   選択を出す（meetings/useCaptureStoppedChoice.ts）。やり直しに失敗したら、取り込みの手順を案内する。
  *   それまでの字幕は、そのまま残る
+ * - 字幕の処理のエラー（音声の一部を文字にできなかった、など）は、お知らせ帯に出す。会議は続く
+ *   （meetings/useSubtitleErrorNotices.ts）
  * - 字幕の領域: 話された順の字幕。最新の字幕まで自動で進む（過去へ戻っている間は進まない）
  * - 案内の領域
  * 質問の領域（質問を作る機能）は、この画面にはまだ無い。
@@ -56,6 +59,8 @@ export function LiveMeetingView({ meeting }: { readonly meeting: LiveMeeting }) 
   const elapsed = useElapsedMilliseconds(meeting.startedAt);
   const subtitles = useMeetingSubtitles(meeting.meetingId);
   const { subtitleStatus, lengthWarningSeconds, captureStopCount } = useLiveStatus(meeting.meetingId);
+  // 字幕の処理が失敗したとき（文字起こしの失敗など）、お知らせ帯にエラーを出す。会議は続く。
+  useSubtitleErrorNotices(meeting.meetingId);
   const subtitlesHeadingId = useId();
   // 字幕が遅れている間だけ、お知らせ帯に警告を出す。遅れが解消すると、警告も消える。
   useWarning(SUBTITLE_DELAYED_WARNING_ID, subtitleStatus === 'delayed', SUBTITLE_DELAYED_WARNING);

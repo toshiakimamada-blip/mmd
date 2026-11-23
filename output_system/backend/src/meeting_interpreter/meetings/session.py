@@ -67,7 +67,15 @@ from ..records.models import Subtitle as SavedSubtitle
 from ..records.store import RecordStore
 from ..tuning import Tuning
 from ..worker_client import WorkerExited
-from .errors import COMPONENT, audio_already_connected, interpreter_unavailable, meeting_not_running
+from .error_notices import ErrorNoticeThrottle
+from .errors import (
+    COMPONENT,
+    audio_already_connected,
+    interpreter_unavailable,
+    meeting_not_running,
+    subtitle_save_failed,
+    subtitle_transcription_failed,
+)
 from .subtitle_status import SubtitleStatus, SubtitleStatusTracker
 from .transitions import Trigger, resolve_transition
 from .workers import InterpreterLauncher
@@ -144,6 +152,9 @@ class SessionPolicy:
     audio_connect_timeout_seconds: float
     # 字幕の遅れの目標（秒）。字幕の遅れと、処理を待つ音声が、これを超えたら、状況を遅れにする。
     subtitle_delay_target_seconds: float
+    # 字幕の処理のエラー（文字起こしの失敗、字幕の保存の失敗）を、画面へ通知する間隔（秒）。
+    # 同じエラーが続いても、この秒数につき 1 件にまとめる（ErrorNoticeThrottle）。
+    error_notice_interval_seconds: float
     # 終了処理の依頼を書き始めるまで待つ秒数。
     finish_write_timeout_seconds: float = FINISH_WRITE_TIMEOUT_SECONDS
     # ワーカーを止めるとき、停止完了を待つ秒数。強制終了の猶予 1 秒が別に付く。
@@ -161,6 +172,7 @@ class SessionPolicy:
             finish_idle_seconds=tuning.meeting_end_finish_idle_seconds,
             audio_connect_timeout_seconds=tuning.audio_connect_timeout_seconds,
             subtitle_delay_target_seconds=tuning.subtitle_delay_target_seconds,
+            error_notice_interval_seconds=tuning.error_notice_interval_seconds,
         )
 
 
@@ -354,6 +366,10 @@ class MeetingSession:
         self._arrival_monotonic: dict[datetime, float] = {}
         # 字幕の状況（開始準備中・正常・遅れ…）。状況が変わるたびに、画面へ通知する。
         self._subtitle_status = SubtitleStatusTracker(policy.subtitle_delay_target_seconds)
+        # 字幕の処理のエラー（文字起こしの失敗など）の通知を、同じコードにつき
+        # 間隔ごとに 1 件へ絞る。続けて起きても、お知らせ帯が同じエラーで埋まらない
+        # （エラーログは、失敗のたびに出す）。
+        self._error_notices = ErrorNoticeThrottle(policy.error_notice_interval_seconds, monotonic)
         self._memory_probe: MemoryProbe = memory_probe or ProcessMemoryProbe()
         # 会議を閉じる手順で、通訳ワーカーに終了処理を頼む直前に取ったメモリの使用量。
         self._memory_at_close: list[MemoryUsage] | None = None
@@ -844,6 +860,12 @@ class MeetingSession:
                 return _Served.CLOSED
             case WorkerError():
                 self._log_worker_error(message)
+                if message.kind is ErrorKind.TRANSCRIPTION_FAILED:
+                    # その区切りは飛ばして、会議を続ける（ワーカーも次の区切りへ進む）。画面には、
+                    # お知らせ帯のエラーで知らせる。続けて失敗しても、間隔につき 1 件にまとめる。
+                    self._publish_error_once_per_interval(
+                        subtitle_transcription_failed(self.meeting_id)
+                    )
             case Backlog():
                 # 処理を待つ音声が長いときは、字幕が出ていなくても遅れにする。
                 self._announce_status(
@@ -907,8 +929,11 @@ class MeetingSession:
     async def _handle_subtitle(self, subtitle: WorkerSubtitle) -> None:
         """字幕 1 件を保存し、保存が確定してから画面へ通知する。
 
-        保存に失敗した字幕は、通知しない（画面に出た字幕が、必ず記録に残る）。
-        エラーを通知して、会議は続ける。通知したあとで、処理ログ（subtitle_sent）を 1 件出す。
+        保存に失敗した字幕は、通知しない（画面に出た字幕が、必ず記録に残る）。失敗した字幕は確定して
+        いないため、順番を使わない（記録保存部が、確定の取り消しで守る）。次の字幕が、同じ順番を使う。
+        エラー（SUBTITLE_SAVE_FAILED）を通知して、会議は続ける。続けて失敗しても、通知は間隔につき
+        1 件にまとめる。エラーログは、失敗のたびに出す。保存に成功した字幕は、通知したあとで、
+        処理ログ（subtitle_sent）を 1 件出す。
         """
         self._forget_arrivals_before(subtitle.received_at)
         save_started = self._monotonic()
@@ -920,7 +945,7 @@ class MeetingSession:
                 spoken_at=subtitle.received_at,
             )
         except RecordError as error:
-            self._publish_error(error)
+            self._on_subtitle_save_failed(subtitle, error)
             return
         self._subtitle_count = saved.sequence
         self._publish(
@@ -948,6 +973,28 @@ class MeetingSession:
         )
         # 字幕の遅れは、処理ログと同じ値（単調増加時計の差）。目標を超えたら、状況を遅れにする。
         self._announce_status(self._subtitle_status.subtitle_delivered(delay_ms / 1000))
+
+    def _on_subtitle_save_failed(self, subtitle: WorkerSubtitle, error: RecordError) -> None:
+        """字幕 1 件の保存に失敗した。画面へエラーを知らせる。字幕は通知せず、会議は続ける。
+
+        保存の失敗は、原因（ディスクがいっぱい、ロック、値が決めた形に合わない、など）によらず、同じ
+        エラー（SUBTITLE_SAVE_FAILED）で知らせる。画面に出すエラーコードを、エラーログからも見つけられる
+        ように、同じコードのエラーログを、失敗した字幕の処理の識別子つきで出す（記録保存部も、データ
+        ベースの失敗の種類と場所を別に 1 件出している）。通知は、続けて失敗しても、間隔につき 1 件に
+        まとめる。エラーログは、通知を止めた失敗も含めて、失敗のたびに出す。
+
+        字幕の本文と、データベースの例外の文面は、通知にもログにも出さない。
+        """
+        _, location = describe_origin(error)
+        log_error(
+            "SUBTITLE_SAVE_FAILED",
+            COMPONENT,
+            meeting_id=self.meeting_id,
+            trace_id=subtitle.trace_id,
+            exception_type=type(error).__name__,
+            location=location,
+        )
+        self._publish_error_once_per_interval(subtitle_save_failed(self.meeting_id))
 
     def _announce_status(self, changed: SubtitleStatus | None) -> None:
         """字幕の状況が変わったとき（changed が None でないとき）だけ、画面へ通知する。"""
@@ -1223,3 +1270,13 @@ class MeetingSession:
     def _publish_error(self, error: AppError) -> None:
         """エラーの通知を送る。"""
         self._publish(ERROR_OCCURRED, error_payload(self.meeting_id, error))
+
+    def _publish_error_once_per_interval(self, error: AppError) -> None:
+        """エラーの通知を送る。同じエラーコードの通知が、直前の間隔の内にあれば、送らない。
+
+        字幕の処理のエラーは、続けて起きることがある。そのたびに知らせると、お知らせ帯が同じエラーで
+        埋まるため、間隔（SessionPolicy.error_notice_interval_seconds）につき 1 件にまとめる。
+        送らなかったエラーも、エラーログには、呼び出し側が失敗のたびに出している。
+        """
+        if self._error_notices.allow(error.body.code):
+            self._publish_error(error)

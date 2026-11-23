@@ -52,6 +52,45 @@ describe('ERROR_WORDINGS', () => {
   });
 });
 
+describe('ERROR_WORDINGS for subtitle processing', () => {
+  /**
+   * 【テスト対象】ERROR_WORDINGS（字幕の処理の失敗）
+   * 【テスト内容】文字起こしの失敗のコードの文言を引く
+   * 【期待結果】何が起きたか（音声の一部を文字にできず、字幕を飛ばしたこと）と、次に行う操作
+   *            （会議は続けられること。続くときは新しい会議を始めること）があり、エラーコードを
+   *            開発を担う AI へ伝える案内がある。会議の内容やプログラムの例外の文面を入れない固定の文である
+   */
+  it('should word the skipped transcription as an error the meeting survives', () => {
+    const wording = ERROR_WORDINGS.SUBTITLE_TRANSCRIPTION_FAILED;
+
+    expect(wording.message).toBe('音声の一部を文字にできなかったため、その部分の字幕を飛ばしました。');
+    expect(wording.action).toContain('会議はそのまま続けられます');
+    expect(wording.action).toContain('新しい会議を開始してください');
+    expect(wording.action).toContain('このエラーコードを開発を担う AI へ伝えてください');
+  });
+});
+
+describe('ERROR_WORDINGS for a subtitle that could not be saved', () => {
+  /**
+   * 【テスト対象】ERROR_WORDINGS（字幕の保存の失敗）
+   * 【テスト内容】字幕の保存の失敗のコードの文言を引く
+   * 【期待結果】何が起きたか（字幕を保存できず、その字幕を画面に出さなかったこと）と、次に行う操作
+   *            （会議は続けられること。続けて出るときは、ディスクの空きを確かめ、空きが少ないときは
+   *            空きを作ること。ディスクの空きだけを原因として決めつけない）があり、
+   *            エラーコードを開発を担う AI へ伝える案内がある。会議の内容やデータベースの例外の文面を
+   *            入れない固定の文である
+   */
+  it('should tell that the subtitle was not shown and how to free disk space', () => {
+    const wording = ERROR_WORDINGS.SUBTITLE_SAVE_FAILED;
+
+    expect(wording.message).toBe('字幕を保存できなかったため、その字幕を画面に出しませんでした。');
+    expect(wording.action).toContain('会議はそのまま続けられます');
+    expect(wording.action).toContain('このお知らせが続けて出るときは、ディスクの空きを確かめてください');
+    expect(wording.action).toContain('空きを作ってください');
+    expect(wording.action).toContain('このエラーコードを開発を担う AI へ伝えてください');
+  });
+});
+
 describe('ERROR_WORDINGS for access restriction', () => {
   /**
    * 【テスト対象】ERROR_WORDINGS（接続制限が返すコード）

@@ -112,6 +112,17 @@ class TestShippedTuningFile:
         assert 1 <= tuning.translation_beam_size <= 4
         assert tuning.interpreter_backlog_warning_seconds > tuning.subtitle_delay_target_seconds
 
+    def test_should_define_the_interval_of_error_notices(self):
+        """
+        【テスト対象】同梱の tuning.toml（字幕の処理のエラーの通知の間隔）
+        【テスト内容】環境変数なしで読み込む
+        【期待結果】error_notice_interval_seconds が 60 秒の仮置きで入っていること
+                    （同じエラーが続いても、お知らせ帯へ出すのはこの秒数につき 1 件）
+        """
+        tuning = _load(REPO_CONFIG_DIR / TUNING_FILE_NAME)
+
+        assert tuning.error_notice_interval_seconds == 60.0
+
     def test_should_quantize_the_translation_model_to_8_bit_integers_by_default(self):
         """
         【テスト対象】同梱の tuning.toml（翻訳モデルの量子化）
@@ -325,6 +336,8 @@ class TestFileValidation:
             ("cutoff_before_end_seconds", "600.5"),
             ("cutoff_before_end_seconds", "false"),
             ("generation_input_max_chars", "0"),
+            ("error_notice_interval_seconds", "0"),
+            ("error_notice_interval_seconds", "3601"),
         ],
     )
     def test_should_reject_a_wrong_type_or_out_of_range_value(

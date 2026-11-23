@@ -211,6 +211,20 @@ FastAPI が自動で返す応答も、共通の形に変えています。
 - 音声の WebSocket の接続を断る 3 つ（`MEETING_NOT_FOUND`・`MEETING_NOT_RUNNING`・`MEETING_AUDIO_ALREADY_CONNECTED`）は、接続を受け付ける前に起こすため、画面には HTTP の 403 として見えます。エラーコードは、サーバーのエラーログにだけ出ます。
 - エラーの通知（`error.occurred`）は、`/ws/events` で届きます。項目は `meeting_id`・`category`・`code`・`message`・`action` です。画面は、`code` から画面側の文言を引きます。
 
+### 字幕の処理（SUBTITLE_*）
+
+会議中の字幕の処理が失敗したときの、会議管理部（`backend/src/meeting_interpreter/meetings/`）の通知です。HTTP の応答ではなく、`error.occurred` の通知で届きます。分類はシステムエラーです。会議は続けます。文言に、会議の内容とプログラムの例外の文面は入れません。
+
+| コード | 分類 | 何が起きたか |
+|---|---|---|
+| `SUBTITLE_TRANSCRIPTION_FAILED` | システムエラー（通知で届く） | 発話の区切り 1 つの文字起こしに失敗し、その区切りを飛ばした。同じ失敗が続いても、通知は調整値 `error_notice_interval_seconds` の間隔につき 1 件にまとめる |
+| `SUBTITLE_SAVE_FAILED` | システムエラー（通知で届く） | 字幕 1 件の保存に失敗し、その字幕を画面へ送らなかった。原因（ディスクがいっぱい・ロック・値が決めた形に合わない）によらず、同じコードにする。失敗した字幕は順番を使わない。同じ失敗が続いても、通知は同じ間隔につき 1 件にまとめる |
+
+- 画面は、「会議中」のお知らせ帯に、エラーとして出します（`frontend/src/meetings/useSubtitleErrorNotices.ts`）。次に行う操作は、文字起こしの失敗が「会議はそのまま続けられます。字幕が出ない状態が続くときは、会議を終了して、新しい会議を開始してください」、字幕の保存の失敗が「会議はそのまま続けられます。このお知らせが続けて出るときは、ディスクの空きを確かめてください。空きが少ないときは、ほかのファイルを消して空きを作ってください」です。保存の失敗は、原因（ディスクがいっぱい・ロック・字幕が上限を超える）によらず同じ文面のため、ディスクの空きだけを原因として決めつけません。
+- 字幕の保存の失敗は、エラーログにも `SUBTITLE_SAVE_FAILED`（コンポーネント `meeting_manager`）を、失敗のたびに出します。項目は、会議番号・失敗した字幕の処理の識別子（`trace_id`。同じ識別子の `subtitle_sent` は出ない）・例外の種類（`RecordSaveError` か `RecordValueError`）・発生場所です。字幕の本文とデータベースの例外の文面は出しません。記録保存部は、データベースの失敗の種類と場所を、`RECORD_SAVE_FAILED` で別に出します。
+- 翻訳の失敗は、エラーにしません。日本語訳が空の字幕として保存して通知します（エラーログ `SUBTITLE_TRANSLATION_FAILED` だけを残します）。
+- コードを足すときは、`useSubtitleErrorNotices.ts` の `SUBTITLE_ERROR_CODES` にも足します。足し忘れは、フロントエンドのテストが検出します。
+
 ### 要約の作成の依頼（SUMMARY_NO_CONTENT）
 
 `POST /api/meetings/{会議番号}/summary`（要約を作る・作り直す）が返すエラーです。

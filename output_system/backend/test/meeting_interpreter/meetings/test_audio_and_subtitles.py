@@ -365,7 +365,8 @@ class TestSubtitleNotification:
         【テスト対象】字幕の保存の失敗
         【テスト内容】1 件目の保存が失敗する状態で、発話を 2 つ送る
         【期待結果】1 件目の字幕は通知されず、記録にも無いこと。保存の失敗が error.occurred
-                    （RECORD_SAVE_FAILED）で通知されること。会議は続き、2 件目は順番 1 で保存され、
+                    （SUBTITLE_SAVE_FAILED）で通知されること。会議は続き、2 件目は順番 1 で
+                    保存され、
                     通知されること（失敗した字幕は順番を使わない）
         """
         meeting_id = start_meeting(app_handle)
@@ -388,7 +389,7 @@ class TestSubtitleNotification:
             speak(audio, 2.0)
             created = events.wait_for_count("subtitle.created", 1)
 
-        assert errors[0]["code"] == "RECORD_SAVE_FAILED"
+        assert errors[0]["code"] == "SUBTITLE_SAVE_FAILED"
         assert errors[0]["category"] == "system_error"
         assert errors[0]["meeting_id"] == meeting_id
         assert [item["sequence"] for item in created] == [1]

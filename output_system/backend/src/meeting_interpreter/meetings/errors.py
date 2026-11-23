@@ -132,3 +132,37 @@ def interpreter_unavailable(meeting_id: str | None = None) -> SystemAppError:
         component=COMPONENT,
         meeting_id=meeting_id,
     )
+
+
+def subtitle_transcription_failed(meeting_id: str | None = None) -> SystemAppError:
+    """発話の区切りの文字起こしに失敗し、その区切りを飛ばした（会議は続く）。
+
+    画面のお知らせ帯へ、通知（error.occurred）で届ける。飛ばした区切りの内容と、失敗した例外の文面は、
+    文言にも通知にも入れない。
+    """
+    return SystemAppError(
+        "SUBTITLE_TRANSCRIPTION_FAILED",
+        "音声の一部を文字にできなかったため、その部分の字幕を飛ばしました。",
+        "会議はそのまま続けられます。字幕が出ない状態が続くときは、会議を終了して、"
+        f"新しい会議を開始してください。{_REPORT_IF_NOT_FIXED}",
+        component=COMPONENT,
+        meeting_id=meeting_id,
+    )
+
+
+def subtitle_save_failed(meeting_id: str | None = None) -> SystemAppError:
+    """字幕 1 件の保存に失敗し、その字幕を画面へ送らなかった（会議は続く）。
+
+    画面のお知らせ帯へ、通知（error.occurred）で届ける。失敗の原因（ディスクがいっぱい、ロック、
+    値が決めた形に合わない、など）によらず、同じ文言にする。次に行う操作は、会議は続けられること、
+    続けて出るときの原因の 1 つとして、ディスクの空きの確認を案内する。保存できなかった字幕の
+    内容と、データベースの例外の文面は、文言にも通知にも入れない。
+    """
+    return SystemAppError(
+        "SUBTITLE_SAVE_FAILED",
+        "字幕を保存できなかったため、その字幕を画面に出しませんでした。",
+        "会議はそのまま続けられます。このお知らせが続けて出るときは、ディスクの空きを確かめてください。"
+        f"空きが少ないときは、ほかのファイルを消して空きを作ってください。{_REPORT_IF_NOT_FIXED}",
+        component=COMPONENT,
+        meeting_id=meeting_id,
+    )

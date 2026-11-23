@@ -86,6 +86,9 @@ class Tuning:
     cutoff_before_end_seconds: int = _limits(1, 7200)
     # 字幕の遅れの目標（秒）。
     subtitle_delay_target_seconds: float = _limits(1.0, 600.0)
+    # 字幕の処理のエラーを、お知らせ帯へ知らせる間隔（秒）。同じエラーが続いても、この秒数につき
+    # 1 件にまとめる。
+    error_notice_interval_seconds: float = _limits(1.0, 3600.0)
     # 文章生成モデルへ一度に渡す字幕の量（文字数）。
     generation_input_max_chars: int = _limits(100, GENERATION_INPUT_MAX_CHARS_LIMIT)
     # 生成ワーカーが準備完了になるまで待つ秒数（文章生成モデルの読み込みを含む）。

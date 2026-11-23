@@ -204,3 +204,57 @@ describe('parseAppEvent (subtitle_status.changed)', () => {
     expect(parseAppEvent(JSON.stringify(body))).toBeNull();
   });
 });
+
+/** error.occurred の通知の本文。項目は、アプリサーバーが送る 5 つ（backend の error_payload）。 */
+function errorOccurred(overrides: Record<string, unknown> = {}): string {
+  return JSON.stringify({
+    type: 'error.occurred',
+    meeting_id: 'abc123',
+    category: 'system_error',
+    code: 'SUBTITLE_TRANSCRIPTION_FAILED',
+    message: 'サーバーが書いた文面',
+    action: 'サーバーが書いた次の操作',
+    ...overrides,
+  });
+}
+
+/**
+ * 【モジュール】src/events/eventTypes（エラーの通知）
+ * error.occurred の読み替え。画面は、サーバーが書いた文面（message・action）を使わず、エラーコードから
+ * 画面側の文言を引く。そのため、読み替えた通知は、分類とエラーコードだけを持つ。
+ */
+describe('parseAppEvent (error.occurred)', () => {
+  /**
+   * 【テスト対象】parseAppEvent（error.occurred）
+   * 【テスト内容】文字起こしの失敗の通知を読む（サーバーが message と action を付けて送る）
+   * 【期待結果】会議番号・分類・エラーコードだけを持つ通知になること。サーバーの文面は引き継がない
+   *            （例外の文面や会議の内容が混ざる余地を、画面の側でも断つ）
+   */
+  it('should read an error.occurred notification without the wording the server wrote', () => {
+    expect(parseAppEvent(errorOccurred())).toEqual({
+      type: 'error.occurred',
+      meetingId: 'abc123',
+      category: 'system_error',
+      code: 'SUBTITLE_TRANSCRIPTION_FAILED',
+    });
+  });
+
+  /**
+   * 【テスト対象】parseAppEvent（error.occurred の形の検査）
+   * 【テスト内容】会議番号が無い・空・分類が知らない値・コードの形が違う・コードが文字でない通知を読む
+   * 【期待結果】どれも null（読み捨てる）
+   */
+  it.each([
+    ['no meeting id', { meeting_id: undefined }],
+    ['empty meeting id', { meeting_id: '' }],
+    ['unknown category', { category: 'fatal_error' }],
+    ['no category', { category: undefined }],
+    ['lowercase code', { code: 'subtitle_transcription_failed' }],
+    ['unknown domain code', { code: 'OTHER_FAILED' }],
+    ['non-string code', { code: 5 }],
+    ['no code', { code: undefined }],
+  ])('should return null for an error.occurred notification with %s', (_name, overrides) => {
+    expect(parseAppEvent(errorOccurred(overrides))).toBeNull();
+  });
+});
+
