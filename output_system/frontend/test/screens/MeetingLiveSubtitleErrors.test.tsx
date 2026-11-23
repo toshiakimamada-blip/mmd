@@ -87,6 +87,18 @@ beforeEach(() => {
       if (path === '/api/meetings/abc123/subtitles') {
         return Promise.resolve(jsonResponse({ subtitles: [] }));
       }
+      if (path === '/api/meetings/abc123') {
+        // 会議を離れたあとの「会議の記録」が読む、記録の取得。
+        return Promise.resolve(
+          jsonResponse({
+            meeting: { ...MEETING, status: 'completed', ended_at: '2026-11-05T01:30:00.000Z', summary_failure_reason: null },
+            subtitles: [],
+            summary: null,
+            question_sets: [],
+            jobs: [],
+          }),
+        );
+      }
       return Promise.reject(new Error(`想定していない呼び出し: ${path}`));
     }),
   );
@@ -203,6 +215,28 @@ describe('MeetingLiveScreen subtitle processing errors', () => {
 
     receive(errorOccurred('SUBTITLE_TRANSCRIPTION_FAILED'));
     expect(errorNotices()).toHaveLength(1);
+  });
+
+  /**
+   * 【ユーザーストーリー】
+   * 会議を終えて「会議の記録」へ移ると、会議中のお知らせ（「会議はそのまま続けられます」など）は消える
+   *
+   * 【期待結果】
+   * - 「会議中」を離れると、字幕の処理のエラーのお知らせが、2 つとも消える
+   * - 移った先の「会議の記録」には、お知らせが出ない
+   */
+  it('should clear the notices when the live screen is left', async () => {
+    const router = await openLive();
+    receive(errorOccurred('SUBTITLE_TRANSCRIPTION_FAILED'));
+    receive(errorOccurred('SUBTITLE_SAVE_FAILED'));
+    expect(errorNotices()).toHaveLength(2);
+
+    await act(async () => {
+      await router.navigate('/meetings/abc123');
+    });
+
+    expect(await screen.findByRole('heading', { name: '会議の記録', level: 2 })).toBeInTheDocument();
+    expect(errorNotices()).toHaveLength(0);
   });
 
   /**

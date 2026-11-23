@@ -35,20 +35,24 @@ function noticeIdFor(code: string): string {
  *   （会議の内容や例外の文面が、画面へ出る余地を断つ）
  * - 同じコードのお知らせは 1 つだけ。続けて届いても増えない。利用者が閉じると消え、あとで同じ通知が
  *   届けば、また出る。アプリサーバーも、短い間に続く同じエラーの通知は、1 件にまとめて送る
- * - 画面を離れても、お知らせは残す（会議を終えたあとも、字幕が一部抜けていることを伝えるため）。
- *   次の会議の画面を開いた時点で、前の会議のお知らせを片づける
+ * - 画面を離れる（会議を終了して「会議の記録」へ移る、など）と、お知らせを片づける。お知らせの文面は、
+ *   進行中の会議の続け方（「会議はそのまま続けられます」）を伝えるもので、会議を終えたあとの画面に残ると、
+ *   読み違えるため
  *
  * @param meetingId 表示している会議の番号
  */
 export function useSubtitleErrorNotices(meetingId: string): void {
   const { post, clear } = useNoticeActions();
 
-  // 開いた時点で、前の会議の画面が残したお知らせを片づける（別の会議のお知らせに見えないように）。
-  useEffect(() => {
-    for (const code of SUBTITLE_ERROR_CODES) {
-      clear(noticeIdFor(code));
-    }
-  }, [meetingId, clear]);
+  // 画面を離れる（または別の会議の画面に替わる）ときに、この会議のお知らせを片づける。
+  useEffect(
+    () => () => {
+      for (const code of SUBTITLE_ERROR_CODES) {
+        clear(noticeIdFor(code));
+      }
+    },
+    [meetingId, clear],
+  );
 
   useEvent('error.occurred', (event) => {
     if (event.meetingId !== meetingId || !SUBTITLE_ERROR_CODES.includes(event.code)) {
