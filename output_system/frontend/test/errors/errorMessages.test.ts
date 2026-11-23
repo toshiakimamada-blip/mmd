@@ -75,7 +75,8 @@ describe('ERROR_WORDINGS for a subtitle that could not be saved', () => {
    * 【テスト対象】ERROR_WORDINGS（字幕の保存の失敗）
    * 【テスト内容】字幕の保存の失敗のコードの文言を引く
    * 【期待結果】何が起きたか（字幕を保存できず、その字幕を画面に出さなかったこと）と、次に行う操作
-   *            （会議は続けられること。ディスクの空きを確かめ、空きが少ないときは空きを作ること）があり、
+   *            （会議は続けられること。続けて出るときは、ディスクの空きを確かめ、空きが少ないときは
+   *            空きを作ること。ディスクの空きだけを原因として決めつけない）があり、
    *            エラーコードを開発を担う AI へ伝える案内がある。会議の内容やデータベースの例外の文面を
    *            入れない固定の文である
    */
@@ -84,7 +85,7 @@ describe('ERROR_WORDINGS for a subtitle that could not be saved', () => {
 
     expect(wording.message).toBe('字幕を保存できなかったため、その字幕を画面に出しませんでした。');
     expect(wording.action).toContain('会議はそのまま続けられます');
-    expect(wording.action).toContain('ディスクの空きを確かめてください');
+    expect(wording.action).toContain('このお知らせが続けて出るときは、ディスクの空きを確かめてください');
     expect(wording.action).toContain('空きを作ってください');
     expect(wording.action).toContain('このエラーコードを開発を担う AI へ伝えてください');
   });

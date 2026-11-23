@@ -10,10 +10,12 @@
 別のプロセスを使う結合のテストは test_subtitle_failure_continue.py にある。
 """
 
+import asyncio
 import json
 
 import pytest
 
+from meeting_fakes import FAST
 from meeting_interpreter.interpreter.protocol import ErrorKind, WorkerError
 from meeting_interpreter.meetings.errors import subtitle_transcription_failed
 from meeting_interpreter.meetings.session import (
@@ -23,6 +25,7 @@ from meeting_interpreter.meetings.session import (
     _Phase,
     error_payload,
 )
+from meeting_interpreter.records.models import AudioSource, Meeting, MeetingStatus
 from session_fakes import (
     ENGLISH,
     JAPANESE,
@@ -194,6 +197,61 @@ class TestTranscriptionFailure:
         recorder = run_session(time_source, FakeStore(time_source), scenario)
 
         assert error_notices(recorder) == []
+
+
+class TestThrottleIsPerMeeting:
+    """通知の間引きは、会議（セッション）ごとに独立している。"""
+
+    def test_should_not_let_one_meeting_hide_the_notice_of_another(self):
+        """
+        【テスト対象】MeetingSession のエラー通知の間引き（会議ごとの独立）
+        【テスト内容】同じ時計・同じ通知の送り先で、2 つの会議のセッションを動かす。
+                    会議 A で文字起こしの失敗を通知したすぐあとに、会議 B で同じ失敗を返す。
+                    続けて、A と B に、もう 1 件ずつ同じ失敗を返す（間隔の内）
+        【期待結果】会議 B の最初の通知は、A の通知に止められず、出ること。そのあとの 2 件は、
+                    それぞれの会議の間隔の内のため、どちらも止められること。通知は、
+                    会議 A・会議 B の順に 1 件ずつの、合わせて 2 件で、会議番号が別々である
+        """
+
+        def start_session(meeting_id: str, recorder: Recorder, time_source: FakeTime):
+            meeting = Meeting(
+                meeting_id=meeting_id,
+                title=TITLE,
+                started_at=STARTED_AT,
+                ended_at=None,
+                audio_source=AudioSource.SYSTEM_AUDIO,
+                status=MeetingStatus.INTERPRETING,
+                summary_failure_reason=None,
+            )
+            return MeetingSession(
+                meeting,
+                store=FakeStore(time_source),  # type: ignore[arg-type]
+                publisher=recorder,
+                launcher=object(),  # type: ignore[arg-type]
+                policy=FAST,
+                clock=lambda: time_source.now,
+                monotonic=lambda: time_source.seconds,
+            )
+
+        async def main() -> Recorder:
+            time_source = FakeTime(STARTED_AT)
+            recorder = Recorder()
+            session_a = start_session("meeting-a", recorder, time_source)
+            session_b = start_session("meeting-b", recorder, time_source)
+
+            await receive(session_a, transcription_failed("a1"))
+            await receive(session_b, transcription_failed("b1"))
+            time_source.advance(10.0)
+            await receive(session_a, transcription_failed("a2"))
+            await receive(session_b, transcription_failed("b2"))
+            return recorder
+
+        recorder = asyncio.run(main())
+
+        assert [item["meeting_id"] for item in error_notices(recorder)] == [
+            "meeting-a",
+            "meeting-b",
+        ]
 
 
 class TestTranslationFailure:

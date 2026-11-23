@@ -272,8 +272,8 @@ def test_should_word_the_notice_without_the_cause(failure):
     【テスト対象】subtitle_save_failed（通知の文言）
     【テスト内容】保存の失敗の原因（保存の失敗・値の誤り）にかかわらず、同じ文言で作る
     【期待結果】分類はシステムエラー、コードは SUBTITLE_SAVE_FAILED。何が起きたかに、字幕を画面に
-                出さなかったことがあり、次に行う操作に、会議を続けられることとディスクの空きの確認、
-                空きを作る案内がある
+                出さなかったことがあり、次に行う操作に、会議を続けられること、続けて出るときの
+                ディスクの空きの確認、空きを作る案内がある（空きだけを原因として決めつけない）
     """
     error = subtitle_save_failed(MEETING_ID)
     body = error.body
@@ -282,6 +282,6 @@ def test_should_word_the_notice_without_the_cause(failure):
     assert body.code == "SUBTITLE_SAVE_FAILED"
     assert "字幕" in body.message and "画面に出" in body.message
     assert "会議はそのまま続けられます" in body.action
-    assert "ディスクの空き" in body.action
+    assert "続けて出るときは、ディスクの空きを確かめてください" in body.action
     assert "空きを作って" in body.action
     assert str(failure) not in body.message + body.action

@@ -41,10 +41,10 @@ function errorOccurred(code: string, overrides: Record<string, unknown> = {}) {
 }
 
 /** 字幕の通知（subtitle.created）の本文。 */
-function subtitleCreated(sequence: number, original: string) {
+function subtitleCreated(sequence: number, original: string, meetingId = 'abc123') {
   return {
     type: 'subtitle.created',
-    meeting_id: 'abc123',
+    meeting_id: meetingId,
     sequence,
     original_text: original,
     translated_text: `訳 ${original}`,
@@ -117,13 +117,13 @@ describe('MeetingLiveScreen subtitle processing errors', () => {
   /**
    * 【ユーザーストーリー】
    * 会議中に、音声の一部を文字にできなかったとき、お知らせ帯に、何が起きたかと次に行う操作が出る。
-   * 会議は続き、そのあとの字幕も出る
+   * 会議は続き、そのあとの字幕も出る。字幕が出る（文字起こしが成功した）と、お知らせは消える
    *
    * 【期待結果】
    * - お知らせ帯に、エラーのお知らせが 1 つ出て、エラーコード SUBTITLE_TRANSCRIPTION_FAILED と、
    *   何が起きたか・次に行う操作が書かれている
    * - サーバーが通知に書いた文面（会議の内容を含みうる）は、画面のどこにも出ない
-   * - そのあとの字幕の通知が、字幕の一覧に出る
+   * - そのあとの字幕の通知が、字幕の一覧に出る。同時に、お知らせが消える
    */
   it('should show the transcription error in the notice band and keep showing subtitles', async () => {
     await openLive();
@@ -142,20 +142,23 @@ describe('MeetingLiveScreen subtitle processing errors', () => {
 
     receive(subtitleCreated(1, 'Next sentence'));
     expect(await screen.findByText('Next sentence')).toBeInTheDocument();
-    expect(errorNotices()).toHaveLength(1);
+    expect(errorNotices()).toHaveLength(0);
   });
 
   /**
    * 【ユーザーストーリー】
    * 会議中に、字幕を保存できなかったとき、お知らせ帯に、何が起きたかと次に行う操作が出る。
-   * 失敗した字幕は画面に出ない。会議は続き、そのあとの字幕は、保存できたものとして出る
+   * 失敗した字幕は画面に出ない。会議は続き、そのあとの字幕は、保存できたものとして出る。
+   * 字幕が出る（保存が成功した）と、お知らせは消える
    *
    * 【期待結果】
    * - お知らせ帯に、エラーのお知らせが 1 つ出て、エラーコード SUBTITLE_SAVE_FAILED と、
-   *   字幕を画面に出さなかったこと・ディスクの空きを確かめる案内が書かれている
+   *   字幕を画面に出さなかったこと・次に行う操作（続けて出るときは、ディスクの空きを確かめる）が
+   *   書かれている
    * - サーバーが通知に書いた文面（データベースの例外や会議の内容を含みうる）は、画面のどこにも出ない
    * - 保存できなかった字幕は、一覧に無い。そのあとの字幕（順番 1）は、一覧に出る
    * - 文字起こしの失敗のお知らせと、保存の失敗のお知らせは、別々に出る（互いを置き換えない）
+   * - 字幕の通知を受けると、2 つのお知らせが、どちらも消える
    */
   it('should show the save failure in the notice band and keep showing the subtitles that were saved', async () => {
     await openLive();
@@ -170,7 +173,7 @@ describe('MeetingLiveScreen subtitle processing errors', () => {
     expect(
       notice.getByText('字幕を保存できなかったため、その字幕を画面に出しませんでした。'),
     ).toBeInTheDocument();
-    expect(notice.getByText(/ディスクの空きを確かめてください/)).toBeInTheDocument();
+    expect(notice.getByText(/続けて出るときは、ディスクの空きを確かめてください/)).toBeInTheDocument();
     expect(screen.queryByText(new RegExp(SERVER_WORDING))).not.toBeInTheDocument();
     expect(screen.queryByText('Lost sentence')).not.toBeInTheDocument();
 
@@ -178,6 +181,47 @@ describe('MeetingLiveScreen subtitle processing errors', () => {
     receive(subtitleCreated(1, 'Saved sentence'));
     expect(await screen.findByText('Saved sentence')).toBeInTheDocument();
     expect(screen.queryByText('Lost sentence')).not.toBeInTheDocument();
+    expect(errorNotices()).toHaveLength(0);
+  });
+
+  /**
+   * 【ユーザーストーリー】
+   * 失敗が続いて字幕が届かない間は、お知らせが残る。字幕が出ると、消える。
+   * 消えたあとに、また失敗したら、もう一度出る
+   *
+   * 【期待結果】
+   * - エラーの通知だけを受けている間（字幕の通知が無い間）は、お知らせが 1 つ残る
+   * - この会議の字幕の通知を受けると、お知らせが消える
+   * - そのあと、同じコードの通知を受けると、もう一度出る
+   */
+  it('should keep the notice while no subtitle arrives and clear it when one does', async () => {
+    await openLive();
+
+    receive(errorOccurred('SUBTITLE_SAVE_FAILED'));
+    receive(errorOccurred('SUBTITLE_SAVE_FAILED'));
+    expect(errorNotices()).toHaveLength(1);
+
+    receive(subtitleCreated(1, 'Saved sentence'));
+    expect(await screen.findByText('Saved sentence')).toBeInTheDocument();
+    expect(errorNotices()).toHaveLength(0);
+
+    receive(errorOccurred('SUBTITLE_SAVE_FAILED'));
+    expect(errorNotices()).toHaveLength(1);
+  });
+
+  /**
+   * 【ユーザーストーリー】
+   * 別の会議の字幕では、この会議のお知らせは消えない
+   *
+   * 【期待結果】会議番号が違う字幕の通知を受けても、2 つのお知らせは残る
+   */
+  it('should not clear the notices for a subtitle of another meeting', async () => {
+    await openLive();
+    receive(errorOccurred('SUBTITLE_TRANSCRIPTION_FAILED'));
+    receive(errorOccurred('SUBTITLE_SAVE_FAILED'));
+
+    receive(subtitleCreated(1, 'Other meeting sentence', 'other999'));
+
     expect(errorNotices()).toHaveLength(2);
   });
 
