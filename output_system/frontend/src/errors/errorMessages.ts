@@ -166,7 +166,7 @@ export const ERROR_WORDINGS: Readonly<Record<string, ErrorWording>> = Object.fre
     message: '字幕を作る処理が止まり、起動し直せなかったため、会議を中断しました。',
     action: `それまでの字幕は保存されています。会議の記録から要約を作れます。新しい会議を開始する前に、${REPORT_IF_NOT_FIXED}`,
   },
-  // 会議中に、理由のエラーを受けずに会議の中断に気づいたとき（音声を送る接続が切れた、アプリが止まった）。
+  // 会議中に、理由のエラーを受けずに会議の中断に気づいたとき（音声を送る接続が切れた、など）。
   // 「会議中」の画面が決める。サーバーは返さない（meetings/useMeetingInterruption.ts）
   MEETING_CONNECTION_LOST: {
     message: 'アプリとの接続が切れたため、会議を中断しました。',

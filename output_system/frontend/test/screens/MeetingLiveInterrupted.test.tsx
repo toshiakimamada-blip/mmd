@@ -359,7 +359,7 @@ describe('MeetingLiveScreen when the meeting is interrupted', () => {
 
   /**
    * 【ユーザーストーリー】
-   * アプリとつながっていない間に会議が中断になった（アプリが止まって、起動し直した）ときも、つながり直した
+   * アプリとつながっていない間に会議が中断になった（中断の通知が届かなかった）ときも、つながり直した
    * 時点で気づき、「会議の記録」へ移る。中断していなければ、会議は続く
    *
    * 【期待結果】
@@ -437,6 +437,40 @@ describe('MeetingLiveScreen when the meeting is interrupted', () => {
     expect(router.state.location.pathname).toBe('/meetings/abc123');
     expect(errorNotices()).toHaveLength(1);
     expect(screen.getByText('SYSTEM_INTERPRETER_UNAVAILABLE')).toBeInTheDocument();
+  });
+
+  /**
+   * 【ユーザーストーリー】
+   * 会議を終了している途中に会議が中断になり、終了の応答があとから失敗で届いても、終了の失敗は出ない
+   * （会議はすでに中断で、「会議の記録」へ移っているため）
+   *
+   * 【期待結果】
+   * - 中断の通知で「会議の記録」へ移ったあとに、終了の応答が失敗（MEETING_INVALID_TRANSITION）で届いても、
+   *   「会議の記録」のまま。お知らせは中断の理由の 1 つだけで、終了の失敗のエラーは出ない
+   */
+  it('should not report a late end failure after moving away on the interruption', async () => {
+    const user = userEvent.setup();
+    const end = deferred<Response>();
+    answerEnd = () => end.promise;
+    const router = await openLive();
+    await user.click(screen.getByRole('button', { name: '会議を終了する' }));
+    await user.click(within(screen.getByRole('alertdialog')).getByRole('button', { name: '終了する' }));
+
+    receive(stateChanged('interrupted'));
+    await expectMovedToRecord(router);
+    await act(async () =>
+      end.resolve(
+        jsonResponse(
+          { category: 'business_error', code: 'MEETING_INVALID_TRANSITION', message: 'x', action: 'y' },
+          409,
+        ),
+      ),
+    );
+
+    expect(router.state.location.pathname).toBe('/meetings/abc123');
+    expect(errorNotices()).toHaveLength(1);
+    expect(screen.getByText('MEETING_CONNECTION_LOST')).toBeInTheDocument();
+    expect(screen.queryByText('MEETING_INVALID_TRANSITION')).not.toBeInTheDocument();
   });
 
   /**

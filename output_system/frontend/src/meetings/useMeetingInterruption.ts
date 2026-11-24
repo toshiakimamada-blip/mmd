@@ -17,8 +17,8 @@ const INTERPRETER_UNAVAILABLE_CODE = 'SYSTEM_INTERPRETER_UNAVAILABLE';
 
 /**
  * 理由のエラーを受けずに、会議の中断に気づいたときのエラー。画面が決める（サーバーは返さない）。
- * 通訳ワーカーの停止のほかに会議が中断になるのは、音声を送る接続が切れたときと、アプリが止まったとき
- * （起動し直したときの復旧）だけのため、文面は接続が切れたことを伝える。
+ * 通訳中の会議が中断になるのは、通訳ワーカーを起動し直せないとき（理由のエラーが届く）のほかは、音声を送る
+ * 接続が切れたときと、アプリが止まったあとの起動時の復旧だけのため（遷移規則）、文面は接続が切れたことを伝える。
  */
 const CONNECTION_LOST_ERROR = toDisplayErrorFromCode('system_error', 'MEETING_CONNECTION_LOST');
 
@@ -41,7 +41,7 @@ export interface MeetingInterruption {
  *   アプリサーバーは、この通知を、状態の変化（中断）より先に送る
  * - 通知 meeting.state_changed（interrupted）: 理由のエラーを受けていなければ、MEETING_CONNECTION_LOST
  * - 通知の接続が開通したとき（つなぎ直しを含む）: 会議の記録を読み、状態が中断なら MEETING_CONNECTION_LOST。
- *   切れている間にアプリが止まり、起動し直して中断にした場合など、通知を受け取れなかったときのため
+ *   接続が切れている間に中断になった会議の通知は、画面へ届かないため
  * - connectionClosed（取り込みのやり直しで、音声を送る接続が閉じていると分かった）: MEETING_CONNECTION_LOST
  *
  * - この会議の通知だけを使う。中断以外の状態の変化（終了など）は使わない。終了は、画面の終了の処理が移す

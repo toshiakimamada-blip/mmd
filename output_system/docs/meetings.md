@@ -125,7 +125,7 @@
 
 ### 通訳ワーカーが止まったとき
 
-異常終了を検出したら、通訳ワーカーを起動し直して、会議を続けます。起動の間に届いた音声は、捨てずにためて、起動し直したワーカーへ順に渡します（ワーカーが受け取っていた分は失われます）。起動の失敗または異常終了が続けて 3 回に達したら、起動し直しをやめて、会議を中断にし、エラー `SYSTEM_INTERPRETER_UNAVAILABLE` を通知します。回数と待ち時間は `config/tuning.toml` の調整値です（`interpreter_max_failures`・`interpreter_restart_wait_seconds`・`interpreter_stable_seconds`）。
+異常終了を検出したら、通訳ワーカーを起動し直して、会議を続けます。起動の間に届いた音声は、捨てずにためて、起動し直したワーカーへ順に渡します（ワーカーが受け取っていた分は失われます）。起動の失敗または異常終了が続けて 3 回に達したら、起動し直しをやめて、会議を中断にし、エラー `SYSTEM_INTERPRETER_UNAVAILABLE` を通知します。エラーの通知は、会議の状態の変化（中断）の通知より先に送ります（下の「通知」）。回数と待ち時間は `config/tuning.toml` の調整値です（`interpreter_max_failures`・`interpreter_restart_wait_seconds`・`interpreter_stable_seconds`）。
 
 - 頼んでいないのに止まったワーカーは、起動し直せる場合も、止まるたびにエラーログ `SYSTEM_INTERPRETER_EXITED` を 1 件出します（会議番号と、`exception_type` に止まり方。`killed_by_signal_9`（強制終了やメモリ不足）、`exit_code_1`（終了コード）、`protocol_error`（出力が壊れた）、`audio_write_failed`（音声を書けなかった）、`stopped_unrequested`（頼んでいない停止完了）など）。会議の内容は入れません。起動し直しをあきらめたときの `SYSTEM_INTERPRETER_UNAVAILABLE` とは別のログです。
 - 壊れた出力を書いて動き続けるワーカー（`WorkerExited(protocol_error=True)`）は、受け取った時点で子を止めます。
@@ -181,6 +181,7 @@
 
 - 字幕は、保存が確定してから送ります。保存に失敗した字幕は送りません（`error.occurred`（`SUBTITLE_SAVE_FAILED`）を送り、会議は続けます）。失敗した字幕は順番を使いません。
 - 同じ順番の `subtitle.created` を 2 回送りません。画面は、同じ順番を 1 回だけ表示します。
+- 通訳ワーカーを起動し直せずに中断したときは、`error.occurred`（`SYSTEM_INTERPRETER_UNAVAILABLE`）を、`meeting.state_changed`（`interrupted`）より先に送ります。「会議中」の画面は、中断の通知を受けると「会議の記録」へ移るため、移る前に中断の理由を受け取れるようにします（[「会議中」の画面](live-screen.md)の「会議の中断」）。画面ごとの送り待ちは届いた順に送るため、この順番のまま届きます。
 - 日本語訳が無い字幕も、保存して送ります。
 - 新しく接続した画面（つなぎ直した画面を含む）へは、進行中の会議があれば、`subtitle_status.changed` で現在の状況を最初に送ります。この通知は、接続を登録するのと同じ処理の中で待ち行列の先頭へ置くため、その後の変化の通知より必ず前に届きます。進行中の会議が無いときは、何も送りません。
 - 画面ごとに、送り待ちの通知を 1,000 件まで持ちます。読まずに超えた画面だけ、1013 で閉じます（ほかの画面と送る側は止まりません）。画面は、つなぎ直して、HTTP の取得で状況を読み直します。
