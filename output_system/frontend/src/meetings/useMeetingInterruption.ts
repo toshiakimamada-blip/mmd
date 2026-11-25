@@ -17,8 +17,8 @@ const INTERPRETER_UNAVAILABLE_CODE = 'SYSTEM_INTERPRETER_UNAVAILABLE';
 
 /**
  * 理由のエラーを受けずに、会議の中断に気づいたときのエラー。画面が決める（サーバーは返さない）。
- * 通訳中の会議が中断になるのは、通訳ワーカーを起動し直せないとき（理由のエラーが届く）のほかは、音声を送る
- * 接続が切れたときと、アプリが止まったあとの起動時の復旧だけのため（遷移規則）、文面は接続が切れたことを伝える。
+ * つなぎ直しの読み直しや、接続が閉じたあとのやり直しで気づいたときは、中断の原因が分からない（通訳ワーカーを
+ * 起動し直せなかった中断のこともある）。文面は原因を言い切らず、中断したことと、記録で確かめる案内だけを伝える。
  */
 const CONNECTION_LOST_ERROR = toDisplayErrorFromCode('system_error', 'MEETING_CONNECTION_LOST');
 

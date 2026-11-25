@@ -4,6 +4,7 @@ import { useEffect } from 'react';
 import { Outlet, RouterProvider, createMemoryRouter } from 'react-router';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
+import { fetchMeetingRecord } from '../../src/api/meetingsApi';
 import { type AudioCaptureSession } from '../../src/audio/audioCaptureSession';
 import { NoticeBand, NoticeProvider } from '../../src/components/notices';
 import { EventsProvider } from '../../src/events/EventsProvider';
@@ -15,6 +16,23 @@ import {
 import { MeetingLiveScreen } from '../../src/screens/MeetingLiveScreen';
 import { FakeEventSocket } from '../events/fakeWebSocket';
 import { wireRecord } from './record/recordTestKit';
+
+// 会議の記録の取得だけを見張る。ふだんは本物（fetch の偽物を通る）を呼ぶ。apiClient は失敗をすべて ApiError に
+// そろえるため、ApiError 以外の失敗を確かめるテストだけが、この関数の答えを差し替える。
+vi.mock(import('../../src/api/meetingsApi'), async (importOriginal) => {
+  const mod = await importOriginal();
+  return { ...mod, fetchMeetingRecord: vi.fn(mod.fetchMeetingRecord) };
+});
+
+/**
+ * Node.js の process のうち、処理されなかった Promise の失敗を受け取る部分。画面とテストの型設定には
+ * Node.js の型が入っていないため、使う形だけを書く。
+ */
+interface UnhandledRejectionEvents {
+  on(event: 'unhandledRejection', listener: (reason: unknown) => void): void;
+  off(event: 'unhandledRejection', listener: (reason: unknown) => void): void;
+}
+const nodeProcess = (globalThis as unknown as { process: UnhandledRejectionEvents }).process;
 
 /** 会議の開始の応答と同じ形。開始の画面が、移動の状態に載せて渡す。 */
 const MEETING = {
@@ -194,6 +212,26 @@ function choiceNotice(): HTMLElement | null {
   return document.querySelector<HTMLElement>('[data-notice-kind="choice"]');
 }
 
+/**
+ * 「会議の記録」へ移った回数を数え始める。同じ場所へ移り直しても、移るたびに場所の key が変わるため、別に数える。
+ *
+ * @returns いままでに移った回数を返す関数
+ */
+function countMovesToRecord(router: ReturnType<typeof createMemoryRouter>): () => number {
+  const keys = new Set<string>();
+  router.subscribe((state) => {
+    if (state.location.pathname === '/meetings/abc123') {
+      keys.add(state.location.key);
+    }
+  });
+  return () => keys.size;
+}
+
+/** お知らせ帯の、エラーのお知らせのエラーコード（出ている順）。 */
+function noticeCodes(): string[] {
+  return errorNotices().map((notice) => notice.textContent?.match(/[A-Z]+(?:_[A-Z0-9]+)+/)?.[0] ?? '');
+}
+
 /** 「会議の記録」へ、履歴を置き換えて移ったことを確かめる。 */
 async function expectMovedToRecord(router: ReturnType<typeof createMemoryRouter>) {
   expect(await screen.findByText('会議の記録の画面')).toBeInTheDocument();
@@ -280,15 +318,15 @@ describe('MeetingLiveScreen when the meeting is interrupted', () => {
 
   /**
    * 【ユーザーストーリー】
-   * 会議中に、音声を送る接続が切れて会議が中断になると（理由のエラーが届かない）、「会議の記録」へ移り、
-   * お知らせ帯に、接続が切れて中断したことが出る
+   * 会議中に、音声を送る接続が切れるなどで会議が中断になると（理由のエラーが届かない）、「会議の記録」へ移り、
+   * お知らせ帯に、会議が中断になったことと、記録で確かめる案内が出る。原因は言い切らない
    *
    * 【期待結果】
    * - この会議の状態の変化（中断）の通知だけで、「会議の記録」へ移る。履歴は置き換える
-   * - お知らせ帯に、エラーのお知らせが 1 つ出る（コード MEETING_CONNECTION_LOST、接続が切れて中断したこと）
+   * - お知らせ帯に、エラーのお知らせが 1 つ出る（コード MEETING_CONNECTION_LOST、会議が中断になったこと）
    * - 会議のタイトルは、お知らせに出ない
    */
-  it('should move to the record and tell that the connection was lost on the state change alone', async () => {
+  it('should move to the record and tell that the meeting was interrupted on the state change alone', async () => {
     const router = await openLive();
 
     receive(stateChanged('interrupted'));
@@ -298,7 +336,7 @@ describe('MeetingLiveScreen when the meeting is interrupted', () => {
     expect(notices).toHaveLength(1);
     const notice = within(notices[0]);
     expect(notice.getByText('MEETING_CONNECTION_LOST')).toBeInTheDocument();
-    expect(notice.getByText('アプリとの接続が切れたため、会議を中断しました。')).toBeInTheDocument();
+    expect(notice.getByText('会議が中断になりました。')).toBeInTheDocument();
     expect(notice.getByText(/会議の記録から要約を作れます/)).toBeInTheDocument();
     expect(notices[0]).not.toHaveTextContent('週次の定例');
     expect(fake.calls).toEqual(['close']);
@@ -471,6 +509,156 @@ describe('MeetingLiveScreen when the meeting is interrupted', () => {
     expect(errorNotices()).toHaveLength(1);
     expect(screen.getByText('MEETING_CONNECTION_LOST')).toBeInTheDocument();
     expect(screen.queryByText('MEETING_INVALID_TRANSITION')).not.toBeInTheDocument();
+  });
+
+  /**
+   * 【ユーザーストーリー】
+   * 中断の理由のエラーと状態の変化（中断）が、続けて届き、1 回の描画にまとまっても、「会議の記録」へ移るのは
+   * 1 回だけで、お知らせは先に届いた理由の 1 つだけ
+   *
+   * 【期待結果】
+   * - 1 回の act の中で error.occurred → meeting.state_changed を受けると、「会議の記録」へ 1 回だけ移る
+   * - お知らせは 1 つで、コードは先に届いた SYSTEM_INTERPRETER_UNAVAILABLE のまま（あとの契機で置き換わらない）
+   * - 取り込みを閉じるのは 1 回だけ
+   */
+  it('should move once and keep the first reason when both notifications arrive in one render', async () => {
+    const router = await openLive();
+    const moves = countMovesToRecord(router);
+
+    act(() => {
+      FakeEventSocket.last.receive(errorOccurred('SYSTEM_INTERPRETER_UNAVAILABLE'));
+      FakeEventSocket.last.receive(stateChanged('interrupted'));
+    });
+
+    await expectMovedToRecord(router);
+    expect(moves()).toBe(1);
+    expect(noticeCodes()).toEqual(['SYSTEM_INTERPRETER_UNAVAILABLE']);
+    expect(fake.calls).toEqual(['close']);
+  });
+
+  /**
+   * 【ユーザーストーリー】
+   * 状態の変化（中断）が先に、理由のエラーがあとに届き、1 回の描画にまとまっても、移るのは 1 回だけで、
+   * お知らせは先に届いた契機の 1 つだけ
+   *
+   * 【期待結果】
+   * - 1 回の act の中で meeting.state_changed → error.occurred を受けると、「会議の記録」へ 1 回だけ移る
+   * - お知らせは 1 つで、コードは先に届いた契機の MEETING_CONNECTION_LOST のまま
+   */
+  it('should move once and keep the first notice when the state change arrives before the reason', async () => {
+    const router = await openLive();
+    const moves = countMovesToRecord(router);
+
+    act(() => {
+      FakeEventSocket.last.receive(stateChanged('interrupted'));
+      FakeEventSocket.last.receive(errorOccurred('SYSTEM_INTERPRETER_UNAVAILABLE'));
+    });
+
+    await expectMovedToRecord(router);
+    expect(moves()).toBe(1);
+    expect(noticeCodes()).toEqual(['MEETING_CONNECTION_LOST']);
+    expect(fake.calls).toEqual(['close']);
+  });
+
+  /**
+   * 【ユーザーストーリー】
+   * つなぎ直しで読み直した会議の記録の応答が、通知で「会議の記録」へ移ったあとに届いても、何も起きない
+   *
+   * 【期待結果】
+   * - 読み直しの応答を待つ間に、理由のエラーの通知で「会議の記録」へ移る
+   * - そのあとに応答（状態は中断）が届いても、移り直さない。お知らせは理由の 1 つのまま（置き換わらない）
+   */
+  it('should ignore a late record answer after moving away on a notification', async () => {
+    const pending = deferred<Response>();
+    answerRecord = () => pending.promise;
+    const router = await openLive();
+    expect(recordRequests).toBe(1);
+    const moves = countMovesToRecord(router);
+
+    receive(errorOccurred('SYSTEM_INTERPRETER_UNAVAILABLE'));
+    await expectMovedToRecord(router);
+    await act(async () => pending.resolve(await recordResponse('interrupted')));
+
+    expect(moves()).toBe(1);
+    expect(noticeCodes()).toEqual(['SYSTEM_INTERPRETER_UNAVAILABLE']);
+  });
+
+  /**
+   * 【ユーザーストーリー】
+   * つなぎ直しで読み直した会議の記録の応答が、会議を終了して「会議の記録」へ移ったあとに届いても、
+   * 中断のお知らせは出ない（終了した会議を、中断したと読み違えない）
+   *
+   * 【期待結果】
+   * - 読み直しの応答を待つ間に、会議を終了して「会議の記録」へ移る
+   * - そのあとに応答（状態は中断）が届いても、お知らせは出ず、移り直さない
+   */
+  it('should ignore a late record answer after the meeting was ended', async () => {
+    const user = userEvent.setup();
+    const pending = deferred<Response>();
+    answerRecord = () => pending.promise;
+    const router = await openLive();
+    const moves = countMovesToRecord(router);
+    await user.click(screen.getByRole('button', { name: '会議を終了する' }));
+    await user.click(within(screen.getByRole('alertdialog')).getByRole('button', { name: '終了する' }));
+    await expectMovedToRecord(router);
+
+    await act(async () => pending.resolve(await recordResponse('interrupted')));
+
+    expect(moves()).toBe(1);
+    expect(errorNotices()).toHaveLength(0);
+  });
+
+  /**
+   * 【ユーザーストーリー】
+   * 会議の記録の読み直しが、アプリサーバーの返したエラー（ApiError）以外で失敗したとき（プログラムの誤り）は、
+   * 握りつぶさず、画面全体の未処理の例外として表に出る
+   *
+   * 【期待結果】
+   * - つながった時点の読み直しが、ApiError 以外の例外で失敗すると、その例外が処理されないまま上へ出る
+   * - 中断とはみなさない（「会議中」にとどまり、お知らせは出ない）
+   */
+  it('should let a failure other than ApiError surface from the record reload', async ({ onTestFinished }) => {
+    const unhandled = vi.fn();
+    nodeProcess.on('unhandledRejection', unhandled);
+    onTestFinished(() => {
+      nodeProcess.off('unhandledRejection', unhandled);
+    });
+    const bug = new Error('記録の読み替えの誤り');
+    vi.mocked(fetchMeetingRecord).mockRejectedValueOnce(bug);
+
+    await openLive();
+
+    await expect.poll(() => unhandled.mock.calls.length).toBe(1);
+    expect(unhandled.mock.calls[0][0]).toBe(bug);
+    expect(screen.getByRole('heading', { name: '会議中', level: 2 })).toBeInTheDocument();
+    expect(errorNotices()).toHaveLength(0);
+  });
+
+  /**
+   * 【ユーザーストーリー】
+   * 会議の終了に失敗したあと（終了の失敗のお知らせが出ている）に、会議が中断になって「会議の記録」へ移ると、
+   * 終了の失敗のお知らせは消え、中断の理由だけが残る
+   *
+   * 【期待結果】
+   * - 終了の応答の失敗で、お知らせ帯に RECORD_SAVE_FAILED が出て、「会議中」にとどまる
+   * - そのあと中断の通知で「会議の記録」へ移ると、RECORD_SAVE_FAILED は消え、お知らせは中断の理由の 1 つだけ
+   */
+  it('should clear the end failure notice when the interruption moves to the record', async () => {
+    const user = userEvent.setup();
+    answerEnd = () =>
+      Promise.resolve(
+        jsonResponse({ category: 'system_error', code: 'RECORD_SAVE_FAILED', message: 'x', action: 'y' }, 500),
+      );
+    const router = await openLive();
+    await user.click(screen.getByRole('button', { name: '会議を終了する' }));
+    await user.click(within(screen.getByRole('alertdialog')).getByRole('button', { name: '終了する' }));
+    expect(await screen.findByText('RECORD_SAVE_FAILED')).toBeInTheDocument();
+    expect(screen.getByRole('heading', { name: '会議中', level: 2 })).toBeInTheDocument();
+
+    receive(errorOccurred('SYSTEM_INTERPRETER_UNAVAILABLE'));
+
+    await expectMovedToRecord(router);
+    expect(noticeCodes()).toEqual(['SYSTEM_INTERPRETER_UNAVAILABLE']);
   });
 
   /**

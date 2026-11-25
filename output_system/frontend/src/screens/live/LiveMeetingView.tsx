@@ -91,12 +91,14 @@ export function LiveMeetingView({ meeting }: { readonly meeting: LiveMeeting }) 
    * 取り込みの接続を閉じて手放し、この会議の「会議の記録」へ移る。会議の終了と中断の、どちらからも使う。
    * - 履歴は置き換える。戻るボタンで、終わった会議の「会議中」へ戻らないため
    * - 2 回目からは何もしない（終了の応答を待つ間に中断に気づいた、などで重なっても、1 回だけ移る）
+   * - 終了の失敗のお知らせを消す。終了に失敗したあとに中断で移ったとき、「会議の記録」に残さないため
    */
   const leaveToRecord = (): void => {
     if (leftRef.current) {
       return;
     }
     leftRef.current = true;
+    clear(END_FAILED_NOTICE_ID);
     capture.release();
     navigate(screenPaths.meetingRecord(meeting.meetingId), { replace: true });
   };
