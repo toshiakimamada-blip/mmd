@@ -301,11 +301,11 @@ describe('MeetingLiveScreen subtitle processing errors', () => {
    * 【ユーザーストーリー】
    * 字幕の処理以外のエラーの通知（会議の終了の保存の失敗など）は、別の仕組みで表示する。
    * この画面の字幕のエラーの表示は、同じお知らせを重ねて出さない
+   * （通訳ワーカーの停止の SYSTEM_INTERPRETER_UNAVAILABLE は、会議の中断として、MeetingLiveInterrupted.test.tsx で確かめる）
    *
-   * 【期待結果】RECORD_SAVE_FAILED・SYSTEM_INTERPRETER_UNAVAILABLE・SUMMARY_GENERATION_FAILED の通知を
-   *            受けても、お知らせは出ない
+   * 【期待結果】RECORD_SAVE_FAILED・SUMMARY_GENERATION_FAILED の通知を受けても、お知らせは出ない
    */
-  it.each(['RECORD_SAVE_FAILED', 'SYSTEM_INTERPRETER_UNAVAILABLE', 'SUMMARY_GENERATION_FAILED'])(
+  it.each(['RECORD_SAVE_FAILED', 'SUMMARY_GENERATION_FAILED'])(
     'should not show %s as a subtitle processing error',
     async (code) => {
       await openLive();

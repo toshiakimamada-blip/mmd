@@ -374,6 +374,29 @@ describe('ERROR_WORDINGS for a stopped capture', () => {
   });
 });
 
+describe('ERROR_WORDINGS for a meeting interrupted for a reason the screen does not know', () => {
+  /**
+   * 【テスト対象】ERROR_WORDINGS（会議中に、理由のエラーを受けずに会議の中断に気づいたときのコード
+   *             MEETING_CONNECTION_LOST。「会議中」の画面が決める）
+   * 【テスト内容】システムエラーとして、画面に出す形に変換する
+   * 【期待結果】専用の文言を持つこと（汎用の文言ではない）。何が起きたか（会議が中断になった）だけを伝え、
+   *             原因を言い切らないこと（理由が届かないため。通訳ワーカーの停止で中断したときにも出ることがある）。
+   *             次に行う操作として、会議の記録で確かめることと、新しい会議を開始することを示すこと。
+   *             通訳ワーカーの停止（SYSTEM_INTERPRETER_UNAVAILABLE）とは、別の文言であること
+   */
+  it('should tell that the meeting was interrupted without asserting the cause', () => {
+    const error = toDisplayErrorFromCode('system_error', 'MEETING_CONNECTION_LOST');
+
+    expect(error.message).not.toBe(GENERIC_WORDINGS.system_error.message);
+    expect(error.message).toBe('会議が中断になりました。');
+    expect(`${error.message}${error.action}`).not.toMatch(/ため/);
+    expect(error.action).toContain('会議の記録で');
+    expect(error.action).toContain('確かめてください');
+    expect(error.action).toContain('新しい会議を開始');
+    expect(error.message).not.toBe(ERROR_WORDINGS.SYSTEM_INTERPRETER_UNAVAILABLE.message);
+  });
+});
+
 describe('ERROR_WORDINGS for meetings', () => {
   const MEETING_CODES = [
     'MEETING_TITLE_INVALID',

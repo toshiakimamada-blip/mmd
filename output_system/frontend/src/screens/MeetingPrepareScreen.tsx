@@ -66,7 +66,7 @@ export function MeetingPrepareScreen() {
           {
             input,
             meetingId,
-            // 接続が切れた取り込みは、閉じ済み。預かりをやめる。会議の中断の扱いは、会議中の画面の作業（Epic 4）で足す。
+            // 接続が切れた取り込みは、閉じ済み。預かりをやめる。会議の中断は「会議中」の画面が扱う（meetings/useMeetingInterruption.ts）。
             handlers: { onSocketClosed: () => capture.forget(meetingId) },
           },
           environment,

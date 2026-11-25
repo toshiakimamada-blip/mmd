@@ -3,7 +3,7 @@ import { MemoryRouter, useNavigate } from 'react-router';
 import { describe, expect, it, vi } from 'vitest';
 
 import { type AudioCaptureSession } from '../../src/audio/audioCaptureSession';
-import { AudioCaptureError } from '../../src/audio/audioErrors';
+import { AudioCaptureError, AudioConnectionClosedError } from '../../src/audio/audioErrors';
 import { MeetingCaptureProvider, useMeetingCapture } from '../../src/meetings/MeetingCaptureProvider';
 
 /** 取り込み中の音声の偽物。止める・閉じるの呼び出しを数える。 */
@@ -257,20 +257,43 @@ describe('MeetingCaptureProvider', () => {
   });
 
   /**
-   * 【テスト対象】MeetingCaptureProvider.restart（預かっていない・取り込めていない）
-   * 【テスト内容】(1) 何も預けずにやり直す。(2) 預けた取り込みの restart が、何もせずに戻る
-   *             （接続が閉じていて、取り込みが続いていない）
-   * 【期待結果】どちらも AUDIO_CAPTURE_FAILED で失敗すること（成功と見間違えて、字幕が続くと思わせない）
+   * 【テスト対象】MeetingCaptureProvider.restart（音声を送る接続が閉じている）
+   * 【テスト内容】(1) 何も預けずにやり直す（接続が切れて、預かりをやめたあと）。(2) 預けた取り込みの
+   *             restart が、接続が閉じていて何もせずに戻る。(3) 接続が切れて forget したあとにやり直す
+   * 【期待結果】どれも AudioConnectionClosedError で失敗すること。取り込みの失敗（AudioCaptureError）とは
+   *            見分けられること（成功と見間違えて、字幕が続くと思わせない。許可や共有の手順で直るものでもない）
    */
-  it('should fail when nothing is held or the capture did not resume', async () => {
+  it('should fail with the closed connection when nothing is held or the connection has closed', async () => {
     const { capture } = mount();
-    await expect(act(() => capture().restart())).rejects.toMatchObject({
-      code: 'AUDIO_CAPTURE_FAILED',
-    });
+    const nothingHeld = act(() => capture().restart());
+    await expect(nothingHeld).rejects.toBeInstanceOf(AudioConnectionClosedError);
+    await expect(nothingHeld).rejects.not.toBeInstanceOf(AudioCaptureError);
 
     const { asSession, session } = fakeSession();
     session.restart.mockImplementation(() => {
       session.state = 'closed';
+      return Promise.resolve();
+    });
+    act(() => capture().hold('abc123', asSession));
+    await expect(act(() => capture().restart())).rejects.toBeInstanceOf(AudioConnectionClosedError);
+
+    const other = fakeSession();
+    act(() => capture().hold('abc123', other.asSession));
+    act(() => capture().forget('abc123'));
+    await expect(act(() => capture().restart())).rejects.toBeInstanceOf(AudioConnectionClosedError);
+    expect(other.session.restart).not.toHaveBeenCalled();
+  });
+
+  /**
+   * 【テスト対象】MeetingCaptureProvider.restart（接続は開いているが、取り込みが続いていない）
+   * 【テスト内容】預けた取り込みの restart が戻ったあと、状態が取り込み中でも閉じたあとでもない（止めたあと）
+   * 【期待結果】AUDIO_CAPTURE_FAILED で失敗すること（成功と見間違えて、字幕が続くと思わせない）
+   */
+  it('should fail as a capture failure when the capture did not resume on an open connection', async () => {
+    const { capture } = mount();
+    const { asSession, session } = fakeSession();
+    session.restart.mockImplementation(() => {
+      session.state = 'stopped';
       return Promise.resolve();
     });
     act(() => capture().hold('abc123', asSession));
