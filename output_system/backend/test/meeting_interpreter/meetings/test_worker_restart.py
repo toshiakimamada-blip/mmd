@@ -289,6 +289,14 @@ class TestWhenTheWorkerCannotBeRestarted:
 
                 kill_worker(old_pid)
                 errors = events.wait_for_count("error.occurred", 1)
+                # 状態の変化（中断）の通知も待つ。届く順番には頼らない。
+                events.wait_for(
+                    lambda items: any(
+                        item["type"] == "meeting.state_changed" and item["status"] == "interrupted"
+                        for item in items
+                    ),
+                    what="会議の状態の変化（中断）",
+                )
                 with pytest.raises(ConnectionClosed) as closed:
                     audio.recv(timeout=10)
                 deadline = time.monotonic() + 10
