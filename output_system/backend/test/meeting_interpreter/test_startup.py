@@ -29,11 +29,21 @@ from meeting_interpreter.models.fetch import ModelFetcher
 from meeting_interpreter.models.manager import ModelManager
 from meeting_interpreter.models.store import ModelStore
 from meeting_interpreter.records.database import DATABASE_FILE_NAME, RecordDatabase
-from meeting_interpreter.records.errors import RecordSchemaError
+from meeting_interpreter.records.errors import (
+    RecordMigrationError,
+    RecordSchemaError,
+    UpdateBackupError,
+)
 from meeting_interpreter.records.models import AudioSource, MeetingStatus
 from meeting_interpreter.records.store import RecordStore
 from meeting_interpreter.settings import Settings
-from meeting_interpreter.startup import run_startup
+from meeting_interpreter.startup import (
+    StartupBlocked,
+    StartupFailureKind,
+    failure_kind_of,
+    report_blocked,
+    run_startup,
+)
 from model_fakes import FakeDownloader, small_catalog
 
 STARTED = datetime(2026, 11, 20, 9, 0, 0, tzinfo=UTC)
@@ -98,14 +108,17 @@ class TestRunStartup:
         """
         【テスト対象】run_startup（記録データベースの失敗）
         【テスト内容】最初の処理（構造の確認と更新）が失敗する流れを動かす
-        【期待結果】その例外がそのまま上がり、復旧と AI モデルの開始が呼ばれないこと
+        【期待結果】失敗した段が分かる合図（StartupBlocked。原因の種類つき、元の例外は __cause__）が
+                    上がり、復旧と AI モデルの開始が呼ばれないこと
         """
         steps = StepRecorder()
         steps.fail_at = "records"
 
-        with pytest.raises(RecordSchemaError):
+        with pytest.raises(StartupBlocked) as raised:
             asyncio.run(steps.run())
 
+        assert raised.value.kind is StartupFailureKind.SCHEMA_UNSUPPORTED
+        assert isinstance(raised.value.__cause__, RecordSchemaError)
         assert steps.calls == ["records"]
 
     def test_should_not_start_models_when_the_recovery_fails(self):
@@ -122,6 +135,149 @@ class TestRunStartup:
             asyncio.run(steps.run())
 
         assert steps.calls == ["records", "recovery"]
+
+
+class TestStartupBlockedSignal:
+    """記録データベースの失敗は、原因の種類つきの合図（StartupBlocked）で返る。"""
+
+    @pytest.mark.parametrize(
+        ("error", "kind"),
+        [
+            (RecordSchemaError("構造が新しい"), StartupFailureKind.SCHEMA_UNSUPPORTED),
+            (UpdateBackupError("控えを残せない"), StartupFailureKind.BACKUP_FAILED),
+            (RecordMigrationError(2), StartupFailureKind.MIGRATION_FAILED),
+            (
+                sqlite3.DatabaseError("file is not a database"),
+                StartupFailureKind.RECORDS_UNAVAILABLE,
+            ),
+            (OSError("read-only file system"), StartupFailureKind.RECORDS_UNAVAILABLE),
+        ],
+        ids=["schema", "backup", "migration", "corrupted", "unwritable"],
+    )
+    def test_should_classify_the_cause_of_the_failure(self, error: Exception, kind):
+        """
+        【テスト対象】run_startup と failure_kind_of（原因の種類）
+        【テスト内容】記録データベースを開く処理が、種類の違う例外で失敗する流れを動かす
+        【期待結果】StartupBlocked の kind が、例外の種類に合う原因の種類になり、元の例外が
+                    __cause__ に残ること。復旧と AI モデルの開始は呼ばれないこと
+        """
+        steps = StepRecorder()
+
+        async def failing_open() -> None:
+            steps.calls.append("records")
+            raise error
+
+        async def main() -> RecoveryResult:
+            return await run_startup(
+                open_records=failing_open,
+                recover_meetings=steps.recover_meetings,
+                start_models=steps.start_models,
+            )
+
+        with pytest.raises(StartupBlocked) as raised:
+            asyncio.run(main())
+
+        assert raised.value.kind is kind
+        assert raised.value.__cause__ is error
+        assert failure_kind_of(error) is kind
+        assert steps.calls == ["records"]
+
+    def test_should_not_turn_a_recovery_failure_into_the_blocked_signal(self):
+        """
+        【テスト対象】run_startup（復旧の失敗）
+        【テスト内容】途中だった会議の復旧が失敗する流れを動かす
+        【期待結果】StartupBlocked ではなく、元の例外がそのまま上がること
+                    （開始できない状態は、記録データベースの構造を使えない場合だけの状態）
+        """
+        steps = StepRecorder()
+        steps.fail_at = "recovery"
+
+        with pytest.raises(sqlite3.OperationalError) as raised:
+            asyncio.run(steps.run())
+
+        assert not isinstance(raised.value, StartupBlocked)
+
+    def test_should_not_swallow_a_cancellation_while_opening_the_records(self):
+        """
+        【テスト対象】run_startup（停止の合図）
+        【テスト内容】記録データベースを開く処理が、取り消し（CancelledError）で終わる
+        【期待結果】開始できない合図に変えず、そのまま上がること（アプリの停止を妨げない）
+        """
+
+        async def cancelled() -> None:
+            raise asyncio.CancelledError
+
+        steps = StepRecorder()
+
+        async def main() -> RecoveryResult:
+            return await run_startup(
+                open_records=cancelled,
+                recover_meetings=steps.recover_meetings,
+                start_models=steps.start_models,
+            )
+
+        with pytest.raises(asyncio.CancelledError):
+            asyncio.run(main())
+
+    def test_should_report_the_blocked_start_once_without_the_exception_text(
+        self, capsys: pytest.CaptureFixture[str], caplog: pytest.LogCaptureFixture
+    ):
+        """
+        【テスト対象】report_blocked
+        【テスト内容】文面に会議の内容にあたる語（SECRET）を含む、データベースの例外が原因の合図を報告する
+        【期待結果】エラーログ SYSTEM_STARTUP_FAILED が 1 件出て、コンポーネントは startup、
+                    原因の種類（records_unavailable）・例外の種類・発生場所を持つこと。
+                    例外の文面（SECRET）は、どこにも出ないこと
+        """
+        configure_logging("info")
+        steps = StepRecorder()
+
+        async def failing_open() -> None:
+            raise sqlite3.DatabaseError("malformed: SECRET")
+
+        async def main() -> RecoveryResult:
+            return await run_startup(
+                open_records=failing_open,
+                recover_meetings=steps.recover_meetings,
+                start_models=steps.start_models,
+            )
+
+        with pytest.raises(StartupBlocked) as raised:
+            asyncio.run(main())
+        report_blocked(raised.value)
+        output = capsys.readouterr().out
+        errors = [line for line in _read_lines(output) if line["log_type"] == "error"]
+
+        assert [e["error_code"] for e in errors] == ["SYSTEM_STARTUP_FAILED"]
+        assert errors[0]["component"] == "startup"
+        assert errors[0]["failure_kind"] == "records_unavailable"
+        assert errors[0]["exception_type"] == "DatabaseError"
+        assert errors[0]["location"]
+        assert "SECRET" not in output
+        assert "SECRET" not in caplog.text
+
+    def test_should_state_the_numbers_of_a_setup_failure_in_one_startup_line(
+        self, caplog: pytest.LogCaptureFixture
+    ):
+        """
+        【テスト対象】report_blocked（記録データベースを使える状態にできなかった失敗）
+        【テスト内容】構造が新しいために開けなかった合図を報告する
+        【期待結果】起動の知らせの 1 行に、版の数値が入ること（どの版が新しいかが分かる）
+        """
+        steps = StepRecorder()
+        steps.fail_at = "records"
+        with pytest.raises(StartupBlocked) as raised:
+            asyncio.run(steps.run())
+
+        with caplog.at_level("ERROR"):
+            report_blocked(raised.value)
+
+        notices = [
+            record.getMessage()
+            for record in caplog.records
+            if record.name == "meeting_interpreter.startup"
+        ]
+        assert notices == ["構造が新しい"]
 
 
 class OrderSpy:
@@ -238,8 +394,8 @@ class TestAppStartupOrder:
         """
         【テスト対象】アプリの起動（lifespan）の、構造の確認の失敗
         【テスト内容】構造の版が新しい記録データベースがある置き場で、アプリを起動する
-        【期待結果】起動が RecordSchemaError で失敗し、途中だった会議の復旧も AI モデルの開始も
-                    行わないこと。復旧の処理ログ（startup_recovery）が出ないこと。
+        【期待結果】起動が、開始できない合図（StartupBlocked）で失敗し、途中だった会議の復旧も
+                    AI モデルの開始も行わないこと。復旧の処理ログ（startup_recovery）が出ないこと。
                     データベースは書き換わらず、通訳中の会議も触れないこと
         """
         configure_logging("info")
@@ -254,7 +410,7 @@ class TestAppStartupOrder:
         order = OrderSpy(monkeypatch)
 
         with (
-            pytest.raises(RecordSchemaError),
+            pytest.raises(StartupBlocked),
             local_client(create_app(settings, model_manager=order.models())),  # type: ignore[arg-type]
         ):
             pass
@@ -444,7 +600,7 @@ class TestRecoveryFailureLog:
         asyncio.run(ok.run())
         failing = StepRecorder()
         failing.fail_at = "records"
-        with pytest.raises(RecordSchemaError):
+        with pytest.raises(StartupBlocked):
             asyncio.run(failing.run())
 
         assert "MEETING_RECOVERY_FAILED" not in capsys.readouterr().out

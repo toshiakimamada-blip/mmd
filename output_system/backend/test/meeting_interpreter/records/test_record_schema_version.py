@@ -9,6 +9,7 @@ import sqlite3
 
 import pytest
 
+from meeting_interpreter.records.errors import RecordMigrationError
 from meeting_interpreter.records.migrations import (
     CURRENT_SCHEMA_VERSION,
     MIGRATIONS,
@@ -188,7 +189,8 @@ class TestApplyMigrations:
         """
         【テスト対象】apply_migrations
         【テスト内容】版 2 の移行の 2 つ目の文が失敗する（表を作ったあとで、存在しない表を参照する）
-        【期待結果】例外が上がり、版 2 の表は残らず、版は 1 のままであること。
+        【期待結果】RecordMigrationError（失敗した版は 2、原因は sqlite3.Error）が上がり、
+                    版 2 の表は残らず、版は 1 のままであること。
                     途中までの構造が残ると、次の起動で同じ移行をやり直せなくなる
         """
         connection = _connection()
@@ -201,9 +203,11 @@ class TestApplyMigrations:
         )
         apply_migrations(connection, migrations[:1], 0)
 
-        with pytest.raises(sqlite3.Error):
+        with pytest.raises(RecordMigrationError) as raised:
             apply_migrations(connection, migrations, 1)
 
+        assert raised.value.version == 2
+        assert isinstance(raised.value.__cause__, sqlite3.Error)
         assert _user_version(connection) == 1
         assert "second" not in _table_names(connection)
         assert not connection.in_transaction

@@ -11,7 +11,7 @@
 """
 
 import asyncio
-from collections.abc import AsyncIterator, Awaitable, Callable
+from collections.abc import AsyncIterator, Awaitable, Callable, Sequence
 from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Final
@@ -36,7 +36,7 @@ from .jobs.question_requests import QuestionRequests
 from .jobs.summary_outcomes import SummaryOutcomes
 from .jobs.summary_requests import SummaryRequests
 from .jobs.workers import GenerationLauncher, ProductionGenerationLauncher
-from .logs import STARTUP_LOGGER, log_error
+from .logs import STARTUP_LOGGER
 from .logs.asgi import TraceIdMiddleware
 from .meetings.manager import MeetingManager
 from .meetings.session import SessionPolicy
@@ -48,14 +48,15 @@ from .models.manager import ModelManager, ModelStatus, ModelStatusNotifier
 from .models.store import ModelStore
 from .notify.hub import NotificationHub
 from .process_memory import MemoryProbe
+from .records.backup import FileUpdateBackup
 from .records.database import RecordDatabase
 from .records.disk_space import DiskSpaceMonitor, DiskUsage
-from .records.errors import RecordSchemaError
+from .records.migrations import MIGRATIONS, Migration
 from .records.models import Meeting
 from .records.store import RecordStore
 from .security_headers import SecurityHeadersMiddleware
 from .settings import Settings
-from .startup import run_startup
+from .startup import StartupBlocked, report_blocked, run_startup
 
 # 存在しない経路で、エラーを返す対象にする HTTP のメソッド。
 _ALL_METHODS: Final = ["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS", "HEAD"]
@@ -142,22 +143,6 @@ def build_model_manager(
     )
 
 
-async def _open_records(database: RecordDatabase) -> None:
-    """記録データベースを開く（起動の順序の 1 つ目: 構造の確認と更新）。
-
-    構造の版が新しい場合など、使えないときは、理由を残してから、例外のまま上げる。
-    基本設計書の「開始できない状態」（会議と作成の機能を開始せず、画面へ理由を返し続ける）は、
-    記録データベースの構造を更新する作業が、この失敗を置き換える。
-    """
-    try:
-        await database.open()
-    except RecordSchemaError as error:
-        # 版の数値だけの文面（会議の内容は入らない）。起動の知らせ用のロガーで、理由を残す。
-        log_error("RECORD_SCHEMA_UNSUPPORTED", "startup")
-        STARTUP_LOGGER.error(str(error))
-        raise
-
-
 @asynccontextmanager
 async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
     """アプリの起動と停止。
@@ -178,11 +163,15 @@ async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
     job_manager: JobManager = app.state.job_manager
     hub: NotificationHub = app.state.notification_hub
     try:
-        await run_startup(
-            open_records=lambda: _open_records(database),
-            recover_meetings=meeting_manager.recover_on_startup,
-            start_models=manager.start,
-        )
+        try:
+            await run_startup(
+                open_records=database.open,
+                recover_meetings=meeting_manager.recover_on_startup,
+                start_models=manager.start,
+            )
+        except StartupBlocked as blocked:
+            report_blocked(blocked)
+            raise
         job_manager.start()
         try:
             yield
@@ -217,6 +206,7 @@ def create_app(
     job_outcomes: JobOutcomeHandler | None = None,
     disk_usage: Callable[[Path], DiskUsage] | None = None,
     memory_probe: MemoryProbe | None = None,
+    migrations: Sequence[Migration] = MIGRATIONS,
 ) -> FastAPI:
     """アプリサーバーを組み立てる。
 
@@ -241,6 +231,9 @@ def create_app(
         memory_probe: プロセスごとのメモリの使用量を取る部品。会議の終了・中断と、作成ジョブの
             終了の処理ログ（process_memory）に使う。省略すると、実際の /proc を読む。
             テストが、決まった値を返す偽物を渡すために使う。
+        migrations: 記録データベースの構造の移行の一覧。省略すると、アプリに同梱のもの
+            （版 1 だけ）。テストが、版 2 を想定した移行を渡して、構造の更新と更新前の控えを
+            確かめるために使う。
 
     Returns:
         経路をすべて登録した FastAPI のアプリ。
@@ -262,9 +255,16 @@ def create_app(
     app.state.model_manager = model_manager or build_model_manager(
         settings, notifier=notification_hub
     )
+    # 更新前の控え。起動時に、構造を更新する前の控えを残し（RecordDatabase）、記録の削除で、
+    # 記録データベースより先に、控えから会議を消す（RecordStore）。両方へ同じものを渡す。
+    # 記録保存部へ渡し忘れると、削除した会議が控えに残る（警告も出ない）。
+    update_backup = FileUpdateBackup(settings.records_dir, migrations=migrations)
     # 記録データベースは、起動のとき（_lifespan）に開く。組み立てるだけでは、ディスクに触れない。
-    app.state.record_database = RecordDatabase(settings.records_dir)
-    record_store = RecordStore(app.state.record_database)
+    app.state.record_database = RecordDatabase(
+        settings.records_dir, migrations=migrations, update_backup=update_backup
+    )
+    app.state.update_backup = update_backup
+    record_store = RecordStore(app.state.record_database, update_backup=update_backup)
     # 記録データベースの置き場の空きの確認（GET /api/system/alerts）。警告のみで、保存は止めない。
     app.state.disk_space_monitor = DiskSpaceMonitor(
         settings.records_dir,

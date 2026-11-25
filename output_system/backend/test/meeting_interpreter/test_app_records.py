@@ -12,6 +12,7 @@ from conftest import local_client
 from meeting_interpreter.app import create_app
 from meeting_interpreter.records.database import DATABASE_FILE_NAME
 from meeting_interpreter.records.errors import RecordSchemaError
+from meeting_interpreter.startup import StartupBlocked
 
 
 class SpyManager:
@@ -103,9 +104,10 @@ class TestStartup:
         """
         【テスト対象】create_app（起動）
         【テスト内容】構造の版が新しい記録データベースがある置き場で、アプリを起動する
-        【期待結果】起動が RecordSchemaError で失敗し、モデル管理部は開始されず、データベースは
-                    書き換わらないこと。起動できない理由が、エラーログ（RECORD_SCHEMA_UNSUPPORTED）と
-                    起動の知らせ（版の数値）に出ること（開始できない状態で動かす仕組みは、暫定版では作らない）
+        【期待結果】起動が、開始できない合図（StartupBlocked。原因は RecordSchemaError）で
+                    失敗し、モデル管理部は開始されず、データベースは書き換わらないこと。起動できない
+                    理由が、エラーログ（SYSTEM_STARTUP_FAILED・原因の種類 schema_unsupported）と
+                    起動の知らせ（版の数値）に出ること
         """
         settings.records_dir.mkdir(parents=True)
         connection = sqlite3.connect(settings.records_dir / DATABASE_FILE_NAME)
@@ -114,16 +116,19 @@ class TestStartup:
         manager = SpyManager()
 
         with (
-            pytest.raises(RecordSchemaError),
+            pytest.raises(StartupBlocked) as raised,
             local_client(
                 create_app(settings, model_manager=manager)  # type: ignore[arg-type]
             ),
         ):
             pass
 
+        assert isinstance(raised.value.__cause__, RecordSchemaError)
         assert manager.calls == []
         assert _user_version(settings) == 99
-        assert "RECORD_SCHEMA_UNSUPPORTED" in capsys.readouterr().out
+        output = capsys.readouterr().out
+        assert "SYSTEM_STARTUP_FAILED" in output
+        assert "schema_unsupported" in output
         assert "99" in caplog.text
 
 

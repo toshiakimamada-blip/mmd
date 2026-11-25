@@ -198,6 +198,9 @@ ERROR_LOG: Final = LogKind(
         # 想定外の例外の、種類と発生場所。例外の文面は書かない。
         FieldSpec("exception_type", _EXCEPTION_TYPE),
         FieldSpec("location", _LOCATION),
+        # 失敗の原因の種類（英小文字の snake_case）。同じエラーコードに、原因がいくつかあるときに
+        # 付ける（例: 起動できないときの、構造が新しい・控えを残せない・構造の更新に失敗した）。
+        FieldSpec("failure_kind", _KIND_WORD),
     ),
 )
 

@@ -197,6 +197,7 @@ def log_error(
     trace_id: str | None = None,
     exception_type: str | None = None,
     location: str | None = None,
+    failure_kind: str | None = None,
     **not_allowed: object,
 ) -> None:
     """エラーログを出す。業務エラーは警告、システムエラーは異常のレベルで出す。
@@ -209,6 +210,8 @@ def log_error(
         trace_id: 処理の識別子。省略すると、いまの処理の識別子を使う。
         exception_type: 想定外の例外の種類（クラス名）。例外の文面は渡さない。
         location: 発生場所（モジュール名.関数名:行番号）。
+        failure_kind: 失敗の原因の種類（英小文字の snake_case）。同じエラーコードに原因がいくつか
+            あるときに渡す。
         **not_allowed: 許可リストに無い項目。渡しても出力されない（捨てる）。
 
     Raises:
@@ -229,6 +232,7 @@ def log_error(
             "trace_id": _trace_id_or_current(trace_id),
             "exception_type": exception_type,
             "location": location,
+            "failure_kind": failure_kind,
         },
     )
 
