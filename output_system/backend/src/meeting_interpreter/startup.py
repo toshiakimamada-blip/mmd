@@ -17,12 +17,19 @@
 画面のファイルを配り始められる。
 
 この関数は、順序だけを決める。それぞれの処理の中身と、失敗したときの記録（エラーログ）は、
-渡された関数が受け持つ。
+渡された関数が受け持つ。ただし、2 は、会議の一覧を読めずに失敗したときに、原因を示すログを出す
+場所が他に無いため、この関数が MEETING_RECOVERY_FAILED を出してから、例外をそのまま上げる
+（例外の種類と発生場所だけ。文面は出さない）。
 """
 
 from collections.abc import Awaitable, Callable
 
-from .meetings.recovery import RecoveryResult
+from .errors import describe_origin
+from .logs import log_error
+from .meetings.recovery import RECOVERY_FAILED, RecoveryResult
+
+# エラーログに書くコンポーネントの名前。
+_COMPONENT = "startup"
 
 
 async def run_startup(
@@ -36,7 +43,8 @@ async def run_startup(
     Args:
         open_records: 記録データベースの構造を確認して更新する（開く）。構造を使えないときは、
             例外を起こす。
-        recover_meetings: 途中だった会議を直す。直した件数を返す。
+        recover_meetings: 途中だった会議を直す。直した件数を返す。失敗したときは、原因を示す
+            エラーログ（MEETING_RECOVERY_FAILED）をこの関数が出してから、例外をそのまま上げる。
         start_models: AI モデルの確認と入手を、非同期で始める。終わりを待たずに戻る。
 
     Returns:
@@ -47,6 +55,17 @@ async def run_startup(
             その時点より後の処理は行わない。
     """
     await open_records()
-    result = await recover_meetings()
+    try:
+        result = await recover_meetings()
+    except Exception as error:
+        # 起動が止まる。画面にも「Application startup failed」しか残らないため、原因を残す。
+        _, location = describe_origin(error)
+        log_error(
+            RECOVERY_FAILED,
+            _COMPONENT,
+            exception_type=type(error).__name__,
+            location=location,
+        )
+        raise
     start_models()
     return result

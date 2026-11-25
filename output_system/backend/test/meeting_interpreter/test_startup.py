@@ -6,7 +6,8 @@ Task 7.1.2 の完了条件
 - (1) の失敗で (2)(3) が実行されない
 - 起動をブロックしない（画面のファイルの配信が先に始まる）
 を確かめる。受入条件のうち、止まったあとの会議が、最初の要求の前に直っていることも、アプリの起動を
-通して確かめる。
+通して確かめる。復旧が失敗して起動が止まるときは、原因を示すエラーログが出ることと、直した会議に
+要約を依頼できることも確かめる。
 """
 
 import asyncio
@@ -19,6 +20,7 @@ from datetime import UTC, datetime, timedelta
 import pytest
 
 from conftest import local_client
+from job_fakes import InProcessLauncher, RecordingOutcomes
 from meeting_interpreter.app import create_app
 from meeting_interpreter.logs import configure_logging
 from meeting_interpreter.meetings.manager import MeetingManager
@@ -378,6 +380,152 @@ class FakeManager:
 
     async def shutdown(self) -> None:
         return None
+
+
+def _read_lines(output: str) -> list[dict]:
+    """標準出力の、アプリのログ（JSON 1 行）を、出た順に読む。"""
+    return [json.loads(line) for line in output.splitlines() if line.startswith('{"timestamp"')]
+
+
+class TestRecoveryFailureLog:
+    """復旧が失敗して起動が止まるときは、原因を示すエラーログを出してから、例外を上げる。"""
+
+    def test_should_log_the_origin_and_raise_the_same_exception_when_the_recovery_fails(
+        self, capsys: pytest.CaptureFixture[str]
+    ):
+        """
+        【テスト対象】run_startup（復旧の失敗のログ）
+        【テスト内容】途中だった会議の復旧が、文面に会議の内容にあたる語（SECRET）を含む
+                    データベースの例外で失敗する流れを動かし、標準出力のログを読む
+        【期待結果】同じ例外がそのまま上がること。エラーログ MEETING_RECOVERY_FAILED が 1 件出て、
+                    コンポーネント startup・例外の種類・発生場所を持ち、会議番号は null であること。
+                    例外の文面は出ないこと。AI モデルの開始は呼ばれないこと
+        """
+        configure_logging("info")
+        steps = StepRecorder()
+        steps.fail_at = "recovery"
+
+        async def recover() -> RecoveryResult:
+            steps.calls.append("recovery")
+            raise sqlite3.OperationalError("unable to open database file: SECRET")
+
+        async def main():
+            return await run_startup(
+                open_records=steps.open_records,
+                recover_meetings=recover,
+                start_models=steps.start_models,
+            )
+
+        with pytest.raises(sqlite3.OperationalError, match="SECRET"):
+            asyncio.run(main())
+        output = capsys.readouterr().out
+        errors = [line for line in _read_lines(output) if line["log_type"] == "error"]
+
+        assert steps.calls == ["records", "recovery"]
+        assert [e["error_code"] for e in errors] == ["MEETING_RECOVERY_FAILED"]
+        assert errors[0]["component"] == "startup"
+        assert errors[0]["exception_type"] == "OperationalError"
+        assert errors[0]["location"]
+        assert errors[0]["meeting_id"] is None
+        assert "SECRET" not in output
+
+    def test_should_not_log_a_recovery_failure_when_the_recovery_succeeds_or_is_not_reached(
+        self, capsys: pytest.CaptureFixture[str]
+    ):
+        """
+        【テスト対象】run_startup（復旧の失敗のログを出さない場合）
+        【テスト内容】3 つとも成功する流れと、最初の処理（記録データベース）で失敗して復旧に
+                    届かない流れを動かす
+        【期待結果】どちらも、エラーログ MEETING_RECOVERY_FAILED が出ないこと
+                    （記録データベースの失敗は、別のログが原因を示す）
+        """
+        configure_logging("info")
+        ok = StepRecorder()
+        asyncio.run(ok.run())
+        failing = StepRecorder()
+        failing.fail_at = "records"
+        with pytest.raises(RecordSchemaError):
+            asyncio.run(failing.run())
+
+        assert "MEETING_RECOVERY_FAILED" not in capsys.readouterr().out
+
+    def test_should_fail_the_app_startup_with_a_log_when_the_meeting_list_cannot_be_read(
+        self,
+        settings: Settings,
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture[str],
+    ):
+        """
+        【テスト対象】アプリの起動（lifespan）の、会議の一覧の読み取りの失敗
+        【テスト内容】会議の一覧を読むときに、データベースの例外が起きるようにして、アプリを起動する
+        【期待結果】起動が、その例外で失敗すること。エラーログ MEETING_RECOVERY_FAILED が 1 件出て、
+                    例外の文面は出ないこと。AI モデルの開始を行わず、開いた記録データベースを
+                    閉じること
+        """
+        configure_logging("info")
+
+        async def unreadable(store: RecordStore):  # type: ignore[no-untyped-def]
+            raise sqlite3.OperationalError("unable to open database file: SECRET")
+
+        monkeypatch.setattr(RecordStore, "list_meetings", unreadable)
+        order = OrderSpy(monkeypatch)
+        app = create_app(settings, model_manager=order.models())  # type: ignore[arg-type]
+        capsys.readouterr()
+
+        with pytest.raises(sqlite3.OperationalError), local_client(app):
+            pass
+        output = capsys.readouterr().out
+        errors = [line for line in _read_lines(output) if line["log_type"] == "error"]
+
+        assert [e["error_code"] for e in errors] == ["MEETING_RECOVERY_FAILED"]
+        assert errors[0]["component"] == "startup"
+        assert "SECRET" not in output
+        assert "models" not in order.calls
+        with pytest.raises(RuntimeError):
+            asyncio.run(app.state.record_database.run(lambda c: None, write=False))
+
+
+class TestSummaryRequestAfterRecovery:
+    """起動の直後は作成ジョブが 0 件。復旧した会議に、要約を依頼できる。"""
+
+    @pytest.mark.parametrize("kind", ["summarizing", "interpreting"], ids=["要約作成中", "通訳中"])
+    def test_should_accept_a_summary_request_for_a_recovered_meeting(
+        self, settings: Settings, kind: str
+    ):
+        """
+        【テスト対象】アプリの起動と、要約の作成の依頼（POST /api/meetings/{会議番号}/summary）
+        【テスト内容】要約作成中または通訳中のまま残った会議（字幕あり）を置いて、アプリを起動し直す。
+                    起動の直後に、会議の記録の作成ジョブを読み、その会議の要約を依頼する
+        【期待結果】起動の直後は、作成ジョブが 0 件であること。復旧した会議（要約失敗または
+                    中断）への依頼が 202 で通り、会議の状態が要約作成中になり、要約のジョブが
+                    返ること
+        """
+        ids: dict[str, str] = {}
+
+        async def leave(store: RecordStore) -> None:
+            ids.update(await _leave_meetings_in_progress(store))
+
+        _write_meeting(settings, leave)
+        app = create_app(
+            settings,
+            model_manager=FakeManager(),  # type: ignore[arg-type]
+            generation_launcher=InProcessLauncher(start_delay=0.5),
+            job_outcomes=RecordingOutcomes(),
+        )
+        meeting_id = ids[kind]
+        expected_before = "summary_failed" if kind == "summarizing" else "interrupted"
+
+        with local_client(app) as client:
+            record = client.get(f"/api/meetings/{meeting_id}").json()
+            response = client.post(f"/api/meetings/{meeting_id}/summary")
+
+        assert record["jobs"] == []
+        assert record["meeting"]["status"] == expected_before
+        assert response.status_code == 202
+        body = response.json()
+        assert body["meeting"]["status"] == "summarizing"
+        assert body["job"]["job_type"] == "summary"
+        assert body["job"]["status"] in {"queued", "running"}
 
 
 class TestStartupDoesNotBlock:

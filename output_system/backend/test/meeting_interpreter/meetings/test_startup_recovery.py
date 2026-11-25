@@ -10,6 +10,7 @@ Task 7.1.1 の完了条件
 
 import asyncio
 import json
+import sqlite3
 from collections.abc import Awaitable, Callable
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -463,6 +464,209 @@ class TestSaveFailure:
         assert after == {"1 件目": MeetingStatus.INTERPRETING, "2 件目": MeetingStatus.INTERRUPTED}
         assert retry == RecoveryResult(interrupted=1)
         assert final == {"1 件目": MeetingStatus.INTERRUPTED, "2 件目": MeetingStatus.INTERRUPTED}
+
+
+def error_logs(output: str) -> list[dict]:
+    """標準出力のアプリのログのうち、エラーログを、出た順に読む。"""
+    lines = [json.loads(line) for line in output.splitlines() if line.startswith('{"timestamp"')]
+    return [line for line in lines if line.get("log_type") == "error"]
+
+
+class ReadFailingStore(RecordStore):
+    """指定した会議の字幕を読むときだけ、データベースの例外が起きる保存の部品。
+
+    例外の文面に、会議の内容にあたる語（SECRET）を入れる。ログへ出てはならない。
+    """
+
+    failing_id: str | None = None
+
+    async def list_subtitles(self, meeting_id):  # type: ignore[no-untyped-def]
+        if meeting_id == self.failing_id:
+            raise sqlite3.OperationalError("database disk image is malformed: SECRET")
+        return await super().list_subtitles(meeting_id)
+
+
+class WriteFailingDatabase(RecordDatabase):
+    """fail_writes が立っている間、書き込みの操作がデータベースの例外で失敗する記録データベース。"""
+
+    fail_writes = False
+
+    async def run(self, work, *, write):  # type: ignore[no-untyped-def]
+        if write and self.fail_writes:
+            raise sqlite3.OperationalError("database or disk is full: SECRET")
+        return await super().run(work, write=write)
+
+
+class TestReadFailure:
+    """1 件の会議を読めなくても、残りの会議を直して、起動を止めない。"""
+
+    def test_should_continue_with_the_other_meetings_when_one_cannot_be_read(
+        self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    ):
+        """
+        【テスト対象】recover_meetings（字幕の読み取りの失敗）
+        【テスト内容】通訳中の会議 2 件のうち、1 件目の字幕を読むときにデータベースの例外が起きる
+                    ようにして復旧する。そのあと、読めるようにして、もう一度復旧する
+        【期待結果】例外が上がらず、2 件目だけが中断になること（直せなかった数 1）。1 件目は通訳中の
+                    まま。2 回目で 1 件目も中断になる（次の起動で、もう一度直す）
+        """
+
+        async def main():
+            database = RecordDatabase(tmp_path)
+            await database.open()
+            try:
+                store = ReadFailingStore(database, clock=lambda: STARTED)
+                first = await make_meeting(store, MeetingStatus.INTERPRETING, title="1 件目")
+                await make_meeting(store, MeetingStatus.INTERPRETING, title="2 件目")
+                store.failing_id = first.meeting_id
+                result = await recover_meetings(store)
+                after = {m.title: m.status for m in await store.list_meetings()}
+                store.failing_id = None
+                retry = await recover_meetings(store)
+                final = {m.title: m.status for m in await store.list_meetings()}
+                return result, after, retry, final
+            finally:
+                await database.close()
+
+        result, after, retry, final = asyncio.run(main())
+
+        assert result == RecoveryResult(interrupted=1, summary_failed=0, unrecovered=1)
+        assert after == {"1 件目": MeetingStatus.INTERPRETING, "2 件目": MeetingStatus.INTERRUPTED}
+        assert retry == RecoveryResult(interrupted=1)
+        assert final == {"1 件目": MeetingStatus.INTERRUPTED, "2 件目": MeetingStatus.INTERRUPTED}
+
+    def test_should_log_the_meeting_and_the_origin_without_the_exception_message(
+        self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    ):
+        """
+        【テスト対象】recover_meetings（字幕の読み取りの失敗のログ）
+        【テスト内容】1 件の会議の字幕を読めない状態で復旧し、標準出力のログを読む
+        【期待結果】エラーログ MEETING_RECOVERY_FAILED が 1 件出て、会議番号・例外の種類・発生場所を
+                    持つこと。例外の文面（SECRET）は出ないこと。復旧の処理ログには、
+                    直せなかった数 1 が出ること
+        """
+        ids: list[str] = []
+
+        async def main():
+            database = RecordDatabase(tmp_path)
+            await database.open()
+            try:
+                store = ReadFailingStore(database, clock=lambda: STARTED)
+                meeting = await make_meeting(store, MeetingStatus.INTERPRETING)
+                ids.append(meeting.meeting_id)
+                store.failing_id = meeting.meeting_id
+                capsys.readouterr()
+                await recover_meetings(store)
+            finally:
+                await database.close()
+
+        asyncio.run(main())
+        output = capsys.readouterr().out
+        errors = error_logs(output)
+        recovery = [
+            line for line in read_lines(output) if line.get("process_type") == "startup_recovery"
+        ]
+
+        assert [e["error_code"] for e in errors] == ["MEETING_RECOVERY_FAILED"]
+        assert errors[0]["meeting_id"] == ids[0]
+        assert errors[0]["component"] == "meeting_manager"
+        assert errors[0]["exception_type"] == "OperationalError"
+        assert errors[0]["location"]
+        assert "SECRET" not in output
+        assert [r["unrecovered_count"] for r in recovery] == [1]
+
+    def test_should_fail_the_startup_when_the_meeting_list_cannot_be_read(self, tmp_path: Path):
+        """
+        【テスト対象】recover_meetings（会議の一覧の読み取りの失敗）
+        【テスト内容】会議の一覧を読むときにデータベースの例外が起きる状態で復旧する
+        【期待結果】例外がそのまま上がること（記録データベースを読めないときは、起動を失敗させる。
+                    原因のログは、起動の順序の側が出す）
+        """
+
+        class ListFailingStore(RecordStore):
+            async def list_meetings(self):  # type: ignore[no-untyped-def]
+                raise sqlite3.OperationalError("unable to open database file")
+
+        async def main():
+            database = RecordDatabase(tmp_path)
+            await database.open()
+            try:
+                await recover_meetings(ListFailingStore(database))
+            finally:
+                await database.close()
+
+        with pytest.raises(sqlite3.OperationalError):
+            asyncio.run(main())
+
+
+def read_lines(output: str) -> list[dict]:
+    """標準出力の、アプリのログ（JSON 1 行）を、出た順に読む。"""
+    return [json.loads(line) for line in output.splitlines() if line.startswith('{"timestamp"')]
+
+
+class TestSaveFailureLog:
+    """保存に失敗した会議は、状態を変えず、記録保存部のエラーログだけを 1 件出す。"""
+
+    @pytest.mark.parametrize(
+        "status",
+        [MeetingStatus.INTERPRETING, MeetingStatus.SUMMARIZING],
+        ids=["通訳中", "要約作成中"],
+    )
+    def test_should_leave_the_meeting_and_count_it_when_the_save_fails(
+        self, tmp_path: Path, capsys: pytest.CaptureFixture[str], status: MeetingStatus
+    ):
+        """
+        【テスト対象】recover_meetings（保存の失敗: 通訳中・要約作成中）
+        【テスト内容】書き込みがデータベースの例外で失敗する状態で、通訳中の会議、または要約作成中の
+                    会議を復旧し、標準出力のログを読む。そのあと、書き込めるようにして、もう一度復旧する
+        【期待結果】1 回目は、会議の状態も失敗理由も変わらず、直せなかった数が 1 になること。
+                    エラーログは記録保存部の RECORD_SAVE_FAILED が会議番号つきで 1 件だけで、
+                    復旧の側が MEETING_RECOVERY_FAILED を重ねて出さないこと。例外の文面は
+                    出ないこと。処理ログの直せなかった数が 1 になること。2 回目で直ること
+        """
+        ids: list[str] = []
+
+        async def main():
+            database = WriteFailingDatabase(tmp_path)
+            await database.open()
+            try:
+                store = RecordStore(database, clock=lambda: STARTED)
+                meeting = await make_meeting(store, status)
+                ids.append(meeting.meeting_id)
+                database.fail_writes = True
+                capsys.readouterr()
+                result = await recover_meetings(store)
+                after = await store.get_meeting(meeting.meeting_id)
+                output = capsys.readouterr().out
+                database.fail_writes = False
+                retry = await recover_meetings(store)
+                final = await store.get_meeting(meeting.meeting_id)
+                return result, after, output, retry, final
+            finally:
+                await database.close()
+
+        result, after, output, retry, final = asyncio.run(main())
+        errors = error_logs(output)
+        recovery = [
+            line for line in read_lines(output) if line.get("process_type") == "startup_recovery"
+        ]
+
+        assert result == RecoveryResult(interrupted=0, summary_failed=0, unrecovered=1)
+        assert after is not None
+        assert after.status is status
+        assert after.summary_failure_reason is None
+        assert [e["error_code"] for e in errors] == ["RECORD_SAVE_FAILED"]
+        assert errors[0]["meeting_id"] == ids[0]
+        assert "SECRET" not in output
+        assert [r["unrecovered_count"] for r in recovery] == [1]
+        assert [r["interrupted_count"] + r["summary_failed_count"] for r in recovery] == [0]
+        assert retry.recovered == 1
+        assert final is not None
+        assert final.status is (
+            MeetingStatus.INTERRUPTED
+            if status is MeetingStatus.INTERPRETING
+            else MeetingStatus.SUMMARY_FAILED
+        )
 
 
 class TestProcessLog:
