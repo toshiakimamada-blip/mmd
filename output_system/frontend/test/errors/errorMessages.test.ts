@@ -513,3 +513,19 @@ describe('ERROR_WORDINGS for a summary request without subtitles', () => {
     expect(wording.action).not.toContain('ボタン');
   });
 });
+
+describe('ERROR_WORDINGS for a summary interrupted by the app stopping', () => {
+  /**
+   * 【テスト対象】ERROR_WORDINGS（SUMMARY_INTERRUPTED）
+   * 【テスト内容】要約を作っている間にアプリが止まったとき（起動時の復旧が保存する失敗理由）の文言を調べる
+   * 【期待結果】アプリが止まったために作れなかったことを伝え、会議の記録から要約を作り直す案内であること。
+   *            ほかの要約の失敗の文言と取り違えないよう、文面が異なること
+   */
+  it('should tell the user the app stopped and guide them to make the summary again', () => {
+    const wording = ERROR_WORDINGS.SUMMARY_INTERRUPTED;
+
+    expect(wording.message).toContain('アプリが止まった');
+    expect(wording.action).toContain('要約を作るボタン');
+    expect(wording.message).not.toBe(ERROR_WORDINGS.SUMMARY_WORKER_STOPPED.message);
+  });
+});

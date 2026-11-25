@@ -260,6 +260,27 @@ FastAPI が自動で返す応答も、共通の形に変えています。
 - 会議が無いときは `MEETING_NOT_FOUND`（404）です。質問は、会議の状態を問わず受け付けるため、`MEETING_INVALID_TRANSITION` は返しません。
 - 同じ会議の質問が待機中か作成中のときは、エラーにせず、そのジョブを返します（重複を防ぐ規約）。
 
+### 起動時の復旧（SUMMARY_INTERRUPTED・MEETING_RECOVERY_FAILED）
+
+アプリが止まったとき、要約作成中だった会議は、起動時の復旧（`backend/src/meeting_interpreter/meetings/recovery.py`）が要約失敗にします。そのときの失敗理由として保存するコードです。HTTP の応答でも `error.occurred` の通知でもなく、会議の記録の `summary_failure_reason` に入って届きます。
+
+| コード | 分類 | 何が起きたか |
+|---|---|---|
+| `SUMMARY_INTERRUPTED` | システムエラー | 要約を作っている間にアプリが止まった。作成ジョブは保存していないため、自動では作り直さない |
+
+- 画面は、ほかの要約の失敗と同じく、会議の記録の要約の領域に、コードから引いた文言と「要約を作るボタン」の案内を出します。前の要約があれば、あわせて表示します。
+- 通訳中だった会議は、エラーコードを使わず、中断にして終了日時を記録します。
+
+起動時の復旧が失敗したときは、エラーログ `MEETING_RECOVERY_FAILED` を出します。画面には出ません（起動の途中の出来事で、画面はまだつながっていません）。
+
+| コード | 分類 | 何が起きたか | ログの項目 |
+|---|---|---|---|
+| `MEETING_RECOVERY_FAILED` | システムエラー | 会議 1 件を直せなかった。字幕を読めなかった（データベースの例外、壊れた日時の値）。その会議は状態が変わらず、残りの会議は直して起動する。次の起動で、もう一度直す | コンポーネント `meeting_manager`、会議番号、例外の種類、発生場所 |
+| `MEETING_RECOVERY_FAILED` | システムエラー | 会議の一覧を読めず、起動が止まった | コンポーネント `startup`、例外の種類、発生場所（会議番号なし） |
+
+- どちらも、例外の文面は出しません。保存に失敗した会議（`RECORD_SAVE_FAILED`）は、記録保存部が会議番号つきで出すため、`MEETING_RECOVERY_FAILED` は重ねて出しません。
+- 直せなかった会議の数は、処理ログ `startup_recovery` の `unrecovered_count` に出ます。
+
 ### 要約と質問の作成（SUMMARY_*・QUESTION_*）
 
 作成ジョブ管理部（`backend/src/meeting_interpreter/jobs/`）が、要約と質問の作成に失敗したときに返すエラーです。HTTP の応答ではなく、`error.occurred` の通知で届きます。分類はすべてシステムエラーです。文言に、会議の内容は入れません。コードは `jobs/errors.py` の `error_code` が作ります（領域は、要約が `SUMMARY`、質問が `QUESTION`）。

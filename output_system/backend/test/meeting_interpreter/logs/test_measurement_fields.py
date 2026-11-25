@@ -189,3 +189,51 @@ class TestProcessMemoryItems:
         (entry,) = read_lines(capsys)
         assert name not in entry
         assert entry["dropped_field_count"] == 1
+
+
+class TestStartupRecoveryItems:
+    """起動時の復旧の記録（startup_recovery）の項目。"""
+
+    def test_should_write_the_recovered_counts_without_a_meeting_id(self, capsys):
+        """
+        【テスト対象】log_processing（起動時の復旧の項目）
+        【テスト内容】中断にした件数・要約失敗にした件数・直せなかった件数を、会議番号なしで渡す
+        【期待結果】3 つの件数がそのまま出て、捨てた項目が 0 件であること
+                    （復旧の記録は、会議ごとではないため、会議番号は null）
+        """
+        log_processing(
+            "startup_recovery",
+            interrupted_count=2,
+            summary_failed_count=1,
+            unrecovered_count=0,
+        )
+
+        (entry,) = read_lines(capsys)
+        assert entry["process_type"] == "startup_recovery"
+        assert entry["interrupted_count"] == 2
+        assert entry["summary_failed_count"] == 1
+        assert entry["unrecovered_count"] == 0
+        assert entry["meeting_id"] is None
+        assert "dropped_field_count" not in entry
+
+    @pytest.mark.parametrize(
+        ("name", "bad"),
+        [
+            ("interrupted_count", -1),
+            ("interrupted_count", True),
+            ("summary_failed_count", "1"),
+            ("summary_failed_count", 1.5),
+            ("unrecovered_count", MEETING_TEXT_JA),
+        ],
+    )
+    def test_should_drop_an_invalid_count(self, capsys, name, bad):
+        """
+        【テスト対象】log_processing（起動時の復旧の件数の検証）
+        【テスト内容】件数に、負の数・真偽値・文字列・小数・本文を渡す
+        【期待結果】出力されず、捨てた数に数えられること（本文が件数の欄から入り込めない）
+        """
+        log_processing("startup_recovery", **{name: bad})
+
+        (entry,) = read_lines(capsys)
+        assert name not in entry
+        assert entry["dropped_field_count"] == 1

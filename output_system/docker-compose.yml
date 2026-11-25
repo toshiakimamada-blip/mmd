@@ -22,6 +22,9 @@ services:
     init: true
     # 異常終了したときと、Docker の再起動のあとに、自動で立ち上げ直す。
     # docker compose stop や docker compose down で止めたときは、立ち上げ直さない。
+    # アプリサーバーのプロセスが終わると、init も終わってコンテナが止まり、この設定で再起動する。
+    # 起動のたびに、途中だった会議を直す（docs/operations.md）。
+    # 動いていることの確認（GET /api/health を 30 秒ごとに呼ぶ HEALTHCHECK）は、Dockerfile にある。
     restart: unless-stopped
     ports:
       # PC のループバックにだけ公開する。ほかの PC からは届かない。

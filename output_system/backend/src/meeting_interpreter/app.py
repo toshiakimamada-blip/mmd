@@ -55,6 +55,7 @@ from .records.models import Meeting
 from .records.store import RecordStore
 from .security_headers import SecurityHeadersMiddleware
 from .settings import Settings
+from .startup import run_startup
 
 # 存在しない経路で、エラーを返す対象にする HTTP のメソッド。
 _ALL_METHODS: Final = ["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS", "HEAD"]
@@ -141,23 +142,13 @@ def build_model_manager(
     )
 
 
-@asynccontextmanager
-async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
-    """アプリの起動と停止。
+async def _open_records(database: RecordDatabase) -> None:
+    """記録データベースを開く（起動の順序の 1 つ目: 構造の確認と更新）。
 
-    起動で、記録データベースを開き（空なら版 1 の構造を作る）、AI モデルの確認と入手を
-    非同期で始める（アプリの起動を待たせない）。
-    停止で、実行中の入手を中止し（受け取った分は残り、次の起動で続きから入手する）、
-    記録データベースを閉じる。
-
-    記録データベースを開けないときは、起動を失敗させる。構造の版が新しい場合は、
-    原因を標準出力に出してから失敗させる。基本設計書の「開始できない状態」（会議と作成の機能を
-    開始せず、画面へ理由を返し続ける）は、暫定版では作らない。
-    起動の順序（記録データベースの確認 → 途中だった会議の復旧 → AI モデルの確認）のうち、
-    途中だった会議の復旧は、起動時の復旧の作業で、ここに足す。
+    構造の版が新しい場合など、使えないときは、理由を残してから、例外のまま上げる。
+    基本設計書の「開始できない状態」（会議と作成の機能を開始せず、画面へ理由を返し続ける）は、
+    記録データベースの構造を更新する作業が、この失敗を置き換える。
     """
-    database: RecordDatabase = app.state.record_database
-    manager: ModelManager = app.state.model_manager
     try:
         await database.open()
     except RecordSchemaError as error:
@@ -165,11 +156,33 @@ async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
         log_error("RECORD_SCHEMA_UNSUPPORTED", "startup")
         STARTUP_LOGGER.error(str(error))
         raise
+
+
+@asynccontextmanager
+async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
+    """アプリの起動と停止。
+
+    起動は、startup.py の順序で行う。(1) 記録データベースを開く（空なら版 1 の構造を作る）、
+    (2) 途中だった会議を中断・要約失敗へ直す、(3) AI モデルの確認と入手を非同期で始める
+    （アプリの起動を待たせない）。(1) で失敗したら (2) と (3) を行わない。
+    停止で、実行中の入手を中止し（受け取った分は残り、次の起動で続きから入手する）、
+    記録データベースを閉じる。
+
+    記録データベースを開けないときは、起動を失敗させる。構造の版が新しい場合は、
+    原因を標準出力に出してから失敗させる。基本設計書の「開始できない状態」（会議と作成の機能を
+    開始せず、画面へ理由を返し続ける）は、記録データベースの構造を更新する作業が作る。
+    """
+    database: RecordDatabase = app.state.record_database
+    manager: ModelManager = app.state.model_manager
     meeting_manager: MeetingManager = app.state.meeting_manager
     job_manager: JobManager = app.state.job_manager
     hub: NotificationHub = app.state.notification_hub
     try:
-        manager.start()
+        await run_startup(
+            open_records=lambda: _open_records(database),
+            recover_meetings=meeting_manager.recover_on_startup,
+            start_models=manager.start,
+        )
         job_manager.start()
         try:
             yield
@@ -181,6 +194,7 @@ async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
             await hub.close_all()
             await manager.shutdown()
     finally:
+        # 開けなかったときは、何もしない。復旧に失敗したときは、開いたデータベースを閉じる。
         await database.close()
 
 
