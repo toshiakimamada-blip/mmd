@@ -202,6 +202,12 @@ export const ERROR_WORDINGS: Readonly<Record<string, ErrorWording>> = Object.fre
     message: '要約を作れましたが、保存できませんでした。',
     action: `会議の記録で、要約を作るボタンを押してください。${REPORT_IF_NOT_FIXED}`,
   },
+  // 要約を作っている間にアプリが止まったとき。起動時の復旧が、要約失敗の理由として保存する
+  // （サーバーの meetings/recovery.py）。画面を開き直しても、この文言を表示できる
+  SUMMARY_INTERRUPTED: {
+    message: 'アプリが止まったため、要約を作れませんでした。',
+    action: `会議の記録で、要約を作るボタンを押してください。${REPORT_IF_NOT_FIXED}`,
+  },
   SUMMARY_NO_CONTENT: {
     message: '内容がありません。字幕が 1 件も無いため、要約を作れません。',
     action: '字幕がある会議で、要約を作ってください。',

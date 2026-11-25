@@ -114,6 +114,9 @@ def log_processing(
     memory_trigger: str | None = None,
     process_role: str | None = None,
     memory_mb: float | None = None,
+    interrupted_count: int | None = None,
+    summary_failed_count: int | None = None,
+    unrecovered_count: int | None = None,
     **not_allowed: object,
 ) -> None:
     """処理ログを出す（情報のレベル）。
@@ -143,6 +146,9 @@ def log_processing(
         memory_trigger: メモリの使用量を取った時点（meeting_ended など）。process_memory だけ。
         process_role: メモリの使用量を取ったプロセスの役割（app_server など）。process_memory だけ。
         memory_mb: いまの常駐メモリ（MB）。process_memory だけ。
+        interrupted_count: 通訳中から中断にした会議の数。startup_recovery だけ。
+        summary_failed_count: 要約作成中から要約失敗にした会議の数。startup_recovery だけ。
+        unrecovered_count: 保存に失敗して直せなかった会議の数。startup_recovery だけ。
         **not_allowed: 許可リストに無い項目。渡しても出力されない（捨てる）。
             本文やタイトルなどを渡す誤りが、ログに現れないようにする仕組みの受け口。
     """
@@ -175,6 +181,9 @@ def log_processing(
             "memory_trigger": memory_trigger,
             "process_role": process_role,
             "memory_mb": memory_mb,
+            "interrupted_count": interrupted_count,
+            "summary_failed_count": summary_failed_count,
+            "unrecovered_count": unrecovered_count,
         },
     )
 

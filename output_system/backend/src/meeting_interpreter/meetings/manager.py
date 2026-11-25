@@ -18,6 +18,10 @@
 進行中の会議の判定は、このアプリサーバーのメモリ（セッション）で行う。記録データベースの状態の値は、
 会議の状態の唯一の正だが、アプリが止まったあとに通訳中のまま残った会議（起動時の復旧、F-17 が直す）
 を「進行中」と数えると、新しい会議を開始できなくなるため。
+
+起動時の復旧（recover_on_startup）
+- アプリの起動時に 1 回、会議を始められる前に呼ぶ。通訳中の会議を中断に、要約作成中の会議を
+  要約失敗に直す（recovery.py）
 """
 
 import asyncio
@@ -42,6 +46,7 @@ from .errors import (
     model_not_ready,
 )
 from .inputs import normalize_title, parse_audio_source
+from .recovery import RecoveryResult, recover_meetings
 from .session import (
     ERROR_OCCURRED,
     MEETING_STATE_CHANGED,
@@ -419,6 +424,26 @@ class MeetingManager:
             raise meeting_not_found(meeting_id)
         session.claim_audio_connection()
         return session
+
+    # --- 起動時の復旧 -------------------------------------------------------------------
+
+    async def recover_on_startup(self) -> RecoveryResult:
+        """起動時の復旧（F-17）。止まる前に途中だった会議を、中断・要約失敗へ直す。
+
+        通訳中の会議を中断にし（終了日時は、最後の字幕の話された時刻。字幕が無ければ開始日時）、
+        要約作成中の会議を要約失敗にする（失敗理由は SUMMARY_INTERRUPTED）。途中だった会議が
+        無ければ何も変えない。復旧した件数は、処理ログ（startup_recovery）に出す。
+        詳しくは recovery.py。
+
+        アプリの起動時に、会議を始められる前に 1 回だけ呼ぶ。
+
+        Raises:
+            RuntimeError: 進行中の会議があるとき（起動時以外に呼んだ誤り。進行中の会議を
+                中断にしてしまうため、何もしない）。
+        """
+        if self._occupied or self._session is not None:
+            raise RuntimeError("進行中の会議があるため、起動時の復旧を行えません")
+        return await recover_meetings(self._store)
 
     # --- 停止 ---------------------------------------------------------------------------
 

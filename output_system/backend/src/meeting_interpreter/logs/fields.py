@@ -177,6 +177,13 @@ PROCESSING_LOG: Final = LogKind(
         FieldSpec("process_role", _KIND_WORD),
         # いまの常駐メモリ（MB）。最大値は peak_memory_mb に出す。
         FieldSpec("memory_mb", non_negative_number),
+        # 起動時の復旧の記録（startup_recovery）の項目。必ず含める項目ではない。
+        # 通訳中から中断にした会議の数。
+        FieldSpec("interrupted_count", non_negative_int),
+        # 要約作成中から要約失敗にした会議の数。
+        FieldSpec("summary_failed_count", non_negative_int),
+        # 直そうとしたが、保存に失敗して直せなかった会議の数。
+        FieldSpec("unrecovered_count", non_negative_int),
     ),
 )
 
