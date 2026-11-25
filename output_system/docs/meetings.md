@@ -259,7 +259,7 @@ stateDiagram-v2
 | `summary_failed_count` | 要約作成中から要約失敗にした会議の数 |
 | `unrecovered_count` | 保存に失敗して直せなかった会議の数 |
 
-起動の順序は [operations.md](operations.md) の「起動の順序」にあります。
+起動の順序と、出荷するコンテナで確かめた結果（アプリサーバーを止めて起動し直したときの、中断と要約失敗）は、[operations.md](operations.md) にあります。
 
 ## 会議の状態の遷移規則
 
