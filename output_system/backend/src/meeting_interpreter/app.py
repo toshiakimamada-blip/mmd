@@ -57,6 +57,7 @@ from .records.store import RecordStore
 from .security_headers import SecurityHeadersMiddleware
 from .settings import Settings
 from .startup import StartupBlocked, report_blocked, run_startup
+from .startup_gate import StartupGate, StartupGateMiddleware
 
 # 存在しない経路で、エラーを返す対象にする HTTP のメソッド。
 _ALL_METHODS: Final = ["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS", "HEAD"]
@@ -147,31 +148,41 @@ def build_model_manager(
 async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
     """アプリの起動と停止。
 
-    起動は、startup.py の順序で行う。(1) 記録データベースを開く（空なら版 1 の構造を作る）、
-    (2) 途中だった会議を中断・要約失敗へ直す、(3) AI モデルの確認と入手を非同期で始める
-    （アプリの起動を待たせない）。(1) で失敗したら (2) と (3) を行わない。
+    起動は、startup.py の順序で行う。(1) 記録データベースを開く（空なら版 1 の構造を作り、古ければ
+    更新前の控えを残してから更新する）、(2) 途中だった会議を中断・要約失敗へ直す、(3) AI モデルの
+    確認と入手を非同期で始める（アプリの起動を待たせない）。
     停止で、実行中の入手を中止し（受け取った分は残り、次の起動で続きから入手する）、
     記録データベースを閉じる。
 
-    記録データベースを開けないときは、起動を失敗させる。構造の版が新しい場合は、
-    原因を標準出力に出してから失敗させる。基本設計書の「開始できない状態」（会議と作成の機能を
-    開始せず、画面へ理由を返し続ける）は、記録データベースの構造を更新する作業が作る。
+    (1) で記録データベースを使えなかったときは、アプリサーバーを止めずに、「開始できない状態」
+    （startup_gate.py）で動かす。原因をエラーログに 1 件出し、ゲートを閉じて、そのまま起動を終える。
+    (2) と (3) は行わない。作成ジョブ管理部も開始しない（2 つのワーカーと変換プロセスは、
+    会議・作成の依頼で起動するため、依頼を受け付けない状態では起動しない）。通知部とモデル管理部も
+    動かさない。
+    開始できない状態は、アプリサーバーを起動し直すまで続く。
+    (2) の失敗は、開始できない状態にせず、起動を失敗させる（例外をそのまま上げる）。
     """
     database: RecordDatabase = app.state.record_database
     manager: ModelManager = app.state.model_manager
     meeting_manager: MeetingManager = app.state.meeting_manager
     job_manager: JobManager = app.state.job_manager
     hub: NotificationHub = app.state.notification_hub
+    gate: StartupGate = app.state.startup_gate
     try:
+        blocked: StartupBlocked | None = None
         try:
             await run_startup(
                 open_records=database.open,
                 recover_meetings=meeting_manager.recover_on_startup,
                 start_models=manager.start,
             )
-        except StartupBlocked as blocked:
+        except StartupBlocked as error:
+            blocked = error
+        if blocked is not None:
             report_blocked(blocked)
-            raise
+            gate.block(blocked.kind)
+            yield
+            return
         job_manager.start()
         try:
             yield
@@ -326,14 +337,20 @@ def create_app(
     register_exception_handlers(app)
     # add_middleware は、あとから足したものほど外側になる。内側から順に足す。
     # 1. 想定外の例外の変換(最も内側): 経路の処理の想定外の例外を、共通の形のエラーに変える。
-    # 2. 接続制限: 宛先と送り元を確かめ、条件を満たさない要求を、経路に渡さず断る。
+    # 2. 開始できない状態の入口: 記録データベースを使えずに起動したとき、画面のファイル以外の
+    #    要求を、経路の処理に渡さずに断る。通常の状態では何もしない。接続制限より内側に置く。
+    #    開始できない状態でも、接続制限が先に効く。想定外の例外の変換より外側に置く。内側に置くと、
+    #    どの例外も必ず通るこの入口の中が、エラーログの発生場所に選ばれてしまうため。
+    # 3. 接続制限: 宛先と送り元を確かめ、条件を満たさない要求を、経路に渡さず断る。
     #    想定外の例外の変換より外側に置く。内側に置くと、どの例外も必ず通る接続制限の中が、
     #    エラーログの発生場所に選ばれてしまうため。
     #    切り替える設定は持たない。コンテナ名だけを渡す。
-    # 3. 応答ヘッダー: 読み込み先と通信先をアプリ自身に限る指示などを、HTTP の応答のすべてに付ける。
+    # 4. 応答ヘッダー: 読み込み先と通信先をアプリ自身に限る指示などを、HTTP の応答のすべてに付ける。
     #    接続制限が断った応答と、想定外の例外の応答にも付くよう、その外側に置く。
-    # 4. 処理の識別子(最も外側): 接続ログとエラーログに、同じ識別子が入る。
+    # 5. 処理の識別子(最も外側): 接続ログとエラーログに、同じ識別子が入る。
+    app.state.startup_gate = StartupGate()
     app.add_middleware(UnhandledErrorMiddleware)
+    app.add_middleware(StartupGateMiddleware, gate=app.state.startup_gate)
     app.add_middleware(AccessControlMiddleware, app_hostname=settings.app_hostname)
     app.add_middleware(SecurityHeadersMiddleware)
     app.add_middleware(TraceIdMiddleware)

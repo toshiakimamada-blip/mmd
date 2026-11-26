@@ -394,7 +394,7 @@ class TestAppStartupOrder:
         """
         【テスト対象】アプリの起動（lifespan）の、構造の確認の失敗
         【テスト内容】構造の版が新しい記録データベースがある置き場で、アプリを起動する
-        【期待結果】起動が、開始できない合図（StartupBlocked）で失敗し、途中だった会議の復旧も
+        【期待結果】開始できない状態で動き（起動は失敗しない）、途中だった会議の復旧も
                     AI モデルの開始も行わないこと。復旧の処理ログ（startup_recovery）が出ないこと。
                     データベースは書き換わらず、通訳中の会議も触れないこと
         """
@@ -409,11 +409,8 @@ class TestAppStartupOrder:
         connection.close()
         order = OrderSpy(monkeypatch)
 
-        with (
-            pytest.raises(StartupBlocked),
-            local_client(create_app(settings, model_manager=order.models())),  # type: ignore[arg-type]
-        ):
-            pass
+        with local_client(create_app(settings, model_manager=order.models())) as client:  # type: ignore[arg-type]
+            assert client.get("/api/health").status_code == 503
 
         assert order.calls == ["records"]
         assert "startup_recovery" not in capsys.readouterr().out

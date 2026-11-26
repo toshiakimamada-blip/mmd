@@ -25,6 +25,8 @@ from meeting_interpreter.records.schema import INITIAL_MEETING_TABLES
 from schema_fakes import (
     SECRET_TITLE,
     database_path,
+    disk_with,
+    open_and_close,
     seed_version_one,
     table_rows,
     user_version,
@@ -32,25 +34,6 @@ from schema_fakes import (
 )
 
 UNFINISHED_FILE_NAME = f"{BACKUP_FILE_NAME}.unfinished"
-
-
-def open_and_close(records_dir: Path, migrations, **kwargs) -> int:
-    """開いて、構造の版を読み、閉じる。"""
-
-    async def main() -> int:
-        database = RecordDatabase(records_dir, migrations=migrations, **kwargs)
-        await database.open()
-        try:
-            return database.schema_version
-        finally:
-            await database.close()
-
-    return asyncio.run(main())
-
-
-def disk_with(free: int):
-    """空きが free バイトのディスクを返す、偽の関数。"""
-    return lambda path: DiskUsage(total=free * 10, used=free * 9, free=free)
 
 
 def file_names(records_dir: Path) -> list[str]:

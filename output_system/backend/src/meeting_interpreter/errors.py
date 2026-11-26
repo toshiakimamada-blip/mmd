@@ -177,6 +177,15 @@ ROUTE_NOT_FOUND: Final = ErrorBody(
     ),
 )
 
+# アプリが「開始できない状態」のときに、画面のファイル以外の要求へ返すエラー（startup_gate.py）。
+# 記録データベースの構造を使えなかったときの状態。原因の種類は、画面へは返さず、エラーログに出す。
+STARTUP_FAILED: Final = ErrorBody(
+    category="system_error",
+    code="SYSTEM_STARTUP_FAILED",
+    message="アプリを開始できませんでした。会議の記録を保存する場所を、使える状態にできなかったためです。",
+    action="開発を担う AI へ、このエラーコードを伝えてください。",
+)
+
 # 想定外の例外に返すエラー。例外の文面は含めない。
 UNEXPECTED_ERROR: Final = ErrorBody(
     category="system_error",

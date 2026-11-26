@@ -7,16 +7,20 @@
 - broken_version_two_migrations: 版 2 の移行が、途中で失敗する一覧
   （表を作ったあとで、存在しない表を参照する）
 - seed_version_one: 版 1 の記録データベースを作り、会議 2 件（字幕・要約・質問つき）を書く
+- open_and_close: 指定した移行の一覧で、記録データベースを開いて閉じる（更新を起こす）
+- disk_with: 空きを決めた、偽のディスクの使用状況
 - table_rows・table_names・user_version: データベースのファイルを別の接続で開き、
   行・表の名前・版を読む
 """
 
 import asyncio
 import sqlite3
+from collections.abc import Callable, Sequence
 from datetime import UTC, datetime
 from pathlib import Path
 
 from meeting_interpreter.records.database import DATABASE_FILE_NAME, RecordDatabase
+from meeting_interpreter.records.disk_space import DiskUsage
 from meeting_interpreter.records.migrations import MIGRATIONS, Migration
 from meeting_interpreter.records.models import AudioSource, QuestionPhase
 from meeting_interpreter.records.schema import INITIAL_MEETING_TABLES
@@ -100,6 +104,25 @@ def seed_version_one(records_dir: Path, *, meetings: int = 2) -> list[str]:
             await database.close()
 
     return asyncio.run(main())
+
+
+def open_and_close(records_dir: Path, migrations: Sequence[Migration], **kwargs) -> int:
+    """指定した移行の一覧で、記録データベースを開き、構造の版を読んで、閉じる。"""
+
+    async def main() -> int:
+        database = RecordDatabase(records_dir, migrations=migrations, **kwargs)
+        await database.open()
+        try:
+            return database.schema_version
+        finally:
+            await database.close()
+
+    return asyncio.run(main())
+
+
+def disk_with(free: int) -> Callable[[Path], DiskUsage]:
+    """空きが free バイトのディスクを返す、偽の関数。"""
+    return lambda path: DiskUsage(total=free * 10, used=free * 9, free=free)
 
 
 def table_rows(path: Path, table: str, *, order_by: str = "rowid") -> list[tuple]:

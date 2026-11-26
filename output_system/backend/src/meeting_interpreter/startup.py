@@ -30,7 +30,7 @@
 from collections.abc import Awaitable, Callable
 from enum import StrEnum
 
-from .errors import describe_origin
+from .errors import STARTUP_FAILED, describe_origin
 from .logs import STARTUP_LOGGER, log_error
 from .meetings.recovery import RECOVERY_FAILED, RecoveryResult
 from .records.errors import (
@@ -42,9 +42,6 @@ from .records.errors import (
 
 # エラーログに書くコンポーネントの名前。
 _COMPONENT = "startup"
-
-# 開始できない状態になったときの、エラーログのエラーコード。画面へ返すエラーコードと同じ。
-STARTUP_FAILED = "SYSTEM_STARTUP_FAILED"
 
 
 class StartupFailureKind(StrEnum):
@@ -95,8 +92,9 @@ def report_blocked(blocked: StartupBlocked) -> None:
     """
     cause = blocked.__cause__ or blocked
     _, location = describe_origin(cause)
+    # エラーコードは、画面へ返すものと同じ（利用者が伝えたコードで、ログを探せる）。
     log_error(
-        STARTUP_FAILED,
+        STARTUP_FAILED.code,
         _COMPONENT,
         failure_kind=blocked.kind.value,
         exception_type=type(cause).__name__,

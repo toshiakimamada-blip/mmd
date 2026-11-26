@@ -11,8 +11,6 @@ import pytest
 from conftest import local_client
 from meeting_interpreter.app import create_app
 from meeting_interpreter.records.database import DATABASE_FILE_NAME
-from meeting_interpreter.records.errors import RecordSchemaError
-from meeting_interpreter.startup import StartupBlocked
 
 
 class SpyManager:
@@ -98,16 +96,18 @@ class TestStartup:
 
         assert seen == [1]
 
-    def test_should_refuse_to_start_when_the_database_structure_is_newer(
+    def test_should_start_in_the_blocked_state_when_the_database_structure_is_newer(
         self, settings, capsys, caplog
     ):
         """
         【テスト対象】create_app（起動）
         【テスト内容】構造の版が新しい記録データベースがある置き場で、アプリを起動する
-        【期待結果】起動が、開始できない合図（StartupBlocked。原因は RecordSchemaError）で
-                    失敗し、モデル管理部は開始されず、データベースは書き換わらないこと。起動できない
-                    理由が、エラーログ（SYSTEM_STARTUP_FAILED・原因の種類 schema_unsupported）と
-                    起動の知らせ（版の数値）に出ること
+        【期待結果】起動は失敗せず、開始できない状態で動くこと
+                    （動作の確認は SYSTEM_STARTUP_FAILED を返す）。
+                    モデル管理部は開始されず、データベースは書き換わらないこと。開始できない理由が、
+                    エラーログ（SYSTEM_STARTUP_FAILED・原因の種類 schema_unsupported）と
+                    起動の知らせ（版の数値）に出ること。開始できない状態の全体は、
+                    test_startup_blocked.py が確かめる
         """
         settings.records_dir.mkdir(parents=True)
         connection = sqlite3.connect(settings.records_dir / DATABASE_FILE_NAME)
@@ -115,15 +115,13 @@ class TestStartup:
         connection.close()
         manager = SpyManager()
 
-        with (
-            pytest.raises(StartupBlocked) as raised,
-            local_client(
-                create_app(settings, model_manager=manager)  # type: ignore[arg-type]
-            ),
-        ):
-            pass
+        with local_client(
+            create_app(settings, model_manager=manager)  # type: ignore[arg-type]
+        ) as client:
+            health = client.get("/api/health")
 
-        assert isinstance(raised.value.__cause__, RecordSchemaError)
+        assert health.status_code == 503
+        assert health.json()["code"] == "SYSTEM_STARTUP_FAILED"
         assert manager.calls == []
         assert _user_version(settings) == 99
         output = capsys.readouterr().out
