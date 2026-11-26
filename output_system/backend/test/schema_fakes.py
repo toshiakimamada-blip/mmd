@@ -6,6 +6,7 @@
 - version_two_migrations: 出荷の版 1 に、「会議のメモ」の表と、会議の列を足す版 2 を続けた一覧
 - broken_version_two_migrations: 版 2 の移行が、途中で失敗する一覧
   （表を作ったあとで、存在しない表を参照する）
+- failing_version_three_migrations: 版 2 は成功し、版 3 が失敗する一覧（更新の途中の失敗）
 - seed_version_one: 版 1 の記録データベースを作り、会議 2 件（字幕・要約・質問つき）を書く
 - open_and_close: 指定した移行の一覧で、記録データベースを開いて閉じる（更新を起こす）
 - disk_with: 空きを決めた、偽のディスクの使用状況
@@ -59,6 +60,20 @@ def broken_version_two_migrations() -> tuple[Migration, ...]:
             2,
             (*_VERSION_TWO_STATEMENTS, "INSERT INTO table_that_does_not_exist VALUES (1)"),
             meeting_tables=VERSION_TWO_MEETING_TABLES,
+        ),
+    )
+
+
+def failing_version_three_migrations() -> tuple[Migration, ...]:
+    """版 2 は成功し、版 3 が途中で失敗する一覧（表を作ったあとで、存在しない表を参照する）。
+
+    版 1 の記録を、この一覧で更新すると、版 2 までは当たるが、版 3 で失敗する。
+    """
+    return (
+        *version_two_migrations(),
+        Migration(
+            3,
+            ("CREATE TABLE extra (id INTEGER)", "INSERT INTO table_that_does_not_exist VALUES (1)"),
         ),
     )
 

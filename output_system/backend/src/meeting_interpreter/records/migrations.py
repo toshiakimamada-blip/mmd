@@ -10,15 +10,19 @@
 起動時の流れ（database.py の RecordDatabase.open が行う）
 - 保存されている版と、一覧の最後の版を比べる（check_schema_version）。
   同じなら何もしない。新しければ、記録を書き換えずに RecordSchemaError にする。
-  古ければ、既存の記録があるときは更新前の控え（backup.py）を残してから、移行を 1 つずつ当てる。
-- 移行 1 つは、1 回の確定で行う。失敗したら、その移行の変更をすべて取り消して、
-  RecordMigrationError にする。版は、確定した移行の分だけ上がる。
+  古ければ、既存の記録があるときは更新前の控え（backup.py）を残してから、未適用の移行を
+  順に、まとめて 1 回の確定で当てる。
+- 未適用の移行は、すべてまとめて 1 回の確定で行う。どれかが失敗したら、今回当てた変更を
+  すべて取り消して、RecordMigrationError にする。記録は更新の前のまま残り、版は上がらない。
 - 失敗した起動は、アプリを「開始できない状態」にする（startup.py）。
 
 構造を変える手順（版 2 以降）
 - 一覧の末尾へ Migration を足す。既存の移行は書き換えない。
 - 会議ごとの行を持つ表の一覧が変わるときは、その Migration に meeting_tables を書く。
   更新前の控えから会議を消すとき（記録の削除）に、控えの構造の版に合わせて、この一覧を使う。
+- 移行は、外部キーが有効な接続で当たる。表を作り直す（DROP TABLE して作る）移行は、
+  ON DELETE CASCADE で、子の表の行（字幕・要約・質問）を消す。作り直す手順は
+  docs/records-update.md の「版 2 以降の移行を足す手順」にある。
 - 版 2 の移行は、まだ存在しない。この仕組みを確かめるテストが、テストコードの中だけに持つ。
 """
 
@@ -144,10 +148,12 @@ def _roll_back_quietly(connection: sqlite3.Connection) -> None:
 def apply_migrations(
     connection: sqlite3.Connection, migrations: Sequence[Migration], stored_version: int
 ) -> int:
-    """保存されている版の次から、移行を順に当てる。
+    """保存されている版の次から、未適用の移行を順に当てる。
 
-    移行 1 つにつき 1 回の確定で行う。文の実行と版の更新を同じ確定に入れるため、途中で失敗したら
-    その移行の変更はすべて取り消され、版も上がらない。次の起動で同じ移行をやり直せる。
+    未適用の移行は、すべてまとめて 1 回の確定で行う。文の実行と版の更新を同じ確定に入れるため、
+    どの移行で失敗しても、今回当てた移行の変更はすべて取り消され（SQLite は、表の作成や変更も
+    取り消せる）、版も上がらない。記録は、更新の前のまま残る。成功した移行だけが残る、
+    中途半端な構造にならない。次の起動で、同じ移行をやり直せる。
 
     Args:
         connection: 手動の確定の接続（`isolation_level=None`）。確定の途中でないこと。
@@ -159,31 +165,35 @@ def apply_migrations(
 
     Raises:
         ValueError: 保存されている版が、一覧の最後の版より高いとき。
-        RecordMigrationError: 移行の文が失敗したとき。その移行の変更は取り消してあり、版は
-            上がらない。前の移行までは確定している。データベースの例外は `__cause__` に持つ。
+        RecordMigrationError: 移行の文が失敗したとき。失敗した移行より前の移行を含めて、今回当てた
+            変更はすべて取り消してあり、版は上がらない。`version` は、失敗した移行の版。
+            データベースの例外は `__cause__` に持つ。
     """
     validate_migrations(migrations)
     latest = migrations[-1].version
     if check_schema_version(stored_version, latest) is SchemaStatus.NEWER:
         raise ValueError("保存されている構造の版が、移行の一覧より新しいため、移行を当てられません")
 
-    version = stored_version
-    for migration in migrations:
-        if migration.version <= version:
-            continue
-        try:
-            # IMMEDIATE: 確定の最初に書き込みの権利を取る。ほかの接続が割り込んで、同じ移行を
-            # 二重に当てることを防ぐ。権利を取れなかったときも、移行の失敗として扱う。
-            connection.execute("BEGIN IMMEDIATE")
+    pending = [migration for migration in migrations if migration.version > stored_version]
+    if not pending:
+        return stored_version
+
+    # 失敗の報告に使う、いま当てている移行の版。確定の開始と終了で失敗したときは、最初と最後の版。
+    current = pending[0].version
+    try:
+        # IMMEDIATE: 確定の最初に書き込みの権利を取る。ほかの接続が割り込んで、同じ移行を
+        # 二重に当てることを防ぐ。権利を取れなかったときも、移行の失敗として扱う。
+        connection.execute("BEGIN IMMEDIATE")
+        for migration in pending:
+            current = migration.version
             for statement in migration.statements:
                 connection.execute(statement)
-            # PRAGMA は引数を束縛できない。値は、検証済みの一覧の整数のため、文字列に埋めてよい。
-            connection.execute(f"PRAGMA user_version = {int(migration.version)}")
-            connection.execute("COMMIT")
-        except BaseException as error:
-            _roll_back_quietly(connection)
-            if isinstance(error, sqlite3.Error):
-                raise RecordMigrationError(migration.version) from error
-            raise
-        version = migration.version
-    return version
+        # PRAGMA は引数を束縛できない。値は、検証済みの一覧の整数のため、文字列に埋めてよい。
+        connection.execute(f"PRAGMA user_version = {int(latest)}")
+        connection.execute("COMMIT")
+    except BaseException as error:
+        _roll_back_quietly(connection)
+        if isinstance(error, sqlite3.Error):
+            raise RecordMigrationError(current) from error
+        raise
+    return latest

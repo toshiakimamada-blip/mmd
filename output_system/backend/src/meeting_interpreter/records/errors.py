@@ -41,8 +41,8 @@ class RecordSchemaError(RecordSetupError):
 class RecordMigrationError(RecordSetupError):
     """記録データベースの構造の更新（移行）が失敗したときの例外。
 
-    失敗した移行の変更はすべて取り消してあり、記録は更新の前のまま残る。
-    更新の途中の版は残らない（移行は 1 つずつ確定するため、前の移行までは確定している）。
+    未適用の移行は、まとめて 1 回の確定で当てる。どれかが失敗したら、今回当てた変更はすべて
+    取り消してあり、記録は更新の前のまま残る。更新の途中の版は残らない。
     """
 
     def __init__(self, version: int) -> None:
@@ -50,7 +50,10 @@ class RecordMigrationError(RecordSetupError):
         Args:
             version: 失敗した移行の、移行後の版。
         """
-        super().__init__(f"構造を版 {version} へ更新できませんでした（記録は取り消して、元のまま）")
+        super().__init__(
+            f"構造の更新で、版 {version} への移行に失敗しました"
+            "（今回の更新はすべて取り消し、記録は更新の前のまま）"
+        )
         self.version = version
 
 

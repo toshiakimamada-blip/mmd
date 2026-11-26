@@ -26,6 +26,7 @@ from meeting_interpreter.records.migrations import (
     CURRENT_SCHEMA_VERSION,
     MIGRATIONS,
     Migration,
+    apply_migrations,
     meeting_tables_for,
 )
 from meeting_interpreter.records.schema import INITIAL_MEETING_TABLES
@@ -33,6 +34,7 @@ from schema_fakes import (
     VERSION_TWO_MEETING_TABLES,
     broken_version_two_migrations,
     database_path,
+    failing_version_three_migrations,
     seed_version_one,
     table_names,
     table_rows,
@@ -254,6 +256,69 @@ class TestMigrationFailure:
         asyncio.run(scenario())
 
 
+class TestUpdateIsAllOrNothing:
+    """未適用の移行は、まとめて 1 つの確定で当てる。途中で失敗したら、すべて取り消す。"""
+
+    def test_should_leave_the_records_at_the_version_before_the_update(self, records_dir):
+        """
+        【テスト対象】RecordDatabase.open（版 1 から版 3 への更新で、版 3 が失敗する）
+        【テスト内容】版 2 は成功し、版 3 が失敗する一覧で、版 1 の記録データベースを開く
+        【期待結果】RecordMigrationError（失敗した版は 3）になり、構造の版は 1 のまま、版 2 の表も
+                    版 3 の表も無く、記録データベースのファイルは 1 バイトも変わらないこと
+                    （成功した版 2 だけが残る、中途半端な構造にならない）
+        """
+        seed_version_one(records_dir)
+        before = database_path(records_dir).read_bytes()
+        database = RecordDatabase(records_dir, migrations=failing_version_three_migrations())
+
+        with pytest.raises(RecordMigrationError) as raised:
+            asyncio.run(database.open())
+
+        assert raised.value.version == 3
+        assert user_version(database_path(records_dir)) == 1
+        assert {"meeting_notes", "extra"}.isdisjoint(table_names(database_path(records_dir)))
+        assert database_path(records_dir).read_bytes() == before
+
+    def test_should_keep_the_backup_at_version_one_after_two_failed_starts(self, records_dir):
+        """
+        【テスト対象】更新前の控え（更新の失敗を繰り返したとき）
+        【テスト内容】版 1 から版 3 への更新が失敗する起動を、続けて 2 回行う
+        【期待結果】どちらの起動でも RecordMigrationError になり、控えは版 1 のままで、
+                    版 1 の行（会議・字幕など）を持つこと。途中の版 2 の複製が、
+                    版 1 の控えを置き換えない
+        """
+        seed_version_one(records_dir)
+        rows_before = {
+            table: table_rows(database_path(records_dir), table) for table in INITIAL_MEETING_TABLES
+        }
+
+        for _ in range(2):
+            database = RecordDatabase(records_dir, migrations=failing_version_three_migrations())
+            with pytest.raises(RecordMigrationError):
+                asyncio.run(database.open())
+
+        backup_path = records_dir / BACKUP_FILE_NAME
+        assert user_version(backup_path) == 1
+        assert "meeting_notes" not in table_names(backup_path)
+        for table in INITIAL_MEETING_TABLES:
+            assert table_rows(backup_path, table) == rows_before[table]
+
+    def test_should_apply_every_migration_in_one_commit_when_all_succeed(self, records_dir):
+        """
+        【テスト対象】RecordDatabase.open（版 1 から版 3 への更新が成功する）
+        【テスト内容】版 2 も版 3 も成功する一覧で、版 1 の記録データベースを開く
+        【期待結果】版 3 になり、版 2 の表と版 3 の表の両方があり、版 1 の行が残ること
+        """
+        seed_version_one(records_dir)
+        migrations = (*version_two_migrations(), Migration(3, ("CREATE TABLE extra (id INTEGER)",)))
+
+        version = open_and_close(RecordDatabase(records_dir, migrations=migrations))
+
+        assert version == 3
+        assert {"meeting_notes", "extra"} <= table_names(database_path(records_dir))
+        assert len(table_rows(database_path(records_dir), "meetings")) == 2
+
+
 class TestBackupFailure:
     """控えを残せない: 構造を更新せずに、開始できない状態の合図にする。"""
 
@@ -352,6 +417,89 @@ class TestMeetingTablesPerVersion:
             "subtitles",
             "meetings",
         )
+
+
+def _apply_up_to(migrations: tuple[Migration, ...], version: int) -> sqlite3.Connection:
+    """空のデータベースへ、版 1 から指定の版までの移行を当てる（外部キーは有効）。"""
+    connection = sqlite3.connect(":memory:", isolation_level=None)
+    connection.execute("PRAGMA foreign_keys = ON")
+    apply_migrations(connection, migrations[:version], 0)
+    return connection
+
+
+def _tables_with_meeting_id(connection: sqlite3.Connection) -> set[str]:
+    """meeting_id の列を持つ表の名前（実際の構造から読む）。"""
+    names = [
+        name
+        for (name,) in connection.execute(
+            "SELECT name FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite_%'"
+        )
+    ]
+    return {
+        name
+        for name in names
+        if "meeting_id"
+        in {column[1] for column in connection.execute(f'PRAGMA table_info("{name}")')}
+    }
+
+
+class TestMeetingTablesMatchTheActualStructure:
+    """移行の一覧に書いた、会議ごとの行を持つ表が、移行を当てた実際の構造と一致する。
+
+    一致しないと、更新前の控えから会議を消すときに、表を消し漏らす（削除した会議が控えに残る）、
+    または存在しない表を消そうとして失敗する。
+    """
+
+    @pytest.mark.parametrize(
+        "migrations",
+        [
+            MIGRATIONS,
+            version_two_migrations(),
+            # 版 3 は、meeting_tables を書かない（前の版と同じ）。
+            (*version_two_migrations(), Migration(3, ("CREATE TABLE extra (id INTEGER)",))),
+        ],
+        ids=["shipped", "with-version-two", "with-version-three"],
+    )
+    def test_should_list_exactly_the_tables_that_have_a_meeting_id_column(self, migrations):
+        """
+        【テスト対象】meeting_tables_for と、移行を当てた構造
+        【テスト内容】各版まで、空のデータベースへ移行を順に当て、meeting_id の列を持つ表の集まりを
+                    読む
+        【期待結果】どの版でも、その版の meeting_tables（meeting_tables_for）と同じ集まりで
+                    あること。表の名前に重複が無く、外部キーの親の表が、子の表より後ろに並ぶこと
+                    （子の表から先に消せる順）
+        """
+        for version in range(1, len(migrations) + 1):
+            connection = _apply_up_to(migrations, version)
+            expected = meeting_tables_for(migrations, version)
+
+            assert _tables_with_meeting_id(connection) == set(expected), f"版 {version}"
+            assert len(expected) == len(set(expected)), f"版 {version}"
+            position = {table: index for index, table in enumerate(expected)}
+            for table in expected:
+                for foreign_key in connection.execute(f'PRAGMA foreign_key_list("{table}")'):
+                    parent = foreign_key[2]
+                    if parent in position:
+                        assert position[parent] > position[table], f"版 {version}: {table}"
+
+    def test_should_detect_a_list_that_forgets_a_table(self):
+        """
+        【テスト対象】上のテストの検出力
+        【テスト内容】版 2 が足した表（meeting_notes）を、meeting_tables に書き忘れた一覧を調べる
+        【期待結果】実際の構造と一致しないと分かること（書き忘れを、上のテストが見つける）
+        """
+        forgetful = (
+            *MIGRATIONS,
+            Migration(
+                2,
+                version_two_migrations()[1].statements,
+                meeting_tables=INITIAL_MEETING_TABLES,
+            ),
+        )
+
+        connection = _apply_up_to(forgetful, 2)
+
+        assert _tables_with_meeting_id(connection) != set(meeting_tables_for(forgetful, 2))
 
 
 class TestShippedList:
