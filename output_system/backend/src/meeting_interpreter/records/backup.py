@@ -16,6 +16,10 @@
 - 控えを使って記録データベースへ戻す操作は、導入と更新を担う AI の手順で、アプリは行わない。
 
 会議の内容は、控えにも入る。ログには出さない（例外の文面は、固定の文と数値だけ）。
+控え（書きかけを含む）の権限は 0600（作った利用者だけが読み書きできる）。ただし、削除した会議の
+内容の、ディスクの生のブロックまでは保証しない（SQLite の `secure_delete` が上書きするのは、
+データベースのファイルの中の領域。ファイルの置き換えや、-journal の削除で解放されたブロックは、
+OS のディスクの暗号化に任せる）。
 """
 
 import asyncio
@@ -42,6 +46,9 @@ _JOURNAL_SUFFIX: Final = "-journal"
 
 # ほかの接続が書き込み中のときに、待つ時間（ミリ秒）。控えを使う接続は、控えを消す接続だけ。
 _BUSY_TIMEOUT_MS: Final = 5000
+
+# 控え（書きかけを含む）のファイルの権限。作った利用者だけが、読み書きできる。
+_BACKUP_FILE_MODE: Final = 0o600
 
 
 class UpdateBackup(Protocol):
@@ -151,7 +158,11 @@ class FileUpdateBackup:
         2. 書きかけ用の名前のファイルへ、SQLite のオンラインバックアップ
            （`Connection.backup`）で複製する。ほかの接続が書き込んでいても、一貫した複製になる
         3. 複製をディスクへ書き出し、控えの名前へ置き換える（名前の置き換えは、途中の状態が
-           見えない）。前の控えは、ここで置き換わる
+           見えない）。前の控えは、ここで置き換わる。置き換える前に、前の控えの -journal を消す
+           （前の控えの確定の途中で止まって残った -journal が、新しい控えに当てられて、
+           新しい控えを壊すのを防ぐ）
+
+        書きかけと控えの権限は 0600。
 
         失敗したときは、書きかけを消す。前の控えは、置き換える直前まで残っている。
 
@@ -172,17 +183,32 @@ class FileUpdateBackup:
             )
         try:
             self._remove_unfinished_files()
+            self._create_empty_unfinished_file()
             target = sqlite3.connect(self._unfinished_path)
             try:
                 connection.backup(target)
             finally:
                 target.close()
             _sync_file(self._unfinished_path)
+            # 前の控えの -journal を、置き換える前に消す。残ったまま置き換えると、新しい控えを
+            # 開いたときに、前の控えのページが当てられ、新しい控えが壊れる。
+            Path(f"{self.path}{_JOURNAL_SUFFIX}").unlink(missing_ok=True)
             os.replace(self._unfinished_path, self.path)
             _sync_directory(self._records_dir)
         except (sqlite3.Error, OSError) as error:
             self._remove_unfinished_quietly()
             raise UpdateBackupError("更新前の控えを残せませんでした") from error
+
+    def _create_empty_unfinished_file(self) -> None:
+        """書きかけのファイルを、権限 0600 の空のファイルとして作る。
+
+        SQLite は、既存の空のファイルを、空のデータベースとして開く。SQLite に作らせると、権限が
+        環境の既定（0644 など）になり、控えが同じ PC の別の利用者に読めてしまう。
+        """
+        descriptor = os.open(
+            self._unfinished_path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, _BACKUP_FILE_MODE
+        )
+        os.close(descriptor)
 
     def remove_unfinished(self) -> None:
         """前の起動で、作っている途中に止まった、書きかけの控えを消す。
@@ -231,10 +257,11 @@ class FileUpdateBackup:
             return
         try:
             connection = self._open_for_erase()
-        except FileNotFoundError:
-            # 確かめてから開くまでの間に、控えが無くなった。
-            return
         except sqlite3.Error as error:
+            # mode=rw で、無いファイルを開くと、SQLite は sqlite3.OperationalError を上げる。
+            # 確かめてから開くまでの間に、控えが無くなったのなら、消し済みとして扱う。
+            if not self.path.exists():
+                return
             raise UpdateBackupError("更新前の控えを開けません") from error
         try:
             self._erase_meeting_from(connection, meeting_id)
@@ -252,6 +279,8 @@ class FileUpdateBackup:
             connection.execute("PRAGMA foreign_keys = ON")
             # 消した会議の本文を、ファイルの空き領域へ残さない（記録データベースと同じ設定）。
             connection.execute("PRAGMA secure_delete = ON")
+            if connection.execute("PRAGMA secure_delete").fetchone()[0] != 1:
+                raise UpdateBackupError("更新前の控えの、削除の上書きを有効にできませんでした")
             connection.execute("PRAGMA synchronous = FULL")
         except BaseException:
             connection.close()

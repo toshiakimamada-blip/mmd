@@ -37,6 +37,16 @@ from schema_fakes import (
 TABLES = INITIAL_MEETING_TABLES
 
 
+class VanishingPath(type(Path())):  # type: ignore[misc]
+    """最初の exists() だけ True を返す Path。確かめた時点では有り、開くときには無い状態を作る。"""
+
+    calls = 0
+
+    def exists(self, **kwargs: object) -> bool:  # type: ignore[override]
+        VanishingPath.calls += 1
+        return VanishingPath.calls == 1
+
+
 def count_rows(path: Path, table: str, meeting_id: str) -> int:
     """データベースのファイルを別の接続で開き、会議の行数を数える。"""
     connection = sqlite3.connect(path)
@@ -487,22 +497,70 @@ class TestEraseMeetingDirectly:
 
         assert backup_path.read_bytes() == before
 
-    def test_should_do_nothing_when_the_backup_disappears_before_it_is_opened(
-        self, tmp_path, monkeypatch
-    ):
+    def test_should_do_nothing_when_the_backup_disappears_before_it_is_opened(self, tmp_path):
         """
         【テスト対象】FileUpdateBackup.erase_meeting（確かめてから開くまでの間に控えが無くなった）
-        【テスト内容】控えがあると確かめた直後に、開こうとすると見つからない状態にする
-        【期待結果】例外にならず、何もしないこと（控えが無いときと同じ）
+        【テスト内容】控えがあると確かめた直後に、控えが無くなった状態にする（最初の存在の確認だけ
+                    True を返す経路で、本物の sqlite3.connect を通す）。開こうとすると、SQLite が
+                    sqlite3.OperationalError（unable to open database file）を上げる
+        【期待結果】例外にならず、何もしないこと（控えが無いときと同じ。消し済みとして扱う）
+        """
+        VanishingPath.calls = 0
+        records_dir = VanishingPath(tmp_path / "records")
+        records_dir.mkdir()
+
+        asyncio.run(FileUpdateBackup(records_dir).erase_meeting("a" * 32))
+
+        assert VanishingPath.calls == 2
+        assert list(records_dir.iterdir()) == []
+
+    def test_should_report_a_backup_that_exists_but_cannot_be_opened(self, tmp_path):
+        """
+        【テスト対象】FileUpdateBackup.erase_meeting（有るが開けない）
+        【テスト内容】控えの名前にフォルダーがある置き場で、会議を消す（存在の確認は 2 回とも True）
+        【期待結果】UpdateBackupError になること（消し済みとして戻らない）
         """
         records_dir = tmp_path / "records"
-        records_dir.mkdir()
-        (records_dir / BACKUP_FILE_NAME).write_bytes(b"placeholder")
-        backup = FileUpdateBackup(records_dir)
+        (records_dir / BACKUP_FILE_NAME).mkdir(parents=True)
 
-        def vanished() -> sqlite3.Connection:
-            raise FileNotFoundError
+        with pytest.raises(UpdateBackupError):
+            asyncio.run(FileUpdateBackup(records_dir).erase_meeting("a" * 32))
 
-        monkeypatch.setattr(backup, "_open_for_erase", vanished)
+    def test_should_refuse_to_erase_when_secure_delete_does_not_take_effect(
+        self, updated, monkeypatch
+    ):
+        """
+        【テスト対象】FileUpdateBackup.erase_meeting（secure_delete の読み返し）
+        【テスト内容】控えの接続で、PRAGMA secure_delete が 1 を返さない（有効にならなかった）
+                    状態にして、会議を消す
+        【期待結果】UpdateBackupError になり、控えは 1 バイトも変わらないこと
+                    （消した会議の本文が、ファイルの空き領域に残るまま、消したことにしない）
+        """
+        records_dir, (first, _) = updated
+        backup_path = records_dir / BACKUP_FILE_NAME
+        before = backup_path.read_bytes()
+        real_connect = sqlite3.connect
 
-        asyncio.run(backup.erase_meeting("a" * 32))
+        class IneffectiveSecureDelete:
+            """secure_delete の読み返しに 0 を返す、接続の代わり。"""
+
+            def __init__(self, real: sqlite3.Connection) -> None:
+                self._real = real
+
+            def execute(self, sql: str, *args: object):  # type: ignore[no-untyped-def]
+                if sql.strip().upper() == "PRAGMA SECURE_DELETE":
+                    return self._real.execute("SELECT 0")
+                return self._real.execute(sql, *args)
+
+            def close(self) -> None:
+                self._real.close()
+
+        monkeypatch.setattr(
+            sqlite3, "connect", lambda *a, **k: IneffectiveSecureDelete(real_connect(*a, **k))
+        )
+
+        with pytest.raises(UpdateBackupError):
+            asyncio.run(FileUpdateBackup(records_dir).erase_meeting(first))
+
+        monkeypatch.undo()
+        assert backup_path.read_bytes() == before

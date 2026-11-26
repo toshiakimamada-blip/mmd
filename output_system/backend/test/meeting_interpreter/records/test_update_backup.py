@@ -9,7 +9,9 @@ Task 7.2.2 の完了条件
 """
 
 import asyncio
+import os
 import sqlite3
+import stat
 from pathlib import Path
 
 import pytest
@@ -307,6 +309,109 @@ class TestUnremovableUnfinishedFile:
 
         assert isinstance(raised.value.__cause__, sqlite3.OperationalError)
         assert calls["count"] == 2
+
+
+class TestFilePermission:
+    """控え（書きかけを含む）は、作った利用者だけが読み書きできる（権限 0600）。"""
+
+    def test_should_create_the_backup_and_the_unfinished_file_readable_only_by_the_owner(
+        self, records_dir
+    ):
+        """
+        【テスト対象】FileUpdateBackup.create（ファイルの権限）
+        【テスト内容】作るファイルの権限を削らない設定（umask 0）で、控えを残す。複製の途中
+                    （書きかけ）と、置き換えたあと（控え）の権限を調べる
+        【期待結果】どちらも 0600 であること（会議の内容を含む控えを、同じ PC の別の利用者に
+                    読ませない）
+        """
+        seed_version_one(records_dir)
+        seen: dict[str, int] = {}
+
+        class Source:
+            """複製の途中で、書きかけのファイルの権限を記録する、接続の代わり。"""
+
+            def __init__(self, real: sqlite3.Connection) -> None:
+                self._real = real
+
+            def backup(self, target: sqlite3.Connection) -> None:
+                self._real.backup(target)
+                seen["unfinished"] = stat.S_IMODE(
+                    (records_dir / UNFINISHED_FILE_NAME).stat().st_mode
+                )
+
+        real = sqlite3.connect(database_path(records_dir))
+        previous = os.umask(0)
+        try:
+            FileUpdateBackup(records_dir).create(
+                Source(real),  # type: ignore[arg-type]
+                database_path(records_dir),
+            )
+        finally:
+            os.umask(previous)
+            real.close()
+
+        assert seen["unfinished"] == 0o600
+        assert stat.S_IMODE((records_dir / BACKUP_FILE_NAME).stat().st_mode) == 0o600
+
+
+class TestStaleJournal:
+    """控えの確定の途中で止まって残った、古い -journal を、新しい控えに当てない。"""
+
+    @staticmethod
+    def _leave_a_hot_journal(backup_path: Path) -> None:
+        """控えから会議の字幕を消している途中で止まった跡（使われずに残った -journal）を作る。
+
+        確定の途中の -journal の内容を写し取り、確定を取り消したあとに、元の名前で置き直す。
+        同期を切るのは、-journal の先頭の記録の数を、確定を待たずに有効にするため。
+        """
+        journal = Path(f"{backup_path}-journal")
+        connection = sqlite3.connect(backup_path, isolation_level=None)
+        try:
+            connection.execute("PRAGMA synchronous = OFF")
+            connection.execute("BEGIN IMMEDIATE")
+            connection.execute("DELETE FROM subtitles")
+            snapshot = journal.read_bytes()
+            connection.execute("ROLLBACK")
+        finally:
+            connection.close()
+        journal.write_bytes(snapshot)
+
+    def test_should_not_apply_a_stale_journal_to_the_new_backup(self, records_dir):
+        """
+        【テスト対象】FileUpdateBackup.create（古い -journal）
+        【テスト内容】前の控えの -journal が、使われずに残っている。そのあと、記録が増えた
+                    記録データベース（字幕 302 件）から、新しい控えを残す
+        【期待結果】新しい控えの整合性の検査（PRAGMA integrity_check）が ok で、字幕が 302 件
+                    あること。
+                    古い -journal は、新しい控えを置き換える前に消える
+                    （残すと、新しい控えを開いたときに当てられ、控えが壊れる）
+        """
+        seed_version_one(records_dir, meetings=1)
+        backup = FileUpdateBackup(records_dir)
+        source = sqlite3.connect(database_path(records_dir))
+        try:
+            backup.create(source, database_path(records_dir))
+            backup_path = records_dir / BACKUP_FILE_NAME
+            self._leave_a_hot_journal(backup_path)
+            assert Path(f"{backup_path}-journal").is_file()
+            meeting_id = source.execute("SELECT meeting_id FROM meetings").fetchone()[0]
+            with source:
+                source.executemany(
+                    "INSERT INTO subtitles (meeting_id, sequence, original_text, translated_text,"
+                    " spoken_at) VALUES (?, ?, ?, NULL, 0)",
+                    [(meeting_id, number, f"Line {number}.") for number in range(3, 303)],
+                )
+            backup.create(source, database_path(records_dir))
+        finally:
+            source.close()
+
+        assert not Path(f"{backup_path}-journal").exists()
+        connection = sqlite3.connect(backup_path)
+        try:
+            assert connection.execute("PRAGMA integrity_check").fetchall() == [("ok",)]
+            assert connection.execute("SELECT COUNT(*) FROM subtitles").fetchone()[0] == 302
+        finally:
+            connection.close()
 
 
 class TestDiskSpace:
