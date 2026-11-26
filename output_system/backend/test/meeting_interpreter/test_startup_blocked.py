@@ -22,7 +22,15 @@ from fastapi.testclient import TestClient
 from starlette.websockets import WebSocketDisconnect
 
 import meeting_interpreter.app as app_module
-from conftest import APP_HOSTNAME, LOCAL_HOST, LOCAL_ORIGIN, FrontendSite, local_client
+from conftest import (
+    APP_HOSTNAME,
+    LOCAL_HOST,
+    LOCAL_ORIGIN,
+    FrontendSite,
+    local_client,
+    request_websocket_handshake,
+)
+from meeting_fakes import LOOPBACK, running_app
 from meeting_interpreter.app import create_app
 from meeting_interpreter.errors import STARTUP_FAILED
 from meeting_interpreter.jobs.manager import JobManager
@@ -243,7 +251,8 @@ class TestScreenFilesAndRefusals:
         【テスト対象】開始できない状態の入口（WebSocket の接続）
         【テスト内容】通知とふつうの音声の経路と、存在しない経路へ、WebSocket をつなぐ
         【期待結果】接続を受け付けずに、内部エラーの符号（1011）で閉じられること
-                    （閉じる理由は、エラーコードだけ）
+                    （閉じる理由は、エラーコードだけ。ASGI の上での動き。本物のサーバーでは
+                    HTTP 403 になる。下のテストで確かめる）
         """
         with local_client(blocked.build()) as client:  # type: ignore[arg-type]
             with pytest.raises(WebSocketDisconnect) as raised:
@@ -252,6 +261,19 @@ class TestScreenFilesAndRefusals:
 
         assert raised.value.code == INTERNAL_ERROR
         assert raised.value.reason == "SYSTEM_STARTUP_FAILED"
+
+    def test_should_refuse_a_real_websocket_handshake_with_http_403(self, blocked: BlockedApp):
+        """
+        【テスト対象】開始できない状態の入口（本物の uvicorn の上の WebSocket の接続要求）
+        【テスト内容】アプリを本物の uvicorn で起動し、通知の WebSocket の接続要求
+                    （アップグレード）を送る
+        【期待結果】接続を受け付ける前に閉じられ、サーバーは接続要求に HTTP 403 を返すこと
+                    （符号 1011 と理由は、相手に届かない）
+        """
+        with running_app(blocked.build()) as handle:  # type: ignore[arg-type]
+            response = request_websocket_handshake(LOOPBACK, handle.port, "/ws/events")
+
+        assert response.status == 403
 
     def test_should_stay_in_the_state_until_the_app_server_starts_again(self, blocked: BlockedApp):
         """

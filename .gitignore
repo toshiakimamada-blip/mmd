@@ -37,6 +37,11 @@ build/
 *.db-journal
 *.db-wal
 *.db-shm
+# 記録データベースと更新前の控え（拡張子 .sqlite3。控えと書きかけも含む）
+*.sqlite3
+*.sqlite3-journal
+*.sqlite3.unfinished
+*.sqlite3.unfinished-journal
 # テストとカバレッジの出力
 coverage/
 .coverage
