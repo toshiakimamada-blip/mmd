@@ -253,6 +253,62 @@ class TestUnfinishedBackup:
         assert file_names(records_dir) == [BACKUP_FILE_NAME, DATABASE_FILE_NAME]
 
 
+class TestUnremovableUnfinishedFile:
+    """書きかけの控えを消せないときは、構造を更新せずに、開始できない状態の合図にする。"""
+
+    def test_should_report_an_unfinished_path_that_cannot_be_removed(self, records_dir):
+        """
+        【テスト対象】FileUpdateBackup.remove_unfinished（消せない）
+        【テスト内容】書きかけの控えの場所に、空でないフォルダーがある置き場で、記録データベースを開く
+                    （出荷するコンテナで、控えを残す操作ができない状態を作るときと同じ作り方）
+        【期待結果】UpdateBackupError になり、記録データベースは 1 バイトも変わらず、
+                    構造の版も変わらないこと
+        """
+        seed_version_one(records_dir)
+        before = database_path(records_dir).read_bytes()
+        blocker = records_dir / UNFINISHED_FILE_NAME
+        blocker.mkdir()
+        (blocker / "keep").write_text("x")
+
+        with pytest.raises(UpdateBackupError) as raised:
+            asyncio.run(RecordDatabase(records_dir).open())
+
+        assert isinstance(raised.value.__cause__, OSError)
+        assert database_path(records_dir).read_bytes() == before
+
+    def test_should_report_the_original_failure_when_the_cleanup_also_fails(
+        self, records_dir, monkeypatch
+    ):
+        """
+        【テスト対象】FileUpdateBackup.create（複製の失敗と、書きかけの掃除の失敗が重なる）
+        【テスト内容】複製が失敗し、続く書きかけの掃除も OSError で失敗する
+        【期待結果】掃除の失敗で隠さず、複製の失敗（原因は sqlite3.OperationalError）が
+                    UpdateBackupError で上がること
+        """
+        seed_version_one(records_dir)
+        backup = FileUpdateBackup(records_dir)
+        calls = {"count": 0}
+        original = backup._remove_unfinished_files
+
+        def flaky_cleanup() -> None:
+            calls["count"] += 1
+            if calls["count"] >= 2:
+                raise PermissionError("cannot remove")
+            original()
+
+        monkeypatch.setattr(backup, "_remove_unfinished_files", flaky_cleanup)
+
+        class FullDiskSource:
+            def backup(self, target: sqlite3.Connection) -> None:
+                raise sqlite3.OperationalError("database or disk is full")
+
+        with pytest.raises(UpdateBackupError) as raised:
+            backup.create(FullDiskSource(), database_path(records_dir))  # type: ignore[arg-type]
+
+        assert isinstance(raised.value.__cause__, sqlite3.OperationalError)
+        assert calls["count"] == 2
+
+
 class TestDiskSpace:
     """控えを作る前に、ディスクの空きが、記録データベースの大きさ以上あることを確かめる。"""
 

@@ -464,3 +464,45 @@ class TestEraseMeetingDirectly:
 
         assert "meeting-secret-id" not in str(raised.value)
         assert DATABASE_FILE_NAME not in str(raised.value)
+
+    def test_should_refuse_a_table_name_that_is_not_an_identifier(self, tmp_path):
+        """
+        【テスト対象】FileUpdateBackup.erase_meeting（表の名前の検査）
+        【テスト内容】移行の一覧が、識別子の形でない表の名前（空白と引用符を含む）を持つ状態で、
+                    版 1 の控えから会議を消す
+        【期待結果】UpdateBackupError になり、控えは 1 バイトも変わらないこと
+                    （コードの値でも、SQL の文へ埋める前に形を確かめる）
+        """
+        records_dir = tmp_path / "records"
+        first, _ = seed_version_one(records_dir)
+        backup_path = records_dir / BACKUP_FILE_NAME
+        connection = sqlite3.connect(database_path(records_dir))
+        connection.execute("VACUUM INTO ?", (str(backup_path),))
+        connection.close()
+        before = backup_path.read_bytes()
+        bad = (Migration(1, ("SELECT 1",), meeting_tables=('x" WHERE 1=1; --',)),)
+
+        with pytest.raises(UpdateBackupError):
+            asyncio.run(FileUpdateBackup(records_dir, migrations=bad).erase_meeting(first))
+
+        assert backup_path.read_bytes() == before
+
+    def test_should_do_nothing_when_the_backup_disappears_before_it_is_opened(
+        self, tmp_path, monkeypatch
+    ):
+        """
+        【テスト対象】FileUpdateBackup.erase_meeting（確かめてから開くまでの間に控えが無くなった）
+        【テスト内容】控えがあると確かめた直後に、開こうとすると見つからない状態にする
+        【期待結果】例外にならず、何もしないこと（控えが無いときと同じ）
+        """
+        records_dir = tmp_path / "records"
+        records_dir.mkdir()
+        (records_dir / BACKUP_FILE_NAME).write_bytes(b"placeholder")
+        backup = FileUpdateBackup(records_dir)
+
+        def vanished() -> sqlite3.Connection:
+            raise FileNotFoundError
+
+        monkeypatch.setattr(backup, "_open_for_erase", vanished)
+
+        asyncio.run(backup.erase_meeting("a" * 32))
