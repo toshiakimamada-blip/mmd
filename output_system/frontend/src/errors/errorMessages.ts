@@ -61,6 +61,12 @@ export const ERROR_WORDINGS: Readonly<Record<string, ErrorWording>> = Object.fre
     message: '要求を処理できませんでした。',
     action: RETRY_OR_REPORT,
   },
+  // アプリサーバーが「開始できない状態」のときに返す（サーバーの errors.py の STARTUP_FAILED と同じ内容）。
+  // 画面全体に表示する（system/StartupGate.tsx）。
+  SYSTEM_STARTUP_FAILED: {
+    message: 'アプリを開始できませんでした。会議の記録を保存する場所を、使える状態にできなかったためです。',
+    action: '開発を担う AI へ、このエラーコードを伝えてください。',
+  },
   ACCESS_HOST_NOT_ALLOWED: {
     message: 'この宛先からは、アプリを利用できません。',
     action: REOPEN_WITH_LOCALHOST,

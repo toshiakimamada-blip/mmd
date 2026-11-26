@@ -6,11 +6,16 @@
  * 取らず、エラーコードから画面側の一覧（errorMessages.ts の toDisplayError）で引く。
  * 例外の文面と応答の本文（会議の内容が入りうる）は、ApiError に載せない。
  *
+ * アプリサーバーが「開始できない状態」（SYSTEM_STARTUP_FAILED）のときは、どの経路の応答でも、
+ * ApiError を投げる前に、ウィンドウへ知らせる（errors/startupFailure.ts）。画面は、どの画面も出さずに、
+ * 画面全体にエラーを表示する。
+ *
  * 接続元の制限が求める Origin は、ブラウザーが自動で付ける。画面では付けない。
  */
 
 import { ERROR_WORDINGS } from '../errors/errorMessages';
 import { type AppErrorBody, readErrorResponse, UNEXPECTED_ERROR_BODY } from '../errors/errorTypes';
+import { announceStartupFailure, STARTUP_FAILED_CODE } from '../errors/startupFailure';
 
 /** アプリサーバーを呼べなかった、または応答が使えなかったときの例外。 */
 export class ApiError extends Error {
@@ -59,7 +64,11 @@ export async function requestJson<T>(
     throw new ApiError(REQUEST_FAILED_BODY);
   }
   if (!response.ok) {
-    throw new ApiError(await readErrorResponse(response));
+    const body = await readErrorResponse(response);
+    if (body.code === STARTUP_FAILED_CODE) {
+      announceStartupFailure();
+    }
+    throw new ApiError(body);
   }
   if (parse === undefined) {
     return undefined;
