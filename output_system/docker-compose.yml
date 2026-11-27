@@ -26,6 +26,17 @@ services:
     # 起動のたびに、途中だった会議を直す（docs/operations.md）。
     # 動いていることの確認（GET /api/health を 30 秒ごとに呼ぶ HEALTHCHECK）は、Dockerfile にある。
     restart: unless-stopped
+    # コンテナのログ（アプリが標準出力へ出す JSON 1 行）の保管量の上限。
+    # 1 ファイルが max-size を超えると新しいファイルへ切り替え、ファイルが max-file を超えたら、
+    # いちばん古いファイルを消す。docker logs は、残っているファイルをまとめて読む。
+    # 切り替えの直後は、いちばん新しいファイルがほぼ空のため、確実に残るのは (max-file - 1) × max-size。
+    # 上限の根拠（測定 1 回分のログの見積もり）は docs/operations.md の「ログの上限」にある。
+    # 値を変えたら、backend/test/deployment/test_log_limit.py が、測定 1 回分が残る大きさかを確かめる。
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "5"
     ports:
       # PC のループバックにだけ公開する。ほかの PC からは届かない。
       # 左の 127.0.0.1 を省くと、すべてのアドレスへ公開されてしまう。
