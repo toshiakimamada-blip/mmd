@@ -529,3 +529,26 @@ describe('ERROR_WORDINGS for a summary interrupted by the app stopping', () => {
     expect(wording.message).not.toBe(ERROR_WORDINGS.SUMMARY_WORKER_STOPPED.message);
   });
 });
+
+describe('ERROR_WORDINGS (SYSTEM_STARTUP_FAILED)', () => {
+  /**
+   * 【テスト対象】ERROR_WORDINGS.SYSTEM_STARTUP_FAILED
+   * 【テスト内容】アプリサーバーが開始できない状態のときに返すコードの文言を調べる
+   * 【期待結果】何が起きたかと、次に行う操作（開発を担う AI へ、エラーコードを伝える）があること。
+   *            分類はシステムエラーとして画面に出せること（コードは必ず添えて表示する）
+   */
+  it('should tell the user to pass the error code to the AI in charge', () => {
+    const wording = ERROR_WORDINGS.SYSTEM_STARTUP_FAILED;
+    const display = toDisplayErrorFromCode('system_error', 'SYSTEM_STARTUP_FAILED');
+
+    expect(wording.message).toContain('アプリを開始できませんでした');
+    expect(wording.action).toContain('開発を担う AI');
+    expect(wording.action).toContain('エラーコード');
+    expect(display).toEqual({
+      category: 'system_error',
+      code: 'SYSTEM_STARTUP_FAILED',
+      message: wording.message,
+      action: wording.action,
+    });
+  });
+});

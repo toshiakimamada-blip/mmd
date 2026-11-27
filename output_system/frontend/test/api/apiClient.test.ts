@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
 import { ApiError, requestJson } from '../../src/api/apiClient';
+import { STARTUP_FAILED_EVENT } from '../../src/errors/startupFailure';
 
 /** JSON の応答を作る。 */
 function jsonResponse(body: unknown, status = 200): Response {
@@ -119,5 +120,66 @@ describe('requestJson', () => {
     const failure = await requestJson('/api/example', { method: 'GET' }, parse).catch((error: unknown) => error);
 
     expect((failure as ApiError).body.code).toBe('SYSTEM_UNEXPECTED_ERROR');
+  });
+});
+
+/**
+ * 【モジュール】src/api/apiClient（開始できない状態）
+ * アプリサーバーが「開始できない状態」（SYSTEM_STARTUP_FAILED）のとき、どの経路の応答でも、
+ * ウィンドウへ知らせる。
+ */
+describe('requestJson (startup failure)', () => {
+  /**
+   * 【テスト対象】requestJson（SYSTEM_STARTUP_FAILED の応答）
+   * 【テスト内容】503 と SYSTEM_STARTUP_FAILED の本文を返す経路を呼ぶ
+   * 【期待結果】ウィンドウへ、開始できない状態のイベントを 1 回送り、呼び出し側には ApiError を投げること
+   */
+  it('should announce the startup failure and still throw an ApiError', async () => {
+    const body = {
+      category: 'system_error',
+      code: 'SYSTEM_STARTUP_FAILED',
+      message: 'アプリを開始できませんでした。',
+      action: '開発を担う AI へ、このエラーコードを伝えてください。',
+    };
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue(jsonResponse(body, 503)));
+    const listener = vi.fn();
+    window.addEventListener(STARTUP_FAILED_EVENT, listener);
+
+    const failure = await requestJson('/api/meetings', { method: 'GET' }).catch(
+      (error: unknown) => error,
+    );
+
+    window.removeEventListener(STARTUP_FAILED_EVENT, listener);
+    expect(listener).toHaveBeenCalledTimes(1);
+    expect(failure).toBeInstanceOf(ApiError);
+    expect((failure as ApiError).body.code).toBe('SYSTEM_STARTUP_FAILED');
+  });
+
+  /**
+   * 【テスト対象】requestJson（ほかのエラーの応答）
+   * 【テスト内容】別のエラーコードの 500 と、届かないネットワークの失敗を、続けて呼ぶ
+   * 【期待結果】どちらも、開始できない状態のイベントを送らないこと
+   */
+  it('should not announce anything for other failures', async () => {
+    const listener = vi.fn();
+    window.addEventListener(STARTUP_FAILED_EVENT, listener);
+    vi.stubGlobal(
+      'fetch',
+      vi
+        .fn()
+        .mockResolvedValueOnce(
+          jsonResponse(
+            { category: 'system_error', code: 'SYSTEM_UNEXPECTED_ERROR', message: 'm', action: 'a' },
+            500,
+          ),
+        )
+        .mockRejectedValueOnce(new TypeError('Failed to fetch')),
+    );
+
+    await requestJson('/api/a', { method: 'GET' }).catch(() => undefined);
+    await requestJson('/api/b', { method: 'GET' }).catch(() => undefined);
+
+    window.removeEventListener(STARTUP_FAILED_EVENT, listener);
+    expect(listener).not.toHaveBeenCalled();
   });
 });

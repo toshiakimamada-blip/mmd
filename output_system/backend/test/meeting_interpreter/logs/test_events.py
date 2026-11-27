@@ -270,6 +270,21 @@ class TestErrorLog:
         assert "exception_type" not in entry
         assert "location" not in entry
 
+    def test_should_include_the_failure_kind_and_drop_a_free_text_one(self, capsys):
+        """
+        【テスト対象】log_error（原因の種類 failure_kind）
+        【テスト内容】英小文字の種類を渡した出力と、文を渡した出力を比べる
+        【期待結果】種類（schema_unsupported）はそのまま出ること。空白や日本語を含む文は出さず、
+                    捨てた数が dropped_field_count に出ること（会議の内容が入り込めない）
+        """
+        log_error("SYSTEM_STARTUP_FAILED", "startup", failure_kind="schema_unsupported")
+        log_error("SYSTEM_STARTUP_FAILED", "startup", failure_kind="構造が新しい the title")
+
+        accepted, dropped = read_lines(capsys)
+        assert accepted["failure_kind"] == "schema_unsupported"
+        assert "failure_kind" not in dropped
+        assert dropped["dropped_field_count"] == 1
+
     def test_should_refuse_the_info_level(self):
         """
         【テスト対象】log_error（レベルの制限）

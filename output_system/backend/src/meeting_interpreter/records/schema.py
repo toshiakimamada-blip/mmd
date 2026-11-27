@@ -178,3 +178,13 @@ INITIAL_SCHEMA: Final[tuple[str, ...]] = (
     _CREATE_QUESTION_SETS,
     _CREATE_QUESTIONS,
 )
+
+# 版 1 で、会議ごとの行（meeting_id の列）を持つ表。子の表が先、会議の表が最後。
+# 更新前の控えから会議を消すときの順（外部キーの順）。migrations.py の版 1 の移行が持つ。
+INITIAL_MEETING_TABLES: Final[tuple[str, ...]] = (
+    "questions",
+    "question_sets",
+    "summaries",
+    "subtitles",
+    "meetings",
+)

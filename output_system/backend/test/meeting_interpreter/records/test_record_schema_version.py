@@ -9,6 +9,7 @@ import sqlite3
 
 import pytest
 
+from meeting_interpreter.records.errors import RecordMigrationError
 from meeting_interpreter.records.migrations import (
     CURRENT_SCHEMA_VERSION,
     MIGRATIONS,
@@ -188,7 +189,8 @@ class TestApplyMigrations:
         """
         【テスト対象】apply_migrations
         【テスト内容】版 2 の移行の 2 つ目の文が失敗する（表を作ったあとで、存在しない表を参照する）
-        【期待結果】例外が上がり、版 2 の表は残らず、版は 1 のままであること。
+        【期待結果】RecordMigrationError（失敗した版は 2、原因は sqlite3.Error）が上がり、
+                    版 2 の表は残らず、版は 1 のままであること。
                     途中までの構造が残ると、次の起動で同じ移行をやり直せなくなる
         """
         connection = _connection()
@@ -201,11 +203,40 @@ class TestApplyMigrations:
         )
         apply_migrations(connection, migrations[:1], 0)
 
-        with pytest.raises(sqlite3.Error):
+        with pytest.raises(RecordMigrationError) as raised:
             apply_migrations(connection, migrations, 1)
 
+        assert raised.value.version == 2
+        assert isinstance(raised.value.__cause__, sqlite3.Error)
         assert _user_version(connection) == 1
         assert "second" not in _table_names(connection)
+        assert not connection.in_transaction
+
+    def test_should_roll_back_every_migration_when_a_later_one_fails(self):
+        """
+        【テスト対象】apply_migrations（版 1 から版 3 への更新で、版 3 が失敗する）
+        【テスト内容】版 1 の記録に、版 2 は成功し、版 3 が失敗する一覧を当てる
+        【期待結果】RecordMigrationError（失敗した版は 3）が上がり、版 2 の表も版 3 の表も残らず、
+                    版は 1 のままであること。成功した版 2 の変更も取り消される
+                    （未適用の移行は、まとめて 1 つの確定で当てる）
+        """
+        connection = _connection()
+        migrations = (
+            Migration(1, ("CREATE TABLE first (id INTEGER PRIMARY KEY)",)),
+            Migration(2, ("CREATE TABLE second (id INTEGER PRIMARY KEY)",)),
+            Migration(
+                3,
+                ("CREATE TABLE third (id INTEGER PRIMARY KEY)", "INSERT INTO missing VALUES (1)"),
+            ),
+        )
+        apply_migrations(connection, migrations[:1], 0)
+
+        with pytest.raises(RecordMigrationError) as raised:
+            apply_migrations(connection, migrations, 1)
+
+        assert raised.value.version == 3
+        assert _user_version(connection) == 1
+        assert _table_names(connection) == {"first"}
         assert not connection.in_transaction
 
     def test_should_refuse_to_apply_when_the_stored_version_is_newer(self):

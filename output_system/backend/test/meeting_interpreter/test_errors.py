@@ -742,3 +742,26 @@ class TestAppErrorInWebSocketDirect:
         assert closing["code"] == 1008
         assert closing["reason"] == ""
         log_lines(capsys)
+
+
+class TestStartupFailedError:
+    """アプリを開始できないときに返すエラー（SYSTEM_STARTUP_FAILED）。"""
+
+    def test_should_be_a_system_error_with_the_four_items_and_the_next_action(self):
+        """
+        【テスト対象】STARTUP_FAILED
+        【テスト内容】開始できない状態で返すエラーの本文を調べる
+        【期待結果】システムエラーで、エラーコードは SYSTEM_STARTUP_FAILED（領域_出来事の形）。
+                    何が起きたかと、次に行う操作（開発を担う AI へ、エラーコードを伝える）が
+                    空でなく、4 項目だけを持つこと。会議の内容を含まないこと
+        """
+        from meeting_interpreter.errors import STARTUP_FAILED
+
+        body = STARTUP_FAILED.model_dump()
+
+        assert set(body) == FOUR_ITEMS
+        assert body["category"] == "system_error"
+        assert body["code"] == "SYSTEM_STARTUP_FAILED"
+        assert body["message"]
+        assert "開発を担う AI" in body["action"]
+        assert "エラーコード" in body["action"]

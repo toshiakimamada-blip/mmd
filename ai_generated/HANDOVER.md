@@ -19,8 +19,9 @@ output_system/
 ├── backend/
 │   ├── pyproject.toml, uv.lock
 │   ├── src/meeting_interpreter/
-│   │   ├── app.py            # create_app: ミドルウェアと経路の登録を 1 か所にまとめる。_lifespan が startup.py の起動の順序を呼ぶ
-│   │   ├── startup.py        # run_startup: 起動の順序（記録データベースの確認と更新 → 途中だった会議の復旧 → AI モデルの確認と入手の開始）。順序だけを決め、前の失敗で後ろを行わない。使い方は docs/operations.md
+│   │   ├── app.py            # create_app: ミドルウェアと経路の登録を 1 か所にまとめる。_lifespan が startup.py の起動の順序を呼び、記録データベースを使えなければ開始できない状態にする。控え（FileUpdateBackup）を RecordDatabase と RecordStore の両方へ渡す。`migrations` 引数でテストが版 2 の移行を渡せる
+│   │   ├── startup.py        # run_startup: 起動の順序（記録データベースの確認と更新 → 途中だった会議の復旧 → AI モデルの確認と入手の開始）。順序だけを決め、前の失敗で後ろを行わない。1 つ目の失敗は原因の種類つきの `StartupBlocked`（`StartupFailureKind`）にして返し、`report_blocked` がエラーログ `SYSTEM_STARTUP_FAILED` を 1 回出す。使い方は docs/operations.md
+│   │   ├── startup_gate.py   # 開始できない状態: `StartupGate`（状態の持ち主）と `StartupGateMiddleware`（画面のファイル以外の要求を 503 `SYSTEM_STARTUP_FAILED` で断り、WebSocket を閉じる。接続制限の内側・想定外の例外の変換の外側）。使い方は docs/records-update.md
 │   │   ├── frontend.py       # 配信部（SPA の配信）
 │   │   ├── access.py         # 接続制限（宛先 Host と送り元 Origin の判定。HTTP も WebSocket も judge_access 1 つ）
 │   │   ├── security_headers.py # 応答ヘッダー（CSP・nosniff・Referrer-Policy・X-Frame-Options）
@@ -36,7 +37,7 @@ output_system/
 │   │   ├── worker_ipc.py, worker_client.py # 2 つのワーカー共通の枠の読み書き・出力の書き込み・親側のプロセス管理（固まったワーカーの強制終了を含む）
 │   │   ├── generation/       # 生成ワーカー（要約と質問を作る別のプロセス）。protocol.py（メッセージの型）、client.py（親側）、entry.py/__main__.py（子の入口。通信を断つ備え）、worker.py（待ち行列・中断・割り当ての反映）、pipeline.py（ブロック・中間メモ・統合・作り直し）、prompts.py（指示の文面・出力の形）、results.py（出力の検証）、inputs.py（ブロック分けと質問の入力の組み立て。依頼を作る側が使う）、cpu.py、engines.py/llama.py/fake.py（差し替え口・本物・偽）、locations.py、settings.py。使い方・測定値は docs/generation.md
 │   │   ├── jobs/             # 作成ジョブ管理部（要約と質問の作成を 1 件ずつ決めた順に実行）。models.py（種類・状況・待ち時間 `JobTimeline`）、registry.py（メモリの上の置き場・重複の判定。鍵つき）、policy.py（実行順の規則。純粋な関数。見直すときはここだけ）、manager.py（管理のタスク。生成ワーカーの起動・停止・依頼・中断・失敗・処理ログ）、workers.py（生成ワーカーの起動の入口。テストは偽のエンジンを渡す）、outcomes.py（結果の受け取り先の窓口）、summary_requests.py（要約を作る依頼の受け付け。POST と会議の終了の直後）、summary_outcomes.py（要約の保存と、完了・要約失敗への状態の変更）、meeting_state.py（`meeting.state_changed` の通知）、notices.py（`job.*` の通知）、errors.py（`SUMMARY_*`・`QUESTION_*`）。使い方は docs/jobs.md
-│   │   ├── records/          # 記録保存部。database.py（接続・構造の版の確認・専用の実行器）、migrations.py（版の一覧と移行）、schema.py（版 1 の 5 つの表・桁の上限・区分コード）、models.py（Meeting・Subtitle・区分）、times.py（UTC のミリ秒の変換）、store.py（会議・字幕・要約の保存と読み出し・失敗の変換とエラーログ。`save_summary` が要約の完成の 1 回の確定）、errors.py（RecordSchemaError と RecordError 系）
+│   │   ├── records/          # 記録保存部。database.py（接続・構造の版の確認・専用の実行器）、migrations.py（版の一覧と移行。`Migration.meeting_tables` が版ごとの会議の表、移行の失敗は `RecordMigrationError`）、backup.py（更新前の控え `FileUpdateBackup`: 起動時に残す `create`・書きかけの掃除 `remove_unfinished`・記録の削除で先に消す `erase_meeting`）、schema.py（版 1 の 5 つの表・桁の上限・区分コード）、models.py（Meeting・Subtitle・区分）、times.py（UTC のミリ秒の変換）、store.py（会議・字幕・要約の保存と読み出し・失敗の変換とエラーログ。`save_summary` が要約の完成の 1 回の確定）、errors.py（RecordSetupError 系 = RecordSchemaError・RecordMigrationError・UpdateBackupError と、RecordError 系）
 │   │   ├── models/           # モデル管理部。definition.py（定義の検証）、store.py（置き場・一致の確認）、download.py（唯一の外向きの通信）、hosts.py（通信を許すホスト）、fetch.py（確認→入手の流れ）、manager.py（準備状況）、failure.py（失敗の原因）
 │   │   │   └── conversion/   # 翻訳モデルの変換。アプリサーバー側: service.py（管理部への口）・process.py（起動と見届け）・receipt.py（控えと判定）・layout.py・protocol.py。変換プロセス側: worker.py・network_guard.py・sandbox.py・safe_torch.py
 │   │   ├── meetings/         # 会議管理部。transitions.py（遷移規則の表）、manager.py（開始・終了の窓口、進行中は 1 件）、session.py（会議 1 件の音声・字幕・終了・中断・ワーカーの起動し直し）、inputs.py、errors.py、error_notices.py（同じエラーコードの通知を間隔につき 1 件に絞る `ErrorNoticeThrottle`）、workers.py（ワーカーの起動の入口。テストは偽のエンジンを渡す）、recovery.py（起動時の復旧 `recover_meetings`: 通訳中 → 中断、要約作成中 → 要約失敗。入口は `MeetingManager.recover_on_startup`）。使い方は docs/meetings.md
@@ -188,6 +189,14 @@ output_system/
 - 画面の `useSubtitleErrorNotices` は `SUBTITLE_ERROR_CODES` のコードだけを表示する。ほかの `error.occurred`（終了の保存の失敗 `RECORD_SAVE_FAILED` は終了の応答のエラーで出る。通訳ワーカーを起動し直せなかった `SYSTEM_INTERPRETER_UNAVAILABLE`、要約・質問の失敗 `SUMMARY_*`・`QUESTION_*`）は、画面で表示していない（要約・質問の失敗は記録の画面が領域の中で出す）。`SYSTEM_INTERPRETER_UNAVAILABLE`（通訳ワーカーを起動し直せず、会議を中断にした）を「会議中」で出す作業は、バックログのタイトルに見当たらない（会議の中断で記録へ移る動きも未実装のまま）。`SUBTITLE_` のコードを足したら、`SUBTITLE_ERROR_CODES` と `errorMessages.ts` の両方へ足す（テストが食い違いを検出する）
 - `error.occurred` の画面側の読み替えは、サーバーが書いた `message`・`action` を捨て、会議番号・分類・コードだけを持つ（例外の文面や会議の内容が画面へ出る余地を断つ）
 
+- 開始できない状態（PBI #139）: 記録データベースを使えない起動（構造が新しい・控えを残せない・移行の失敗・開けない）は、アプリサーバーを止めず、`StartupGateMiddleware` が画面のファイル以外を 503 `SYSTEM_STARTUP_FAILED` で断る。止めると `restart: unless-stopped` で再起動を繰り返し、画面へ理由を返せないため。作成ジョブ管理部・復旧・モデル管理部を始めず、ワーカーも起動しない。途中だった会議の復旧の失敗は、開始できない状態にせず起動を失敗させたまま（基本設計書の対象は記録データベースの構造だけ）。ゲートは、想定外の例外の変換より外側に置く（内側だと、エラーログの発生場所がゲートになる）
+- 移行は、未適用の分をまとめて 1 回の確定で当てる（`apply_migrations`）。1 つずつ確定すると、版 1 から版 3 への更新で版 3 が失敗したとき、版 2 のまま残り、次の起動で版 2 の複製が版 1 の控えを置き換える。外部キーが有効な接続で当たるため、表を作り直す（`DROP TABLE`）移行は `ON DELETE CASCADE` で子の表の行を消す。手順と注意は `docs/records-update.md`（確定の中では `PRAGMA foreign_keys` が効かない。作り直す移行を足すときは、先に `apply_migrations` へ外部キーの前後処理を足す）
+- 更新前の控え: 同じボリュームの `records.before-update.sqlite3` 1 世代。`Connection.backup` で複製 → `.unfinished` の名前で作ってから名前を置き換える（途中の状態が控えの名前にならない）。構造が古く、既存の記録がある（版 1 以上）ときだけ作る（空の複製で前の控えを置き換えない）。空き確認は「記録データベースの大きさ以上」。`RecordDatabase` は、控えの実装を省略すると既定の `FileUpdateBackup` を使う（控えを残さずに更新する組み立てを作れない）
+- 控えを置き換える前に、前の控えの `-journal` を消す（確定の途中で止まって残った古い `-journal` が、新しい控えに当たって壊すため。SQLite 公式 howtocorrupt の 1.4 節）。控えと書きかけは 0600（空の 0600 のファイルを先に作ってから SQLite に複製させる）。`erase_meeting` は `secure_delete` を読み返し、1 でなければ失敗にする。ディスクの生のブロックは保証せず、OS のディスク暗号化に任せる
+- 記録の削除は、控えから先に消す（`FileUpdateBackup.erase_meeting`）。控えの `user_version` から、`Migration.meeting_tables`（版ごとの、会議の行を持つ表。子の表が先）を引く。版を知らない控えは、消さずに失敗にする。`RecordStore(update_backup=...)` を省くと、警告なしで控えの段を飛ばすため、`create_app` が必ず渡す（テストが `app.state.update_backup` の同一性と、控えを持つアプリでの削除で確かめる）
+- 画面の `StartupGate`（`main.tsx` が `RouterProvider` を包む）: 開いたとき `GET /api/health` を 1 回呼び、`SYSTEM_STARTUP_FAILED` なら画面全体のエラー。調べ終わるまで画面を出さない。つながらない・ほかのエラーは通常の画面（つながらないことの表示は枠が受け持つ）。API の応答でも切り替える（`requestJson` がウィンドウへイベントを送る）。表示中は 5 秒ごとに動作の確認を呼び直し、200 で画面を読み込み直す（更新された版の画面になるため）
+- 開始できない状態の `/api/health` は 503 のため、コンテナは約 1.5 分で `unhealthy` になる（再起動はしない）。導入と更新を担う AI は、`docker compose ps` と `docker logs | grep SYSTEM_STARTUP_FAILED` で気づける
+
 ## はまりポイント
 - `.gitignore` の `tools/`（gaido 管理）が `output_system/tools/` にも当たる。`!/output_system/tools/` で打ち消している
 - 環境変数 `COMPOSE_PROJECT_NAME` が設定済みのため、compose の `name:` は効かない。ボリュームは `name:` で固定名にしている
@@ -291,6 +300,11 @@ output_system/
 - 中断の画面の確認は、「会議の準備」から会議を始めて字幕が 3 件以上になってからアプリサーバーを止める。止めた直後は通知の接続が拒まれ、コンソールに `ERR_CONNECTION_REFUSED` が 1 件出る（画面がつなぎ直す間の想定どおりの出力）
 - 起動の順序や復旧を確かめるテストで、順序を記録するときは `RecordDatabase.open`・`MeetingManager.recover_on_startup` を `monkeypatch` で包んで、本物を呼んだうえで記録する（`test/meeting_interpreter/test_startup.py`）。順序を入れ替えて 4 件が落ちることを確かめた
 
+- 出荷するイメージには版 2 の移行が無いため、コンテナでは「古い構造の更新」と「ディスク不足」を作れない。テスト用の移行は `backend/test/schema_fakes.py` にだけある。コンテナで開始できない状態を作るには、停止して `docker compose run --rm --no-deps -T --entrypoint python3 app -c "..."` で `PRAGMA user_version = 2`（構造が新しい）、書きかけの控えの場所に空でないフォルダー（`backup_failed`）、`records.sqlite3` を別の内容にする（`records_unavailable`）。ボリュームの操作は `docker run` ではなく、この `docker compose run` を使う。ファイルを戻すときは、`tar --owner=10001 --group=10001 --numeric-owner ... | docker cp - <コンテナ>:/var/lib/mmd/records/` にする（ホストへ `docker cp` で出すと所有者が root になり、そのまま戻すと app が書けない）
+- 確認の前に `docker compose stop app` して記録の置き場を複製し、SHA-256 を控える。確認のあと、複製から戻して SHA-256 を突き合わせる（通常の起動は記録を書き換えない。復旧が 0 件のとき）
+- `describe_origin` は、アプリのモジュールで最も奥の場所を選ぶ。経路の外で必ず通るミドルウェアを、想定外の例外の変換の内側に置くと、エラーログの発生場所がそのミドルウェアになる（`test_errors.py` が落ちて気づいた）
+- Vitest の `MeetingRecordCopy.test.tsx`「約 1,500 件」は、全体を `--coverage` 付きで流すと 5 秒の時間切れになることがある（単独では通る）
+
 ## 実装済み機能
 - PBI #2: コンテナの起動、共通の枠と 4 画面の骨組み、`GET /api/health`、配信部、名前付きボリューム 2 つ、自動再起動
 - PBI #7: 設定の読み込み（環境変数と調整値）、3 種類のログ（標準出力・許可リスト）、共通のエラーの形（サーバーと画面）、お知らせ帯・7 つのエラー表示パターン・確認の表示の部品、対応していないブラウザーの案内
@@ -320,3 +334,4 @@ output_system/
 - PBI #88: 処理の一部が失敗しても、会議が続く。文字起こしの失敗（区切りを飛ばし、お知らせ帯に `SUBTITLE_TRANSCRIPTION_FAILED`。同じ失敗が続いても、調整値 `error_notice_interval_seconds` の間隔につき 1 件）、翻訳の失敗（日本語訳が空の字幕を保存して表示。元からあった動きを、テストで確かめた）、字幕の保存の失敗（その字幕を送らず、順番を使わず、お知らせ帯に `SUBTITLE_SAVE_FAILED`。画面に出た字幕は記録と一致し、順番に欠番が出ない）。画面は `error.occurred` を購読する部品（`useSubtitleErrorNotices`）を足した。出荷するコンテナで、保存の失敗（別プロセスの書き込みのロック）を確かめた（`docs/live-screen.md`）。文字起こしと翻訳の失敗は、実機では起こせず、結合テストで代えた。要約・質問の作成の失敗など、字幕の処理と会議の中断以外の `error.occurred` を「会議中」で表示する作業、保存の失敗が続くときのディスクの空きの警告を会議中に出す作業（いまのディスクの空きの警告は、一覧と準備の画面だけ）は含まない
 - Issue #191: 「会議中」の画面が、会議の中断に気づいて「会議の記録」へ移る（`useMeetingInterruption`）。契機は `error.occurred`（`SYSTEM_INTERPRETER_UNAVAILABLE`）、`meeting.state_changed`（中断）、通知のつなぎ直しのときの会議の記録の読み直し、接続が閉じたあとの取り込みのやり直し（`AudioConnectionClosedError`）。理由が届かないときのお知らせは、画面が決めるコード `MEETING_CONNECTION_LOST`。アプリサーバーは、起動し直せないときのエラーを、状態の変化より先に送る。出荷するコンテナで、通訳ワーカーを繰り返し強制終了して確かめた（`docs/live-screen.md`「会議の中断の確認」）。アプリが止まったあとの中断は、起動時の復旧（Issue #135）のあとに、出荷するコンテナで確かめた（`docs/operations.md`）
 - PBI #135: アプリが止まっても、途中だった会議が正しい状態に直る。起動のたびに、通訳中の会議が中断（終了日時 = 最後の字幕の話された時刻。字幕が無ければ開始日時）に、要約作成中の会議が要約失敗（`SUMMARY_INTERRUPTED`。前の要約は残る）に直り、件数が処理ログ `startup_recovery` に出る。起動の順序が、記録データベースの確認と更新 → 途中だった会議の復旧 → AI モデルの確認と入手の開始になる（前の段の失敗で後ろを行わない）。自動の再起動（`restart: unless-stopped`）を、出荷するコンテナで確かめた（強制終了から画面を開けるまで 0.9〜1.5 秒、14 回）。開いていた「会議中」の画面が、再起動のあと中断に気づいて「会議の記録」へ移ることを確かめた（`docs/operations.md`）。記録データベースの構造の更新前の控えと「開始できない状態」は含まない（PBI 7.2）
+- PBI #139: 記録データベースの構造を安全に更新できる。起動時に版を比べ（同じ・空・古い・新しい）、古ければ更新前の控え（`records.before-update.sqlite3`、1 世代）を残してから、未適用の移行をまとめて 1 回の確定で当てる（途中で失敗したら、すべて取り消す）。控えを残せない・移行の失敗・版が新しい・開けないときは、記録を書き換えずに「開始できない状態」（接続制限部と配信部だけが動く。画面のファイル以外は 503 `SYSTEM_STARTUP_FAILED`、WebSocket は閉じる。ワーカー・作成ジョブ管理部・復旧・モデル管理部は動かない）。画面は画面全体にエラーを表示し、通常の状態で起動し直すと自動で読み込み直す。記録の削除は控えから先に消す。使い方・確かめた結果は `output_system/docs/records-update.md`

@@ -3,6 +3,7 @@ import { createRoot } from 'react-dom/client';
 import { RouterProvider } from 'react-router/dom';
 
 import { createAppRouter } from './router';
+import { StartupGate } from './system/StartupGate';
 import './styles/copy.css';
 import './styles/frame.css';
 import './styles/list.css';
@@ -19,6 +20,9 @@ if (root === null) {
 
 createRoot(root).render(
   <StrictMode>
-    <RouterProvider router={createAppRouter()} />
+    {/* アプリサーバーが開始できない状態のとき、どの画面も出さずに、画面全体にエラーを表示する */}
+    <StartupGate>
+      <RouterProvider router={createAppRouter()} />
+    </StartupGate>
   </StrictMode>,
 );

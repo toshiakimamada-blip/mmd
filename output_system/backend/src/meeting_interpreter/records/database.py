@@ -35,6 +35,7 @@ from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Final, TypeVar
 
+from .backup import FileUpdateBackup, UpdateBackupWriter
 from .errors import RecordSchemaError
 from .migrations import (
     MIGRATIONS,
@@ -93,12 +94,21 @@ class RecordDatabase:
     `await close()` で閉じる。
     """
 
-    def __init__(self, records_dir: Path, *, migrations: Sequence[Migration] = MIGRATIONS) -> None:
+    def __init__(
+        self,
+        records_dir: Path,
+        *,
+        migrations: Sequence[Migration] = MIGRATIONS,
+        update_backup: UpdateBackupWriter | None = None,
+    ) -> None:
         """
         Args:
             records_dir: 記録データベースを置く場所（名前付きボリュームのマウント先）。
                 無ければ、開くときに作る。
             migrations: 移行の一覧。既定はアプリに同梱のもの。テストが、小さな構造を渡すために使う。
+            update_backup: 構造を更新する前に、更新前の控えを残す相手。省略すると、記録の置き場に
+                控えを残す既定の実装（FileUpdateBackup）を使う。控えを残さずに構造を更新する組み立ては、
+                作れない。テストが、控えの失敗を起こす偽物を渡すために使う。
 
         Raises:
             ValueError: 移行の一覧が、版 1 から欠番なく並んでいないとき。
@@ -106,6 +116,9 @@ class RecordDatabase:
         validate_migrations(migrations)
         self._records_dir = records_dir
         self._migrations = tuple(migrations)
+        self._update_backup: UpdateBackupWriter = update_backup or FileUpdateBackup(
+            records_dir, migrations=self._migrations
+        )
         self._executor: ThreadPoolExecutor | None = None
         # 接続は実行器のスレッドの中で作り、そこでだけ使う。
         self._connection: sqlite3.Connection | None = None
@@ -128,13 +141,20 @@ class RecordDatabase:
         return self._schema_version
 
     async def open(self) -> None:
-        """記録データベースを開く。空なら版 1 の構造を作り、古ければ移行を当てる。
+        """記録データベースを開く。空なら版 1 の構造を作り、古ければ、控えを残してから移行を当てる。
+
+        構造の版とアプリの版を比べる。同じなら、何もしない。新しければ、書き換えずに失敗にする。
+        古ければ、既存の記録があるとき（版 1 以上）は、更新前の控えを残してから、未適用の移行を
+        まとめて 1 回の確定で当てる（途中で失敗したら、すべて取り消す）。
+        空のデータベース（版 0）は、控えを残さずに、版 1 の構造を作る。
 
         Raises:
             RecordSchemaError: 構造の版が新しいとき。または、このアプリが作ったものでないとき。
                 データベースは書き換えない。
-            sqlite3.Error: データベースを開けない・移行に失敗したとき
-                （ディスクがいっぱい・破損など）。
+            UpdateBackupError: 更新前の控えを残せなかったとき。構造は更新せず、記録は元のまま。
+            RecordMigrationError: 移行に失敗したとき。今回の更新で当てた変更は、すべて
+                取り消してある。
+            sqlite3.Error: データベースを開けないとき（ディスクがいっぱい・破損など）。
             OSError: 置き場を作れないとき。
             RuntimeError: すでに開いているとき。
         """
@@ -153,6 +173,8 @@ class RecordDatabase:
     def _open_in_thread(self) -> None:
         """実行器のスレッドの中で、接続を作り、構造の版を確かめて、必要な移行を当てる。"""
         self._records_dir.mkdir(parents=True, exist_ok=True)
+        # 前の起動で、控えを作っている途中に止まったときの、書きかけを消す（構造の版によらず）。
+        self._update_backup.remove_unfinished()
         # isolation_level=None: 確定の開始と終了（BEGIN・COMMIT・ROLLBACK）を、こちらで明示する。
         # Python の自動の確定は、DDL の前後で確定のしかたが変わり、1 回の確定にまとめにくい。
         connection = sqlite3.connect(self.path, isolation_level=None)
@@ -171,11 +193,12 @@ class RecordDatabase:
                     "記録データベースに表がありますが、構造の版が記録されていません"
                     "（このアプリが作ったものではないため、使えません）"
                 )
-            version = (
-                apply_migrations(connection, self._migrations, stored)
-                if status is SchemaStatus.OLDER
-                else stored
-            )
+            version = stored
+            if status is SchemaStatus.OLDER:
+                if stored >= 1:
+                    # 既存の記録がある。構造を更新する前に、控えを残す。残せなければ、更新しない。
+                    self._update_backup.create(connection, self.path)
+                version = apply_migrations(connection, self._migrations, stored)
         except BaseException:
             connection.close()
             raise
