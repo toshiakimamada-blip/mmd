@@ -56,7 +56,7 @@ flowchart TD
 - 確定の間、SQLite は、消す前のページ（会議の内容を含む）を、控えの `-journal` に一時的に書きます。確定が終わると、SQLite が `-journal` を消します。消した `-journal` と、置き換えて不要になった前の控え、書きかけのファイルが使っていたディスクのブロックは、アプリが上書きしません。記録データベースの `-journal` と、削除で解放されたブロックも同じです。
 - ディスクの生のブロックまでは、アプリは保証しません。PC のディスクの暗号化（非機能要件設計書「保存する記録の暗号化」の「PC のロックと、ディスクの保護に頼ります」）に任せます。控えのファイルの権限 0600 は、同じ PC の別の利用者に読ませないための措置です。
 
-控えを記録データベースへ戻す操作は、アプリは行いません。導入と更新を担う AI が手順として行います（非機能要件設計書「前の版へ戻すとき」）。戻すと、更新後に作られた記録と、更新後に変わった記録が失われます。
+控えを記録データベースへ戻す操作は、アプリは行いません。導入と更新を担う AI が手順として行います（非機能要件設計書「前の版へ戻すとき」）。戻すと、更新後に作られた記録と、更新後に変わった記録が失われます。手順と、失われる会議を数えて戻す道具（`tools/update_backup.py`）は、[docs/operations.md](operations.md)の「前の版へ戻す」にあります。
 
 ## 開始できない状態
 
@@ -125,6 +125,10 @@ docker logs <コンテナ名> 2>&1 | grep SYSTEM_STARTUP_FAILED
    - 表を作り直さずに済む `ALTER TABLE`（`ADD COLUMN`・`RENAME COLUMN`・`DROP COLUMN`・`RENAME TO`）で書けるなら、そちらにします。
    - 作り直しが要るときは、SQLite の手順（[Making Other Kinds Of Table Schema Changes](https://www.sqlite.org/lang_altertable.html#otheralter)）に従います。外部キーを無効にしてから確定を始め、新しい表（`new_X`）へ行を写し、古い表を `DROP TABLE` して、`ALTER TABLE new_X RENAME TO X` で名前を戻します。確定の前に `PRAGMA foreign_key_check` で、外部キーが壊れていないことを確かめ、確定してから外部キーを有効に戻します。
    - いまの `apply_migrations` は、確定の前に外部キーを無効にしません。この手順を使う移行を足すときは、先に `apply_migrations` へ、その前後の処理を足す作業が要ります（いまは足していません）。足すまで、`meetings` と `question_sets` を作り直す移行は書かないでください。
+6. 控えへ戻す道具（`tools/update_backup.py`）の比べ方を、見直します。道具は、控えにある列だけで、会議の行を比べます。
+   - 移行が、利用者の書く値を持つ列を足すなら（例: 会議のメモ）、その値だけが変わった会議を、道具は数えません。失われる会議の件数が少なく出るため、比べ方を直します。
+   - 移行が、既存の列の値の表し方を変えるなら、内容を変えていない会議も「変わった会議」に数えます。件数が多く出ることを、手順（[docs/operations.md](operations.md)）の利用者への説明に足します。
+   - `backend/test/operations_tools/test_update_backup_tool.py` に、その移行の更新を足して確かめます。
 
 ## 出荷するコンテナでの確認（2026-11-26）
 
@@ -169,4 +173,5 @@ docker logs <コンテナ名> 2>&1 | grep SYSTEM_STARTUP_FAILED
 | `backend/test/meeting_interpreter/test_app_delete_with_backup.py` | 控えを持つアプリで、HTTP で削除して、控えからも消えること。渡し忘れで落ちること |
 | `backend/test/meeting_interpreter/test_startup_blocked.py` | 開始できない状態（4 つの原因）の応答・接続制限・ワーカー無し・記録を書き換えない・ログ 1 回 |
 | `backend/test/meeting_interpreter/test_startup.py` | 起動の順序。記録データベースの失敗の合図（原因の種類）。復旧の失敗は合図にしないこと |
+| `backend/test/operations_tools/test_update_backup_tool.py` | 控えへ戻す道具（`tools/update_backup.py`）。更新の直後は 0 件。作られた会議と変わった会議（控えに無い表の行・字幕の追加）を数えること。削除した会議・控えに無い列を数えないこと。書き換えないこと・会議の内容を出さないこと。了承した件数との不一致・控えが無い・壊れた控え・版の逆転で止まること。戻したあとに前の版が開けること |
 | `frontend/test/system/StartupGate.test.tsx` | 画面全体の表示。API の応答での切り替え。表示を残すこと。通常の状態へ戻ったときの読み込み直し |

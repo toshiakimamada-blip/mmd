@@ -14,3 +14,12 @@ docker logs toshiakimamada-blip-mmd-output-system 2>&1 | python3 -I tools/summar
 ```
 
 区間の規則の適用と作成時間の集計は、性能の測定を扱う後続の作業で、この道具に足します。
+
+| 道具 | 用途 |
+|---|---|
+| `update_backup.py` | 更新前の控え（`records.before-update.sqlite3`）と記録データベースの状態を調べ、控えへ戻すと失われる会議を数え（`inspect`）、利用者が了承した件数のときだけ控えを記録データベースへ戻します（`restore`）。標準ライブラリだけで動き、コンテナの Python で実行します。使い方と手順は、`../docs/operations.md` の「前の版へ戻す」にあります |
+
+```bash
+# output_system/ で実行する。restore の前に、アプリのコンテナを止めておく
+docker compose run --rm --no-deps -T --entrypoint python3 app -I - inspect < tools/update_backup.py
+```
